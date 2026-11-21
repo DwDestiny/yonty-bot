@@ -1,0 +1,6 @@
+_tmp/
+__pycache__/
+*.pyc
+node_modules/
+# 实例目录不进仓库
+instances/
