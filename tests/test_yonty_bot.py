@@ -886,7 +886,55 @@ class TaskTest(unittest.TestCase):
         self.run_with(bindir, b)
         args = json.loads((wt / 'args').read_text().splitlines()[-1])
         self.assertIn('--fork-session', args); self.assertEqual(args[args.index('--resume') + 1], ta['session_id'])
-        self.assertIn('开发', self.b.team_view())
+        self.assertIn('主线', self.b.team_view())
+
+    def test_one_owner_per_thing_with_record(self):
+        notes = ('做完了\\n[交接]\\n现状：登录走 OAuth\\n入口 auth.py\\n待办：刷新令牌\\n决定：不用 cookie，因为要跨域\\n'
+                 '约定：接口都返回 JSON\\n通知 支付：用户 ID 改成字符串了\\n坑：测试要先起 redis')
+        body = ('sys.stdin.read()\nsid = sys.argv[sys.argv.index("--session-id") + 1]\n'
+                'print(json.dumps({"type": "result", "result": "' + notes + '", "is_error": False, "total_cost_usd": 1, "session_id": sid}))\n')
+        bindir = self.fake_bin(body)
+        self.t.T['sibling_warm_min'] = 55
+        self.addCleanup(self.t.T.__setitem__, 'sibling_warm_min', 0)
+        a = self.new_task(thing='登录', model='sonnet'); self.run_with(bindir, a)
+        ta = self.t.load(a)
+        s = self.t.sibling(ta)
+        self.assertEqual(s['now'], '登录走 OAuth\n入口 auth.py'); self.assertEqual(s['todo'], '刷新令牌')
+        self.assertEqual([d['text'] for d in s['decisions']], ['不用 cookie，因为要跨域'])
+        self.assertIn('测试要先起 redis', self.t.sibling_notes(ta))
+        # 同一件事接着同一个负责人；别的事、主线各是各的
+        self.assertEqual(self.t.sibling_fork(self.t.load(self.new_task(thing='登录', model='sonnet'))), ta['session_id'])
+        pay = self.t.load(self.new_task(thing='支付', model='sonnet'))
+        self.assertEqual(self.t.sibling_fork(pay), '')
+        self.assertNotEqual(self.t.sibling_key(pay), self.t.sibling_key(ta))
+        self.assertNotEqual(self.t.sibling_key(self.t.load(self.new_task())), self.t.sibling_key(ta))
+        # 新会话读档案：现状、决定、别处留言、项目约定都在
+        p = self.t.first_prompt(pay, 'origin/main')
+        self.assertIn('用户 ID 改成字符串了', p); self.assertIn('接口都返回 JSON', p); self.assertIn('“支付”这件事的负责人', p)
+        self.t.T['sibling_warm_min'] = 0
+        try: p2 = self.t.first_prompt(self.t.load(self.new_task(thing='登录', model='sonnet')), 'origin/main')
+        finally: self.t.T['sibling_warm_min'] = 55
+        self.assertIn('不用 cookie，因为要跨域', p2); self.assertIn('刷新令牌', p2)
+        # 第二轮：现状替换、决定追加不重复
+        self.t.sibling_save(ta, 1, '现状：OAuth 完成\n决定：不用 cookie，因为要跨域\n决定：令牌放内存')
+        s = self.t.sibling(ta)
+        self.assertEqual(s['now'], 'OAuth 完成'); self.assertEqual(len(s['decisions']), 2); self.assertEqual(s['todo'], '刷新令牌')
+        # 评审是每次新开的帮手：往档案里写，但不顶替负责人的会话
+        rv = self.t.load(self.new_task(thing='登录', role='评审', status='done'))
+        self.t.sibling_save(rv, 5, '其他：评审发现缺少过期测试')
+        self.assertEqual(self.t.sibling(ta)['head'], ta['session_id'])
+        self.assertIn('缺少过期测试', self.t.sibling_notes(ta))
+        # 同一件事同时只跑一个：后来的排队
+        r1 = self.new_task(thing='队列')
+        q = self.t.load(self.new_task(thing='队列', status='approved'))
+        self.assertTrue(self.t.thing_busy(q)); self.assertFalse(self.t.thing_busy(self.t.load(self.new_task(thing='别的', status='approved'))))
+        self.t.update(r1, status='done')
+        self.assertFalse(self.t.thing_busy(q))
+        # 派活解析
+        _, d = self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n事情: 支付对账\n任务书:\n做')
+        self.assertEqual(d['thing'], '支付对账')
+        _, d = self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n事情: <这活属于哪件事，不写就归到项目主线>\n任务书:\n做')
+        self.assertEqual(d['thing'], '')
 
     def test_state_edges(self):
         # 分叉任务的花费减掉父会话的底数

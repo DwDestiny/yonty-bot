@@ -4,7 +4,7 @@
 
 ## 目的
 
-把用户自己登录好的编程智能体 CLI 接进 IM，做成一个有协调人、有项目负责人、能后台干活的团队。目标是成为 Yonty 的一个子应用，也能单独用。架构和路线见 [docs/architecture.md](docs/architecture.md)。
+把用户自己登录好的编程智能体 CLI 接进 IM，做成一个有协调人、项目里每件事有一个负责人、能后台干活的团队。负责人是“事 + 档案”，会话可以换。目标是成为 Yonty 的一个子应用，也能单独用。架构和路线见 [docs/architecture.md](docs/architecture.md)。
 
 ## 目录地图
 

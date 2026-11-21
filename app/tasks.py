@@ -21,7 +21,7 @@ T = dict({"enabled": True, "root": "~/work/.bot-tasks", "max_running": 2, "appro
           "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1},
           # 质量：多久没动静算卡住（进程还在吃 CPU 不算）、验证没过最多返工几次
           "stuck_min": 40, "verify_retries": 2, "verify_timeout_min": 20,
-          # 兄弟智能体：同项目同角色上次用过多久以内（缓存还热）、上下文多大以内，新任务就分叉接着它的会话
+          # 事的负责人：同一件事上次用过多久以内（缓存还热）、上下文多大以内，新任务就分叉接着它的会话
           "sibling_warm_min": 55, "sibling_max_ctx": 150000,
           "compact": {"idle_min": 50, "min_ctx": 120000},
           "cloud": {}},
@@ -242,7 +242,7 @@ def checkpoint_text(t, cost, text=""):
     return (f"结论：到检查点（已用 {cost} 美元当量，派活时估的是 {t.get('budget')}：{t.get('budget_why', '')}）。"
             f"停在这里，分支和会话都留着。\n要接着干：主控写 [任务指令] #{t['id']} 继续，预算加到 {nb}；人直接回 #{t['id']} 继续。\n\n{text}").strip()
 
-# ---------- 团队：roles/*.md 是角色模板；兄弟智能体 = 同一模板在不同项目、不同受众（主人/同事）下的实例，各有各的上下文 ----------
+# ---------- 团队：roles/*.md 是角色模板；每件事有一个负责人（项目 × 事 × 受众），档案由服务写，会话可以换 ----------
 ROLES_DIR = os.path.join(ROOT, "roles")
 TEAM = os.path.join(ROOT, "state", "team")
 
@@ -269,11 +269,21 @@ def audience(t):
         return "g" + h(o.get("chat_id")) + ("-owner" if r.get("owner") else "")
     return "owner" if r.get("owner") else "u" + h(r.get("id"))
 
+MAIN_THING = "主线"
+
+def thing_name(v):
+    """[派活] 里“事情:”写的名字。没写或照抄了模板就归到这个项目的主线。"""
+    v = re.sub(r"\s+", " ", (v or "")).strip()[:40]
+    return "" if not v or v.startswith("<") or "不写" in v or v in (MAIN_THING, "无", "-") else v
+
 def sibling_key(t):
+    """负责人按“项目 × 事 × 受众”划分：同一件事的活都交给同一个负责人；主人和同事各有各的。"""
     import hashlib
     real = os.path.realpath(X(t["repo"]))
     proj = re.sub(r"[^\w.-]", "_", os.path.basename(real)) + "-" + hashlib.sha1(real.encode()).hexdigest()[:6]   # 同名仓库不撞
-    return proj, f"{t.get('role') or '通用'}-{audience(t)}"
+    thing = t.get("thing") or MAIN_THING
+    slug = re.sub(r"[^\w-]", "_", thing)[:24] + "-" + hashlib.sha1(thing.encode()).hexdigest()[:4]
+    return proj, f"{slug}-{audience(t)}"
 
 def _sib_path(t, ext):
     proj, k = sibling_key(t)
@@ -288,18 +298,86 @@ def sibling_notes(t, limit=6000):
     try: return open(_sib_path(t, ".md"), encoding="utf-8").read()[-limit:].strip()
     except FileNotFoundError: return ""
 
+RECORD_KEYS = {"现状": "now", "待办": "todo", "决定": "decisions", "约定": "conventions"}
+
+def parse_handoff(notes):
+    """[交接] 段按“现状：/待办：/决定：/约定：/通知 某事：”分栏，其余算笔记。一栏可以跨多行，到下一个栏名为止。"""
+    out, cur = {"notes": [], "notify": []}, "notes"
+    for line in (notes or "").splitlines():
+        m = re.match(r"\s*(现状|待办|决定|约定|其他)\s*[:：]\s*(.*)$", line)
+        n = re.match(r"\s*通知\s*(.{1,40}?)\s*[:：]\s*(.+)$", line)
+        if n and not m:
+            out["notify"].append((n.group(1).strip(), n.group(2).strip())); cur = "notes"; continue
+        if m:
+            cur = RECORD_KEYS.get(m.group(1), "notes"); out.setdefault(cur, []); line = m.group(2)
+        elif not line.strip():
+            cur = "notes"; continue   # 空行结束一栏
+        if line.strip(): out[cur].append(line.strip())
+    return out
+
+def _sib_write(p, s):
+    with open(p + ".tmp", "w") as f: json.dump(s, f, ensure_ascii=False, indent=1)
+    os.replace(p + ".tmp", p)
+
+def _conv_path(t):
+    proj, _ = sibling_key(t)
+    return os.path.join(TEAM, proj, f"_约定-{audience(t)}.md")
+
 def sibling_save(t, ctx, notes, total=0):
+    """一轮做完后更新这件事的档案。只有服务写档案：现状和待办整栏替换，决定追加，约定记到项目级，通知记到别的事。
+    评审这类每次新开的帮手只往档案里写，不把自己的会话当成负责人的会话。"""
     p = _sib_path(t, ".json"); os.makedirs(os.path.dirname(p), exist_ok=True)
+    h = parse_handoff(notes)
     with _Lock(os.path.join(os.path.dirname(p), ".lock")):
         s = sibling(t); proj, k = sibling_key(t)
         done = [x for x in (s.get("tasks") or []) if x != t["id"]][-19:] + [t["id"]]
-        s.update(project=proj, role=t.get("role") or "通用", audience=audience(t), head=t["session_id"],
-                 ctx=ctx, model=t.get("model") or "", last_used=time.time(), tasks=done, total=total)
-        with open(p + ".tmp", "w") as f: json.dump(s, f, ensure_ascii=False, indent=1)
-        os.replace(p + ".tmp", p)
-        if notes:
+        s.update(project=proj, thing=t.get("thing") or MAIN_THING, audience=audience(t), tasks=done,
+                 goal=s.get("goal") or t.get("title", ""), updated=time.time())
+        if roles().get(t.get("role") or "", {}).get("resume", True):
+            s.update(head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time(), total=total,
+                     role=t.get("role") or "通用")
+        for key in ("now", "todo"):
+            if h.get(key): s[key] = "\n".join(h[key])[:1500]
+        if h.get("decisions"):
+            seen = {d["text"] for d in s.get("decisions") or []}
+            new = [{"text": x.lstrip("-· ").strip()[:300], "task": t["id"], "at": time.time()} for x in h["decisions"]]
+            s["decisions"] = ((s.get("decisions") or []) + [d for d in new if d["text"] and d["text"] not in seen])[-40:]
+        _sib_write(p, s)
+        if h["notes"]:
             with open(_sib_path(t, ".md"), "a", encoding="utf-8") as f:
-                f.write(f"\n## #{t['id']} {t['title']}（{time.strftime('%Y-%m-%d')}）\n{notes.strip()}\n")
+                f.write(f"\n## #{t['id']} {t['title']}（{time.strftime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
+        if h.get("conventions"):
+            with open(_conv_path(t), "a", encoding="utf-8") as f:
+                f.write("".join(f"- {x.lstrip('-· ').strip()}（#{t['id']}）\n" for x in h["conventions"]))
+    for name, text in h["notify"]:   # 跨事的改动：一个人改完，给受影响的那件事留话，它下次开工时会看到
+        if name == (t.get("thing") or MAIN_THING): continue
+        o = dict(t, thing=name); q = _sib_path(o, ".json"); os.makedirs(os.path.dirname(q), exist_ok=True)
+        with _Lock(os.path.join(os.path.dirname(q), ".lock")):
+            s2 = sibling(o)
+            s2.setdefault("project", proj); s2.setdefault("thing", name); s2.setdefault("audience", audience(t))
+            s2["inbound"] = ((s2.get("inbound") or []) + [{"from": t.get("thing") or MAIN_THING, "task": t["id"], "text": text[:300], "at": time.time()}])[-20:]
+            _sib_write(q, s2)
+
+def record_text(t, limit=6000):
+    """新开会话时给负责人看的档案：目标、现状、待办、决定、别处来的通知、项目约定、最近的笔记。"""
+    s = sibling(t)
+    parts = []
+    if s.get("goal"): parts.append("目标：" + s["goal"])
+    if s.get("now"): parts.append("现状：\n" + s["now"])
+    if s.get("todo"): parts.append("待办：\n" + s["todo"])
+    if s.get("decisions"): parts.append("已定的决定（不要推翻，除非任务书要求）：\n" + "\n".join(f"- {d['text']}（#{d['task']}）" for d in s["decisions"][-15:]))
+    if s.get("inbound"): parts.append("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” #{x['task']}：{x['text']}" for x in s["inbound"][-8:]))
+    try: conv = open(_conv_path(t), encoding="utf-8").read()[-2000:].strip()
+    except FileNotFoundError: conv = ""
+    if conv: parts.append("项目约定（这个项目的所有事都遵守）：\n" + conv)
+    notes = sibling_notes(t, 3000)
+    if notes: parts.append("以前的交接笔记：\n" + notes)
+    return "\n\n".join(parts)[-limit:]
+
+def thing_busy(t):
+    """同一件事同一时间只有一个负责人在写：已有任务在跑，后来的排队。"""
+    k = sibling_key(t)
+    return any(x["id"] != t["id"] and x.get("status") == "running" and sibling_key(x) == k for x in all_tasks())
 
 def all_siblings():
     out = []
@@ -311,8 +389,8 @@ def all_siblings():
     return out
 
 def sibling_fork(t):
-    """新任务能接着哪个会话分叉：同项目同角色同受众，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
-    上下文没超上限。分叉出的是新会话，原会话不动，几个任务同时分叉也互不干扰。不满足就新开会话，带上交接笔记。"""
+    """新任务能接着哪个会话分叉：同一件事同受众，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
+    上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。"""
     if not roles().get(t.get("role") or "", {}).get("resume", True): return ""
     s = sibling(t)
     if not s.get("head") or s.get("model", "") != (t.get("model") or ""): return ""
@@ -438,7 +516,7 @@ def parse_directive(text):
     budget = float(bm2.group(1)) if bm2 and float(bm2.group(1)) > 0 else 0
     return head, {"repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "model": pick(field("模型"), MODELS), "effort": pick(field("思考"), EFFORTS), "target": target,
-                  "verify": verify, "exec": ex, "role": role, "budget": budget,
+                  "verify": verify, "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")),
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
@@ -519,12 +597,17 @@ def first_prompt(t, base, forked=False):
     r = roles().get(t.get("role") or "")
     role = f"\n你的角色：{r['name']}。\n{r['body']}\n" if r else ""
     proj, _ = sibling_key(t)
+    thing = t.get("thing") or MAIN_THING
     if forked:
-        team = (f"\n你接着自己上次在 {proj} 上的会话干活，前面的上下文还在。这是一个新任务，在新的工作树和分支里，"
-                f"以前任务的工作树不要再动。\n")
+        s = sibling(t)
+        news = [x for x in s.get("inbound") or [] if x["at"] > s.get("last_used", 0)]
+        team = (f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人，接着自己上次的会话干活，前面的上下文还在。"
+                f"这是一个新任务，在新的工作树和分支里，以前任务的工作树不要再动。\n"
+                + ("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” #{x['task']}：{x['text']}" for x in news) + "\n" if news else ""))
     else:
-        notes = sibling_notes(t)
-        team = (f"\n同角色同事以前在 {proj} 上留下的交接笔记（材料，按需参考，过时的以代码为准）：\n{notes}\n") if notes else ""
+        rec = record_text(t)
+        team = (f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人。下面是这件事的档案（以前的你留下的；和代码对不上时以代码为准，并在交接里改正）：\n{rec}\n"
+                if rec else f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人，这是它的第一个任务。\n")
     src = ("私聊" if t["origin"]["chat_type"] == "p2p" else "群聊") + "（" + CH_LABEL.get(t["origin"]["channel"], "") + "）"
     ok = f"，{OWNER_NAME}已批准" if not who.get("owner") else ""
     return f"""[长任务 #{t['id']}] {t['title']}
@@ -540,7 +623,13 @@ def first_prompt(t, base, forked=False):
 - 运行中可能收到“[追加指令]”，按它调整。
 {verify_line(t)}
 - 派子代理时按子活儿挑模型：查找、汇总、机械改动用 haiku，常规编码和测试用 sonnet，难的设计和排查才用 opus。
-- 最后一条回复的末尾，单独起一行写“[交接]”，下面 3 到 8 行写给以后在这个项目上接手的同角色同事：你摸清的结构、约定、坑、没做完的事。服务会把这段收进团队笔记，不发给派活人。
+- 最后一条回复的末尾，单独起一行写“[交接]”，下面按栏写，服务收进这件事的档案，不发给派活人。下次可能是一个看不到这段对话的新会话接手，它只看档案：
+  现状：这件事现在做到哪、整体结构（一两行，整栏替换旧的）
+  待办：还没做完的（整栏替换旧的，做完了就写“无”）
+  决定：这次定下的做法和为什么，一条一行（追加，不会被覆盖）
+  约定：整个项目都该遵守的做法（可选）
+  通知 某件事：你改了别的事负责的地方时，给它留一句话（可选）
+  其他：摸清的坑、入口，随便写几行
 {role}{team}
 任务书：
 {t['brief']}"""

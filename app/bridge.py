@@ -480,7 +480,7 @@ def task_detail(t, owner):
         lines.append(f"已经 {mins(t)} 分钟，调用工具 {t.get('tools', 0)} 次")
         if owner:
             lines.append(f"已用 {t.get('cost') or 0} 美元当量，检查点 {t.get('budget')}（{t.get('budget_why', '')}）"
-                         + (f"；接着同角色上次的会话干" if t.get("forked_from") else ""))
+                         + (f"；接着“{t.get('thing') or tasks.MAIN_THING}”负责人上次的会话干" if t.get("forked_from") else ""))
             if tasks.quota_line(): lines.append(tasks.quota_line() + "（整个订阅，含终端里的会话）")
         if t.get("verify"): lines.append(f"验证命令：{BT}{t['verify']}{BT}")
     mark = {"completed": "✔", "in_progress": "▶"}
@@ -536,19 +536,21 @@ def task_command(ev):
 TEAM_CMD = "/团队"
 
 def team_view():
-    """角色模板和各项目的兄弟智能体：谁在哪个项目上干过、上下文多大、缓存还热不热。"""
+    """角色模板和各项目上的事：每件事谁负责、做到哪、上下文多大、缓存还热不热。"""
     rs = tasks.roles()
     out = ["角色模板：" + ("、".join(f"{r['name']}（{r['model'] or '默认'}）" for r in rs.values()) or "没有（实例的 roles/ 目录是空的）")]
     sibs = tasks.all_siblings()
-    if not sibs: return "\n".join(out + ["还没有兄弟智能体：派活时写上角色，干完一个任务就有了。"])
+    if not sibs: return "\n".join(out + ["还没有事：派活时写上“事情”，干完一个任务就有了；不写就归到项目主线。"])
     warm = tasks.T["sibling_warm_min"] * 60
-    out.append("兄弟智能体（项目 · 角色 · 给谁干）：")
+    out.append("各项目的事（项目 · 事 · 给谁干）：")
     for s in sorted(sibs, key=lambda s: -s.get("last_used", 0)):
         age = int((time.time() - s.get("last_used", 0)) / 60)
-        hot = "缓存热，下个任务接着它的会话" if age * 60 < warm and (s.get("ctx") or 0) <= tasks.T["sibling_max_ctx"] else "下个任务新开会话、带交接笔记"
+        hot = "缓存热，下个任务接着它的会话" if s.get("head") and age * 60 < warm and (s.get("ctx") or 0) <= tasks.T["sibling_max_ctx"] else "下个任务新开会话、读档案"
         who = {"owner": "主人私聊"}.get(s.get("audience"), "群" if str(s.get("audience", "")).startswith("g") else "同事私聊")
-        out.append(f"· {s['project'].rsplit('-', 1)[0]} · {s['role']} · {who}："
-                   f"做过 {'、'.join('#' + str(x) for x in s.get('tasks', [])[-5:])}，上下文约 {int((s.get('ctx') or 0) / 1000)}k，{age} 分钟前，{hot}")
+        now_ = (s.get("now") or "").splitlines()[0][:60] if s.get("now") else ""
+        out.append(f"· {s['project'].rsplit('-', 1)[0]} · {s.get('thing') or tasks.MAIN_THING} · {who}："
+                   f"做过 {'、'.join('#' + str(x) for x in s.get('tasks', [])[-5:]) or '无'}，上下文约 {int((s.get('ctx') or 0) / 1000)}k，{age} 分钟前，{hot}"
+                   + (f"；现状：{now_}" if now_ else "") + (f"；有 {len(s['inbound'])} 条别处留言" if s.get("inbound") else ""))
     return "\n".join(out)
 
 def task_approve(ev, yes, n):
@@ -593,7 +595,7 @@ def task_directive(ev, result):
         why = tasks.cloud_ok(repo, owner)
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], model=d["model"], effort=d["effort"],
-                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""),
+                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=d.get("thing", ""),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""),
                      status="approved" if owner else "pending",
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
@@ -721,7 +723,7 @@ def task_tick():
                 threading.Thread(target=tasks.compact_task, args=(t["id"],), daemon=True).start()
                 continue
         except Exception: log.exception("task #%s compact check failed", t["id"])
-        if t["status"] == "approved" and (t.get("exec") == "cloud" or running < tasks.T["max_running"]):
+        if t["status"] == "approved" and (t.get("exec") == "cloud" or running < tasks.T["max_running"]) and not tasks.thing_busy(t):
             log.info("task #%s launch turn %s", t["id"], t.get("turn", 0) + 1)
             tasks.launch(t["id"]); running += t.get("exec") != "cloud"
 
