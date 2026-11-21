@@ -822,7 +822,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(t['status'], 'waiting')                       # 到检查点交回主控，不算失败
         e = self.t.events(n)[-1]
         self.assertEqual(e['kind'], 'question'); self.assertIn('到检查点', e['text']); self.assertIn('预算加到', e['text'])
-        self.t.update(n, status='running', turn=2); self.run_with(bindir, n)   # 没加预算又被拉起来：不调 Claude，再交回
+        self.t.update(n, _force=True, status='running', turn=2); self.run_with(bindir, n)   # 没加预算又被拉起来：不调 Claude，再交回
         self.assertIn('到检查点', self.t.events(n)[-1]['text'])
         self.t.inbox_add(n, '主控', True, '继续，预算加到 40')
         self.assertEqual(self.t.load(n)['budget'], 40); self.assertFalse(self.t.load(n)['checkpoint'])
@@ -982,6 +982,20 @@ class TaskTest(unittest.TestCase):
         finally: self.t._cloud_poll = real
         self.assertEqual(self.t.load(n)['status'], 'approved')
 
+    def test_status_transitions_follow_table(self):
+        states = list(self.t.TRANSITIONS)
+        for a in states:
+            for b in states:
+                n = self.new_task(); self.t.update(n, _force=True, status=a)   # 造场景：直接设成起点
+                if a == b or b in self.t.TRANSITIONS[a]:
+                    self.assertEqual(self.t.update(n, status=b)['status'], b)
+                else:
+                    with self.assertRaises(self.t.InvalidTransition, msg=f'{a}->{b}'):
+                        self.t.update(n, status=b)
+                    self.assertEqual(self.t.load(n)['status'], a)
+        for s, nxt in self.t.TRANSITIONS.items():   # 表里每个状态都有中文名，每个目标都是已知状态
+            self.assertIn(s, self.t.LABEL); self.assertTrue(nxt <= set(states))
+
     def test_role_check_flags_edits(self):
         wt = Path(self.tmp.name) / 'rc'
         subprocess.run(['git', 'clone', '-q', str(Path(self.tmp.name) / 'proj.git'), str(wt)], check=True)
@@ -1005,7 +1019,7 @@ class TaskTest(unittest.TestCase):
         self.t.quota_alerts = lambda q=None, now=None: [('five_hour', 0.9, rs, '5 小时窗口已用 90%')]
         try:
             for x in self.t.all_tasks():
-                if x['status'] in ('running', 'approved'): self.t.update(x['id'], status='done')
+                if x['status'] in ('running', 'approved'): self.t.update(x['id'], _force=True, status='done')
             n = self.new_task(status='approved')
             self.b.quota_last[0] = 0; self.b.task_tick(); self.b.quota_last[0] = 0; self.b.task_tick()
             self.assertEqual(set(launched), {n})                        # 额度紧也照常开工
@@ -1020,7 +1034,7 @@ class TaskTest(unittest.TestCase):
         self.b.RELAY_ON = False
         try:
             for x in self.t.all_tasks():
-                if x['status'] in ('running', 'approved'): self.t.update(x['id'], status='done')
+                if x['status'] in ('running', 'approved'): self.t.update(x['id'], _force=True, status='done')
             n = self.new_task(launched=time.time() - 3 * 3600, last_tool_at=time.time() - 2 * 3600)
             self.b.task_tick()
             self.assertEqual(self.t.load(n)['status'], 'failed'); self.assertEqual(stopped, [n])
@@ -1035,7 +1049,7 @@ class TaskTest(unittest.TestCase):
         self.b.RELAY_ON = False
         try:
             for x in self.t.all_tasks():
-                if x['status'] in ('running', 'approved'): self.t.update(x['id'], status='done')
+                if x['status'] in ('running', 'approved'): self.t.update(x['id'], _force=True, status='done')
             n = self.new_task(launched=time.time() - 3 * 3600, last_tool_at=time.time() - 2 * 3600, unit='u')
             self.b.cpu_seen[n] = [0, time.time() - 600, 0]
             self.t.cpu_ns = lambda t: 120 * 10**9                       # 10 分钟用了 120 秒 CPU：在编译或跑测试
@@ -1087,7 +1101,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(t['status'], 'failed'); self.assertIn('BLOCKED', self.t.events(n)[-1]['text'])
         (wt / 'ok.txt').write_text('x'); run('add', 'ok.txt')
         run('commit', '-q', '-m', 'fix\n\nCloud-Run: done'); run('push', '-q', 'origin', t['branch'])
-        self.t.update(n, status='running', cloud=dict(t['cloud'], since=time.time(), closed=False))
+        self.t.update(n, _force=True, status='running', cloud=dict(t['cloud'], since=time.time(), closed=False))
         self.assertTrue(self.t.cloud_poll(n))
         self.assertEqual(self.t.load(n)['status'], 'done')
         self.assertIn('结论：PASS', self.t.events(n)[-1]['text'])

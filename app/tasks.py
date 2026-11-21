@@ -78,9 +78,28 @@ def load(tid):
         with open(os.path.join(tdir(tid), "task.json")) as f: return json.load(f)
     except Exception: return None
 
-def update(tid, **kv):
+# 任务状态机：允许的转换只在这里。所有改状态的地方都经过 update，不在表里的转换直接报错，不会悄悄写进去。
+TRANSITIONS = {
+    "pending":   {"approved", "rejected", "expired", "cancelled"},     # 同事派的等主人批
+    "approved":  {"running", "cancelled"},                             # 排队，有名额就开工
+    "running":   {"waiting", "done", "failed", "lost", "cancelled"},   # 跑一轮的结果
+    "waiting":   {"approved", "cancelled"},                            # 有人回答或加预算后再排队
+    "done":      {"approved"},                                         # 追加要求
+    "failed":    {"approved"},                                         # 接着干
+    "lost":      {"approved"},                                         # 进程没了，接着干
+    "cancelled": set(), "rejected": set(), "expired": set(),
+}
+
+class InvalidTransition(ValueError):
+    pass
+
+def update(tid, _force=False, **kv):
+    """改任务字段。改 status 要符合 TRANSITIONS；_force 只给测试造场景用。"""
     with _Lock(os.path.join(tdir(tid), ".lock")):
         t = load(tid) or {}
+        old, new = t.get("status"), kv.get("status")
+        if not _force and new and old and new != old and new not in TRANSITIONS.get(old, set()):
+            raise InvalidTransition(f"#{tid} 不能从 {old} 变成 {new}")
         t.update(kv); t["updated"] = time.time()
         tmp = os.path.join(tdir(tid), "task.json.tmp")
         with open(tmp, "w") as f: json.dump(t, f, ensure_ascii=False, indent=1)
@@ -591,6 +610,7 @@ def run(tid):
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
                 raise RuntimeError(f"Claude 异常退出（rc={p.returncode}），详情看 state/tasks/{tid}/stream.log")
+            if load(tid).get("status") != "running": return   # 跑的时候被取消或判卡死：结果和事件已经写过
             raw_total = final.get("total_cost_usd") or 0
             text = final.get("result") or ""
             text = "\n".join(l for l in text.splitlines() if not re.match(r"\s*\[进展\]", l)).strip()
