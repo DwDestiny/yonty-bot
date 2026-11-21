@@ -896,6 +896,7 @@ class TaskTest(unittest.TestCase):
         bindir = self.fake_bin(body)
         self.t.T['sibling_warm_min'] = 55
         self.addCleanup(self.t.T.__setitem__, 'sibling_warm_min', 0)
+        self.t.sibling_save(self.t.load(self.new_task(thing='支付', model='sonnet', status='done')), 1, '现状：支付已接好')   # 先有“支付”这件事
         a = self.new_task(thing='登录', model='sonnet'); self.run_with(bindir, a)
         ta = self.t.load(a)
         s = self.t.sibling(ta)
@@ -905,7 +906,7 @@ class TaskTest(unittest.TestCase):
         # 同一件事接着同一个负责人；别的事、主线各是各的
         self.assertEqual(self.t.sibling_fork(self.t.load(self.new_task(thing='登录', model='sonnet'))), ta['session_id'])
         pay = self.t.load(self.new_task(thing='支付', model='sonnet'))
-        self.assertEqual(self.t.sibling_fork(pay), '')
+        self.assertNotEqual(self.t.sibling_fork(pay), ta['session_id'])
         self.assertNotEqual(self.t.sibling_key(pay), self.t.sibling_key(ta))
         self.assertNotEqual(self.t.sibling_key(self.t.load(self.new_task())), self.t.sibling_key(ta))
         # 新会话读档案：现状、决定、别处留言、项目约定都在
@@ -924,12 +925,43 @@ class TaskTest(unittest.TestCase):
         self.t.sibling_save(rv, 5, '其他：评审发现缺少过期测试')
         self.assertEqual(self.t.sibling(ta)['head'], ta['session_id'])
         self.assertIn('缺少过期测试', self.t.sibling_notes(ta))
+        # 通知只给已有的事；“通知用户：”这类留在笔记里，不凭空多出一件事
+        self.t.sibling_save(ta, 1, '通知用户：下周上线')
+        self.assertNotIn('用户', [s['thing'] for s in self.t.things_of(ta)]); self.assertIn('下周上线', self.t.sibling_notes(ta))
+        # 档案很长时，目标、现状、决定留着，先丢笔记
+        self.t.sibling_save(ta, 1, '其他：' + '很长的笔记' * 2000)
+        p3 = self.t.record_text(ta)
+        self.assertIn('现状：', p3); self.assertIn('不用 cookie', p3); self.assertLessEqual(len(p3), 6000)
+        # 换模型的活不挤掉原来模型的会话头
+        hz = self.t.load(self.new_task(thing='登录', model='haiku', status='done'))
+        self.t.sibling_save(hz, 1, '')
+        self.assertEqual(self.t.sibling_fork(self.t.load(self.new_task(thing='登录', model='sonnet'))), ta['session_id'])
+        # 负责人停在提问：它的会话不拿来分叉，同一件事的新活排队
+        self.t.update(a, _force=True, status='waiting')
+        nx = self.t.load(self.new_task(thing='登录', model='sonnet', status='approved'))
+        self.assertEqual(self.t.sibling_fork(nx), ''); self.assertTrue(self.t.thing_busy(nx))
+        self.t.update(a, _force=True, status='done')
+        # 名字相近归到已有的事
+        self.assertEqual(self.t.load(self.new_task(thing='支付相关'))['thing'], '支付')
+        self.assertTrue(self.t.load(self.new_task(thing='报表'))['thing_new'])
         # 同一件事同时只跑一个：后来的排队
         r1 = self.new_task(thing='队列')
         q = self.t.load(self.new_task(thing='队列', status='approved'))
         self.assertTrue(self.t.thing_busy(q)); self.assertFalse(self.t.thing_busy(self.t.load(self.new_task(thing='别的', status='approved'))))
         self.t.update(r1, status='done')
         self.assertFalse(self.t.thing_busy(q))
+        # 一次 tick 里两个同一件事的任务：只开一个
+        launched, orig = [], self.b.tasks.launch
+        self.b.tasks.launch = lambda tid: (launched.append(tid), self.t.update(tid, status='running'))
+        self.b.RELAY_ON = False
+        try:
+            for x in self.t.all_tasks():
+                if x['status'] in ('running', 'approved', 'waiting'): self.t.update(x['id'], _force=True, status='done')
+            c1, c2 = self.new_task(thing='并发', status='approved'), self.new_task(thing='并发', status='approved')
+            self.b.task_tick()
+            self.assertEqual(launched, [c1]); self.assertEqual(self.t.load(c2)['status'], 'approved')
+        finally:
+            self.b.tasks.launch = orig; self.b.RELAY_ON = True
         # 派活解析
         _, d = self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n事情: 支付对账\n任务书:\n做')
         self.assertEqual(d['thing'], '支付对账')
@@ -943,9 +975,10 @@ class TaskTest(unittest.TestCase):
         n = self.new_task()
         bindir = self.fake_bin(body)
         real_fork, real_sib = self.t.sibling_fork, self.t.sibling
-        self.t.sibling_fork = lambda t: 'parent'; self.t.sibling = lambda t: {'total': 7.0}
+        real_head = self.t.sibling_head
+        self.t.sibling_fork = lambda t: 'parent'; self.t.sibling_head = lambda t: {'total': 7.0}
         try: self.run_with(bindir, n)
-        finally: self.t.sibling_fork, self.t.sibling = real_fork, real_sib
+        finally: self.t.sibling_fork, self.t.sibling_head = real_fork, real_head
         self.assertEqual(self.t.load(n)['cost'], 0.5); self.assertTrue(self.t.load(n)['session_started'])
         # 没起来的会话不算开过
         dead = self.fake_bin('sys.stdin.read()\nsys.exit(1)\n')
@@ -1067,7 +1100,7 @@ class TaskTest(unittest.TestCase):
         self.t.quota_alerts = lambda q=None, now=None: [('five_hour', 0.9, rs, '5 小时窗口已用 90%')]
         try:
             for x in self.t.all_tasks():
-                if x['status'] in ('running', 'approved'): self.t.update(x['id'], _force=True, status='done')
+                if x['status'] in ('running', 'approved', 'waiting'): self.t.update(x['id'], _force=True, status='done')
             n = self.new_task(status='approved')
             self.b.quota_last[0] = 0; self.b.task_tick(); self.b.quota_last[0] = 0; self.b.task_tick()
             self.assertEqual(set(launched), {n})                        # 额度紧也照常开工

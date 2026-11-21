@@ -117,6 +117,8 @@ def create(**fields):
         if not fields.get("effort") and r["effort"] in EFFORTS: fields["effort"] = r["effort"]
     if not fields.get("budget"):
         fields["budget"], fields["budget_why"] = budget_basis(fields.get("role"), fields.get("model"))
+    if fields.get("repo") and fields.get("origin") and fields.get("requester"):
+        fields["thing"], fields["thing_new"] = resolve_thing(fields)
     fields.update(id=n, created=time.time(), posted=0, turn=0, session_id=str(uuid.uuid4()),
                   branch=f"bot/{n}-{time.strftime('%m%d')}", worktree=os.path.join(TASK_ROOT, str(n)))
     return update(n, **fields)
@@ -333,9 +335,10 @@ def sibling_save(t, ctx, notes, total=0):
         done = [x for x in (s.get("tasks") or []) if x != t["id"]][-19:] + [t["id"]]
         s.update(project=proj, thing=t.get("thing") or MAIN_THING, audience=audience(t), tasks=done,
                  goal=s.get("goal") or t.get("title", ""), updated=time.time())
-        if roles().get(t.get("role") or "", {}).get("resume", True):
-            s.update(head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time(), total=total,
-                     role=t.get("role") or "通用")
+        if roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
+            heads = s.get("heads") or {}
+            heads[t.get("model") or ""] = {"head": t["session_id"], "ctx": ctx, "last_used": time.time(), "total": total, "task": t["id"]}
+            s.update(heads=heads, head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time())
         for key in ("now", "todo"):
             if h.get(key): s[key] = "\n".join(h[key])[:1500]
         if h.get("decisions"):
@@ -350,11 +353,12 @@ def sibling_save(t, ctx, notes, total=0):
             with open(_conv_path(t), "a", encoding="utf-8") as f:
                 f.write("".join(f"- {x.lstrip('-· ').strip()}（#{t['id']}）\n" for x in h["conventions"]))
     for name, text in h["notify"]:   # 跨事的改动：一个人改完，给受影响的那件事留话，它下次开工时会看到
-        if name == (t.get("thing") or MAIN_THING): continue
-        o = dict(t, thing=name); q = _sib_path(o, ".json"); os.makedirs(os.path.dirname(q), exist_ok=True)
+        o = dict(t, thing=name); q = _sib_path(o, ".json")
+        if name == (t.get("thing") or MAIN_THING) or not os.path.exists(q):   # 只给已有的事留话；“通知用户：”这类不算
+            with open(_sib_path(t, ".md"), "a", encoding="utf-8") as f: f.write(f"通知 {name}：{text}\n")
+            continue
         with _Lock(os.path.join(os.path.dirname(q), ".lock")):
             s2 = sibling(o)
-            s2.setdefault("project", proj); s2.setdefault("thing", name); s2.setdefault("audience", audience(t))
             s2["inbound"] = ((s2.get("inbound") or []) + [{"from": t.get("thing") or MAIN_THING, "task": t["id"], "text": text[:300], "at": time.time()}])[-20:]
             _sib_write(q, s2)
 
@@ -372,12 +376,32 @@ def record_text(t, limit=6000):
     if conv: parts.append("项目约定（这个项目的所有事都遵守）：\n" + conv)
     notes = sibling_notes(t, 3000)
     if notes: parts.append("以前的交接笔记：\n" + notes)
-    return "\n\n".join(parts)[-limit:]
+    out = []   # 按重要程度装：目标、现状、待办、决定在前，装不下时先丢后面的笔记和约定
+    for p in parts:
+        room = limit - sum(len(x) + 2 for x in out)
+        if room <= 200: break
+        out.append(p if len(p) <= room else p[:room - 20] + "\n……（后面省略）")
+    return "\n\n".join(out)
+
+def things_of(t):
+    """同项目、同受众现有的事（给协调人和派活人看；不同受众互相看不到）。"""
+    proj, _ = sibling_key(t)
+    aud = audience(t)
+    return [s for s in all_siblings() if s.get("project") == proj and s.get("audience") == aud and s.get("thing")]
+
+def resolve_thing(t):
+    """派活写的名字和现有的事对一下：一样的，或一个包含另一个的（“支付”和“支付对账”），归到现有的那件，少开重复的事。"""
+    name = t.get("thing") or MAIN_THING
+    names = [s["thing"] for s in things_of(t)]
+    if name in names or name == MAIN_THING: return name, False
+    near = [n for n in names if n != MAIN_THING and (n in name or name in n)]
+    return (near[0], False) if len(near) == 1 else (name, True)
 
 def thing_busy(t):
-    """同一件事同一时间只有一个负责人在写：已有任务在跑，后来的排队。"""
+    """同一件事同时只有一个负责人在写：已有任务在跑或停在提问（等回复后还要接着写），后来的排队。
+    失败、中断、完成的不挡：失败的要人来定，不能让整件事一直卡着。"""
     k = sibling_key(t)
-    return any(x["id"] != t["id"] and x.get("status") == "running" and sibling_key(x) == k for x in all_tasks())
+    return any(x["id"] != t["id"] and x.get("status") in ("running", "waiting") and sibling_key(x) == k for x in all_tasks())
 
 def all_siblings():
     out = []
@@ -392,12 +416,20 @@ def sibling_fork(t):
     """新任务能接着哪个会话分叉：同一件事同受众，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
     上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。"""
     if not roles().get(t.get("role") or "", {}).get("resume", True): return ""
+    h = sibling_head(t)
+    if not h.get("head"): return ""
+    if time.time() - h.get("last_used", 0) > T["sibling_warm_min"] * 60: return ""
+    if (h.get("ctx") or 0) > T["sibling_max_ctx"]: return ""
+    for x in all_tasks():
+        if x.get("session_id") == h["head"] and x["id"] != t["id"]:
+            if x.get("compacting"): return ""            # 正在压缩，缓存要重写
+            if x.get("status") != "done": return ""      # 那个任务停在提问、失败或中断：半截的会话不拿来接新活
+    return h["head"]
+
+def sibling_head(t):
+    """这件事在这个模型上的会话头。"""
     s = sibling(t)
-    if not s.get("head") or s.get("model", "") != (t.get("model") or ""): return ""
-    if time.time() - s.get("last_used", 0) > T["sibling_warm_min"] * 60: return ""
-    if (s.get("ctx") or 0) > T["sibling_max_ctx"]: return ""
-    if any(x.get("session_id") == s["head"] and x.get("compacting") for x in all_tasks()): return ""   # 正在压缩，缓存要重写
-    return s["head"]
+    return (s.get("heads") or {}).get(t.get("model") or "") or {}
 
 def role_check(t):
     """角色禁了改文件的工具，但 Bash 还能写。干完看一眼分支：评审不该有任何改动，产品和需求只该新增文件。"""
@@ -648,7 +680,7 @@ def run(tid):
         if not t.get("session_started"):
             base = make_worktree(t)
             fork = sibling_fork(t)
-            update(tid, base=base, forked_from=fork, cost_base=sibling(t).get("total", 0) if fork else 0)
+            update(tid, base=base, forked_from=fork, cost_base=sibling_head(t).get("total", 0) if fork else 0)
             if t["turn"] == 1: event(tid, "start", "")
             prompt, resume = first_prompt(load(tid), base, bool(fork)), False
             early = inbox_take(tid)   # 批之前、开工之前就补充的话
@@ -818,6 +850,7 @@ def cloud_prompt(t, start, extra=""):
             f"开工：git fetch origin，然后 git checkout -B {t['branch']} {start}。只在这个分支上干。\n"
             "- 先列计划再做。能自己定的不要问；必须由人拍板的，写进最后一次提交的正文，按“做不下去”收尾。\n"
             "- 这台机器是新的，依赖自己装（npm ci、pip install 等）。\n" + check +
+            (f"\n这件事（“{t.get('thing') or MAIN_THING}”）的档案，以前的负责人留下的，和代码对不上时以代码为准：\n{record_text(t, 4000)}\n" if record_text(t, 4000) else "") +
             f"\n任务书：\n{t['brief']}\n" + (f"\n{extra}\n" if extra else "") +
             "\n## 收尾（必须）\n"
             f"- 只推送 {t['branch']}。不开合并请求，不合并，不推其他分支。\n"
