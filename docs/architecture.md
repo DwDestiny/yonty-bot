@@ -110,7 +110,7 @@
 
 ## 6. 任务状态机
 
-允许的转换写在 `app/tasks.py` 的 `TRANSITIONS` 表里，所有改状态都走 `set_status`，不在表里的转换直接报错。测试按表逐条检查。
+允许的转换写在 `app/tasks.py` 的 `TRANSITIONS` 表里，所有改状态都经过 `tasks.update` 校验，不在表里的转换直接报错。测试按表逐条检查。
 
 ## 7. 运行时：Claude Code 和 Codex
 

@@ -209,15 +209,15 @@ class ScaffoldTest(unittest.TestCase):
 
     def test_wiki_search_rewritten(self):
         p = {'FCB_PRIVATE': '0'}
-        r = self.bash('private_guard.py', p, 'rg -l foo ~/wiki/wiki')
+        r = self.bash('private_guard.py', p, 'rg -l foo ~/notes/kb')
         self.assertEqual(r.returncode, 0)
         cmd = json.loads(r.stdout)['hookSpecificOutput']['updatedInput']['command']
         self.assertIn("--glob '!**/people/**'", cmd)
-        r = self.bash('private_guard.py', p, f'grep -rl foo {self.home}/wiki/wiki/')
+        r = self.bash('private_guard.py', p, f'grep -rl foo {self.home}/notes/kb/')
         self.assertIn('--exclude-dir=people', json.loads(r.stdout)['hookSpecificOutput']['updatedInput']['command'])
-        self.assertEqual(self.bash('private_guard.py', p, 'find ~/wiki/wiki -name x').returncode, 2)
-        self.assertEqual(self.hook('private_guard.py', p, 'Grep', {'pattern': 'x', 'path': f'{self.home}/wiki/wiki'}).returncode, 2)
-        self.assertEqual(self.hook('private_guard.py', p, 'Grep', {'pattern': 'x', 'path': f'{self.home}/wiki/wiki/concepts'}).returncode, 0)
+        self.assertEqual(self.bash('private_guard.py', p, 'find ~/notes/kb -name x').returncode, 2)
+        self.assertEqual(self.hook('private_guard.py', p, 'Grep', {'pattern': 'x', 'path': f'{self.home}/notes/kb'}).returncode, 2)
+        self.assertEqual(self.hook('private_guard.py', p, 'Grep', {'pattern': 'x', 'path': f'{self.home}/notes/kb/concepts'}).returncode, 0)
 
 
 class AmbientTest(unittest.TestCase):

@@ -32,7 +32,7 @@
 ## 规则
 
 - 不提交任何实例数据：真实的用户名、群和用户 ID、应用凭证、云端环境 ID、私人路径。`tests/` 里有扫描，提交前跑 `python3 -m unittest discover tests`。
-- 状态变化走 `tasks.set_status`，不直接写 `status`；允许的转换在 `TRANSITIONS` 表里。
+- 改任务状态只能经过 `tasks.update`，它按 `TRANSITIONS` 表校验，不在表里的转换报错。`_force` 只给测试造场景用。
 - 写进提示词的规矩，能改成代码或钩子硬拦的就不要只写在提示词里。
 - 新增、移动、改名文件后，按 L3 → L2 → L1 更新目录地图。
 - 旧的 feishu-claude-bot skill 停在 3.2.2，只修 bug；新功能只进本仓库。

@@ -6,7 +6,7 @@ Output: 命中时 exit 2，stderr 写原因；改写搜索命令时输出 update
 Pos:    飞书机器人实例的硬限制，由 claude-settings.json 引用
 配置（config.json 的 private）:
   paths:        正则列表，工具参数里出现就拦（路径里的 ~ 和 $HOME 会先展开）
-  search_roots: [{"root": "~/wiki/wiki", "exclude": ["**/people/**", "**/entities/People*"]}]
+  search_roots: [{"root": "~/notes/kb", "exclude": ["**/people/**", "**/entities/People*"]}]
                 对这些目录的全库 rg/grep 自动加排除规则；Grep/Glob 工具和 find 等不能对整个目录用
 """
 import json, os, re, sys

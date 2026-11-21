@@ -71,7 +71,7 @@
     ],
     "search_roots": [
       {
-        "root": "~/wiki/wiki",
+        "root": "~/notes/kb",
         "exclude": [
           "**/people/**",
           "**/entities/People*",
