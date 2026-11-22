@@ -11,7 +11,7 @@ Pos:    飞书机器人实例的硬限制，由 claude-settings.json 引用
   others: "bot_read_im"（默认）读聊天记录可用主人身份，其余只能用机器人身份
           "bot"           只能用机器人身份
 """
-import json, os, re, sys
+import json, os, re, shlex, sys
 
 data = json.load(sys.stdin)
 cmd = (data.get("tool_input") or {}).get("command", "")
@@ -32,13 +32,19 @@ IM_SPEAK = re.compile(r"\bim\s+(\+messages-(send|reply|edit|forward)|messages\s+
 IM_READ = re.compile(r"\bim\s+\+(chat-messages-list|threads-messages-list|messages-mget|messages-search|chat-list"
                      r"|chat-search|chat-members-list|messages-resources-download)\b")
 
+def is_help(seg):
+    """只有 --help / -h 是最后一个参数、而且不是前一个选项的值时才算看帮助；写在 --text 之类的值里不算。"""
+    try: tok = shlex.split(seg)
+    except ValueError: return False
+    return len(tok) >= 2 and tok[-1] in ("--help", "-h") and not tok[-2].startswith("-")
+
 def block(msg):
     sys.stderr.write("机器人规则：" + msg + "\n"); sys.exit(2)
 
 for seg in re.split(r"\|\||&&|[|;\n]", cmd):
     if "lark-cli" not in seg:
         continue
-    if re.search(r"--as[ =]bot\b", seg) or re.search(r"(^|\s)(--help|-h)(\s|$)", seg):   # 看帮助不算办事
+    if re.search(r"--as[ =]bot\b", seg) or is_help(seg):   # 看帮助不算办事
         continue
     if not cross_ok and IM_READ.search(seg):
         block("跨 IM 读取已关闭：企业微信里的会话不能用主人身份读飞书聊天记录。")

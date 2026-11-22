@@ -699,13 +699,18 @@ def launch(tid):
         update(tid, unit=None, pid=p.pid)
     return True
 
+def unit_journal(t):
+    if not t.get("unit"): return ""
+    return subprocess.run(["journalctl", "--user", "-u", t["unit"], "-o", "cat", "-n", "40", "--no-pager"],
+                          capture_output=True, text=True).stdout
+
 def unit_result(t):
-    """后台单元为什么结束：(systemd 的结果，如 oom-kill / exit-code / signal，内存峰值)。单元用 --collect 跑，结束后只能翻日志。"""
-    if not t.get("unit"): return "", ""
-    r = subprocess.run(["journalctl", "--user", "-u", t["unit"], "-o", "cat", "-n", "40", "--no-pager"],
-                       capture_output=True, text=True)
-    res = re.findall(r"Failed with result '([\w-]+)'", r.stdout)
-    peak = re.findall(r"([\d.]+[KMGT]?) memory peak", r.stdout)
+    """后台单元为什么结束：(systemd 的结果，如 oom-kill / exit-code / signal，内存峰值)。单元用 --collect 跑，结束后只能翻日志。
+    OOMPolicy=continue 时只杀吃内存的那个进程，单元正常退出就没有 Failed 这行，不会误报。"""
+    out = unit_journal(t)
+    if not out: return "", ""
+    res = re.findall(r"Failed with result '([\w-]+)'", out)
+    peak = re.findall(r"([\d.]+[KMGT]?) memory peak", out)
     return (res[-1] if res else ""), (peak[-1] if peak else "")
 
 def lost_text(t):
@@ -956,7 +961,10 @@ def run(tid):
                 p.wait(); p.stdout.close()
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
-                raise RuntimeError(f"Claude 异常退出（rc={p.returncode}），详情看 state/tasks/{tid}/stream.log")
+                oom = "killed by the OOM killer" in unit_journal(load(tid) or {})
+                raise RuntimeError(f"Claude 异常退出（rc={p.returncode}）" + (
+                    f"：任务单元内存到了上限（{T.get('memory_max', '6G')}），Claude 自己被系统杀了。多半是任务里跑的测试或构建失控，"
+                    "接着干之前先查是哪条命令吃满了内存" if oom else f"，详情看 state/tasks/{tid}/stream.log"))
             if load(tid).get("status") != "running": return   # 跑的时候被取消或判卡死：结果和事件已经写过
             raw_total = final.get("total_cost_usd") or 0
             text = final.get("result") or ""

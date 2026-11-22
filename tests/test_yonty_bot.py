@@ -185,6 +185,8 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(self.bash('lark_identity.py', o, 'echo x && lark-cli im +messages-reply --message-id m').returncode, 2)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --as bot --text hi').returncode, 0)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +chat-search --as user -q x; lark-cli im +messages-send --help').returncode, 0)
+        self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --as user --text "see --help for usage"').returncode, 2)
+        self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --text --help').returncode, 2)
 
     def test_mcp_guard(self):
         mcp = lambda env: self.hook('mcp_guard.py', env, 'mcp__mini__run', {}).returncode

@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 1.2.0 · 2026-11-22 · MIT · 中文 | [English](README.en.md)
+> 1.2.1 · 2026-11-22 · MIT · 中文 | [English](README.en.md)
 
 **把你的 Claude Code 拉进飞书群和企业微信，当成一支会派活、会验收、记得住事的开发团队。**
 
