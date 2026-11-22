@@ -52,3 +52,11 @@ python3 bridge.py --cache-check 3
 | 同一会话接着聊 | 每轮几分钱 |
 | 查代码、翻聊天记录的复杂任务 | $0.3–0.5 |
 | 改守则后第一个新会话 | 多约 $0.2（重写一次） |
+
+## 6. 2.0 新机制和缓存（2026-11-22 实测）
+
+- 钩子配置不进缓存前缀。同一提示词，`--settings` 先用 1 个钩子、再用 5 个钩子（含 `matcher: "*"`），第二次 `cache_write` 0、`cache_read` 38583，和第一次的前缀完全一样（haiku，`claude -p --output-format json`）。所以 2.0 新加的 `device_guard`、`irreversible_gate`、`scope_guard` 和改过的 `task_inbox` 不会让缓存重写。
+- 项目经理、定时任务、投递都不加启动参数：项目经理和聊天会话参数逐项相同，层次只放在环境变量 `FCB_LAYER`、`FCB_PROJECT`、`FCB_SESSION_KEY`、`FCB_SCHEDULE`、`FCB_SCOPE` 里，由钩子拦（验收测试 `test_project_manager_args_equal_chat_args`、`test_due_schedule_runs_as_scoped_ordinary_task` 锁住）。
+- 定时任务的沙箱是 `bwrap` 包在 `claude` 外面，`claude` 自己的参数不变。
+- 一次性变化：守则（`rules.md`）和项目经理角色变长，新会话首条会多写一次。
+

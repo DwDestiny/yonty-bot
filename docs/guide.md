@@ -147,6 +147,11 @@
 ## 变更记录
 
 - 2.0.0（2026-11-22）三层智能体、投递、按资源放行、设备和不可逆闸门、定时任务。详见 [architecture.md](architecture.md)、[tasks.md](tasks.md)、[schedules.md](schedules.md)、[boundary.md](boundary.md)。
+  - 从 1.x 升级：`/upgrade` 能用（scaffold 重跑会拷新模块和钩子、改 `claude-settings.json`、加 `actions/` 和看门狗单元文件，状态目录不动）。
+  - 状态迁移：收件箱的 `inbox.off` 自动折算成“前 N 条已取”，不重发；没有 `n` 的旧条目按顺序补编号。旧任务没有 `v2` 标记，回报照旧走主控。
+  - `config.json` 里的 `tasks.max_running`、`tasks.memory_max` 不再生效（日志里提示一次），可以删。新配置项不写就用默认值；要用设备、不可逆闸门，手动加 `devices`、`irreversible`。
+  - 手动一步：看门狗只生成不启用。`systemctl --user link <实例>/<服务名>-yb-watchdog.service <实例>/<服务名>-yb-watchdog.timer`，再 `systemctl --user enable --now <服务名>-yb-watchdog.timer`。
+  - 定时任务的沙箱要 `bwrap`（`apt install bubblewrap`）。没有它，定时任务按失败交回，不降级。
   - 新东西：主控 + 项目经理 + 执行层，话在层之间走投递；开工按内存放行，取代 `tasks.max_running`；设备租约和 `devices`；不可逆闸门 `irreversible`；定时任务（`[定时]`）带权限范围，读范围用 bwrap 落实；`/bind`、`/unbind`、`/why`、`/schedules`；守则加“分流和转交”一节（`[转交]` `[转给]` `[翻篇]` `[定时]`、放行、依赖）。
   - 从 1.3.0 升级：`/upgrade` 能直接升。代码、钩子、`claude-settings.json`、缺的角色模板由升级补上；`actions/` 样例和看门狗单元文件由 scaffold 重新生成。
   - 状态自动迁移：旧收件箱条目按位置编号 i1、i2…；1.3.0 建的老任务照旧回报给原聊天的主控，新派的才交项目经理。
