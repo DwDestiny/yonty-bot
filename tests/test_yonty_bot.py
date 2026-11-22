@@ -202,7 +202,7 @@ class ScaffoldTest(unittest.TestCase):
             {'match': r'\bmcporter\b', 'allow': ['owner', 'owner_task']},
             {'match': r'\bmcporter\b.*\b(lcu|macfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
         def run(cmd, **env):
-            e = dict(self.env, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})
+            e = dict({k: v for k, v in self.env.items() if not k.startswith('FCB')}, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})   # 在任务里跑测试时不继承外面的 FCB_TASK_ID
             return subprocess.run([sys.executable, str(self.inst / 'hooks' / 'command_guard.py')], capture_output=True, text=True,
                                   input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}), env=e)
         mac, mini = "mcporter call lcu.js code='1'", "mcporter call lcu-mini.js code='1'"
