@@ -244,7 +244,7 @@ def checkpoint_text(t, cost, text=""):
     return (f"结论：到检查点（已用 {cost} 美元当量，派活时估的是 {t.get('budget')}：{t.get('budget_why', '')}）。"
             f"停在这里，分支和会话都留着。\n要接着干：主控写 [任务指令] #{t['id']} 继续，预算加到 {nb}；人直接回 #{t['id']} 继续。\n\n{text}").strip()
 
-# ---------- 团队：roles/*.md 是角色模板；每件事有一个负责人（项目 × 事 × 受众），档案由服务写，会话可以换 ----------
+# ---------- 团队：roles/*.md 是角色模板；每件事有一个负责人（项目 × 事，不分聊天），档案由服务写，会话可以换 ----------
 ROLES_DIR = os.path.join(ROOT, "roles")
 TEAM = os.path.join(ROOT, "state", "team")
 
@@ -262,14 +262,10 @@ def roles():
                      "body": (m.group(2) if m else txt).strip()}
     return out
 
-def audience(t):
-    """会话给谁用：主人私聊、某个群、某个同事私聊。上下文只在同一受众里接着用，私聊的东西不进群，同事之间不串。"""
-    import hashlib
-    h = lambda s: hashlib.sha1(str(s).encode()).hexdigest()[:8]
-    o, r = t["origin"], t["requester"]
-    if o.get("chat_type") != "p2p":   # 群里也分主人和同事：主人派的会话带主人权限干过活，不给同事的任务接着用
-        return "g" + h(o.get("chat_id")) + ("-owner" if r.get("owner") else "")
-    return "owner" if r.get("owner") else "u" + h(r.get("id"))
+def by_owner(t):
+    """派活人是不是主人本人（服务按 IM 身份填的）。负责人不分聊天，权限按这个分：
+    只有主人派的任务能接着负责人的会话、成为新的会话头、写已定的决定和项目约定。"""
+    return bool((t.get("requester") or {}).get("owner"))
 
 MAIN_THING = "主线"
 
@@ -279,13 +275,13 @@ def thing_name(v):
     return "" if not v or v.startswith("<") or "不写" in v or v in (MAIN_THING, "无", "-") else v
 
 def sibling_key(t):
-    """负责人按“项目 × 事 × 受众”划分：同一件事的活都交给同一个负责人；主人和同事各有各的。"""
+    """负责人按“项目 × 事”划分：同一件事的活，不管从哪个群、哪个私聊派来，都交给同一个负责人。"""
     import hashlib
     real = os.path.realpath(X(t["repo"]))
     proj = re.sub(r"[^\w.-]", "_", os.path.basename(real)) + "-" + hashlib.sha1(real.encode()).hexdigest()[:6]   # 同名仓库不撞
     thing = t.get("thing") or MAIN_THING
     slug = re.sub(r"[^\w-]", "_", thing)[:24] + "-" + hashlib.sha1(thing.encode()).hexdigest()[:4]
-    return proj, f"{slug}-{audience(t)}"
+    return proj, slug
 
 def _sib_path(t, ext):
     proj, k = sibling_key(t)
@@ -323,19 +319,20 @@ def _sib_write(p, s):
 
 def _conv_path(t):
     proj, _ = sibling_key(t)
-    return os.path.join(TEAM, proj, f"_约定-{audience(t)}.md")
+    return os.path.join(TEAM, proj, "_约定.md")
 
 def sibling_save(t, ctx, notes, total=0):
     """一轮做完后更新这件事的档案。只有服务写档案：现状和待办整栏替换，决定追加，约定记到项目级，通知记到别的事。
-    评审这类每次新开的帮手只往档案里写，不把自己的会话当成负责人的会话。"""
+    评审这类每次新开的帮手只往档案里写，不把自己的会话当成负责人的会话。
+    同事派的任务：会话不当会话头；决定标上“同事派的、主人没确认”；约定不进项目约定，记进笔记。"""
     p = _sib_path(t, ".json"); os.makedirs(os.path.dirname(p), exist_ok=True)
     h = parse_handoff(notes)
     with _Lock(os.path.join(os.path.dirname(p), ".lock")):
         s = sibling(t); proj, k = sibling_key(t)
         done = [x for x in (s.get("tasks") or []) if x != t["id"]][-19:] + [t["id"]]
-        s.update(project=proj, thing=t.get("thing") or MAIN_THING, audience=audience(t), tasks=done,
+        s.update(project=proj, thing=t.get("thing") or MAIN_THING, tasks=done,
                  goal=s.get("goal") or t.get("title", ""), updated=time.time())
-        if roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
+        if by_owner(t) and roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
             heads = s.get("heads") or {}
             heads[t.get("model") or ""] = {"head": t["session_id"], "ctx": ctx, "last_used": time.time(), "total": total, "task": t["id"]}
             s.update(heads=heads, head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time())
@@ -343,9 +340,12 @@ def sibling_save(t, ctx, notes, total=0):
             if h.get(key): s[key] = "\n".join(h[key])[:1500]
         if h.get("decisions"):
             seen = {d["text"] for d in s.get("decisions") or []}
-            new = [{"text": x.lstrip("-· ").strip()[:300], "task": t["id"], "at": time.time()} for x in h["decisions"]]
+            new = [dict({"text": x.lstrip("-· ").strip()[:300], "task": t["id"], "at": time.time()}, **({} if by_owner(t) else {"guest": t["requester"].get("name", "")}))
+                   for x in h["decisions"]]
             s["decisions"] = ((s.get("decisions") or []) + [d for d in new if d["text"] and d["text"] not in seen])[-40:]
         _sib_write(p, s)
+        if h.get("conventions") and not by_owner(t):   # 同事任务提的约定不直接管整个项目，留在笔记里等主人的任务确认
+            h["notes"] += [f"（{t['requester'].get('name', '同事')}派的任务提议的项目约定，没确认）{x}" for x in h.pop("conventions")]
         if h["notes"]:
             with open(_sib_path(t, ".md"), "a", encoding="utf-8") as f:
                 f.write(f"\n## #{t['id']} {t['title']}（{time.strftime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
@@ -369,7 +369,9 @@ def record_text(t, limit=6000):
     if s.get("goal"): parts.append("目标：" + s["goal"])
     if s.get("now"): parts.append("现状：\n" + s["now"])
     if s.get("todo"): parts.append("待办：\n" + s["todo"])
-    if s.get("decisions"): parts.append("已定的决定（不要推翻，除非任务书要求）：\n" + "\n".join(f"- {d['text']}（#{d['task']}）" for d in s["decisions"][-15:]))
+    if s.get("decisions"): parts.append("已定的决定（不要推翻，除非任务书要求）：\n" + "\n".join(
+        f"- {d['text']}（#{d['task']}" + (f"，{d['guest']}派的任务定的，{OWNER_NAME}没确认，有更好的做法可以改" if d.get("guest") else "") + "）"
+        for d in s["decisions"][-15:]))
     if s.get("inbound"): parts.append("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” #{x['task']}：{x['text']}" for x in s["inbound"][-8:]))
     try: conv = open(_conv_path(t), encoding="utf-8").read()[-2000:].strip()
     except FileNotFoundError: conv = ""
@@ -384,10 +386,9 @@ def record_text(t, limit=6000):
     return "\n\n".join(out)
 
 def things_of(t):
-    """同项目、同受众现有的事（给协调人和派活人看；不同受众互相看不到）。"""
+    """同项目现有的事。"""
     proj, _ = sibling_key(t)
-    aud = audience(t)
-    return [s for s in all_siblings() if s.get("project") == proj and s.get("audience") == aud and s.get("thing")]
+    return [s for s in all_siblings() if s.get("project") == proj and s.get("thing")]
 
 def resolve_thing(t):
     """派活写的名字和现有的事对一下：一样的，或一个包含另一个的（“支付”和“支付对账”），归到现有的那件，少开重复的事。"""
@@ -408,14 +409,17 @@ def all_siblings():
     for proj in (sorted(os.listdir(TEAM)) if os.path.isdir(TEAM) else []):
         for f in sorted(os.listdir(os.path.join(TEAM, proj))):
             if f.endswith(".json"):
-                try: out.append(json.load(open(os.path.join(TEAM, proj, f))))
-                except ValueError: pass
+                try:
+                    with open(os.path.join(TEAM, proj, f)) as fh: s = json.load(fh)
+                except ValueError: continue
+                if "audience" not in s: out.append(s)   # 带 audience 的是按聊天分负责人时的旧文件，不再用
     return out
 
 def sibling_fork(t):
-    """新任务能接着哪个会话分叉：同一件事同受众，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
-    上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。"""
-    if not roles().get(t.get("role") or "", {}).get("resume", True): return ""
+    """新任务能接着哪个会话分叉：主人派的，同一件事，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
+    上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。
+    同事派的任务一律新开、只读档案：负责人的会话里可能有主人在别的聊天里交代的事，不给同事的任务接着用、接着问。"""
+    if not by_owner(t) or not roles().get(t.get("role") or "", {}).get("resume", True): return ""
     h = sibling_head(t)
     if not h.get("head"): return ""
     if time.time() - h.get("last_used", 0) > T["sibling_warm_min"] * 60: return ""
@@ -662,6 +666,7 @@ def first_prompt(t, base, forked=False):
   约定：整个项目都该遵守的做法（可选）
   通知 某件事：你改了别的事负责的地方时，给它留一句话（可选）
   其他：摸清的坑、入口，随便写几行
+  档案会给这件事以后所有的任务看，不管是谁从哪个聊天派的：只写工作上的事实，不写谁在哪个聊天里说了什么
 {role}{team}
 任务书：
 {t['brief']}"""

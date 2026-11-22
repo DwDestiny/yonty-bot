@@ -1,10 +1,10 @@
 import uuid
 import shutil
-"""feishu-claude-bot 的文档、生成器和钩子测试。不连飞书，不调 Claude。
+"""Yonty Bot 的文档、生成器和钩子测试。不连飞书，不调 Claude。
 
 Input: scripts/scaffold.py、app/、docs/
 Output: unittest 结果
-Pos: 仓库级测试，运行 python3 tests/test_feishu_claude_bot.py
+Pos: 仓库级测试，运行 python3 tests/test_yonty_bot.py
 """
 import json
 import os
@@ -74,7 +74,7 @@ class ScaffoldTest(unittest.TestCase):
         self.assertIn(OWNER, rules)
         self.assertIn('群聊旁听', rules)
         v = (ROOT / 'VERSION').read_text(encoding='utf-8').strip()
-        self.assertIn(f'skill v{v} 生成', rules)
+        self.assertIn(f'Yonty Bot v{v} 生成', rules)
 
     def test_rules_kept_on_rerun(self):
         p = self.inst / 'rules.md'
@@ -916,10 +916,24 @@ class TaskTest(unittest.TestCase):
         try: p2 = self.t.first_prompt(self.t.load(self.new_task(thing='登录', model='sonnet')), 'origin/main')
         finally: self.t.T['sibling_warm_min'] = 55
         self.assertIn('不用 cookie，因为要跨域', p2); self.assertIn('刷新令牌', p2)
+        # 不分聊天：主人在群里派同一件事，还是同一个负责人，接着它的会话
+        grp = self.t.load(self.new_task(thing='登录', model='sonnet', origin={'channel': 'feishu', 'chat_id': 'oc_x', 'chat_type': 'group', 'message_id': 'om_g'}))
+        self.assertEqual(self.t.sibling_key(grp), self.t.sibling_key(ta)); self.assertEqual(self.t.sibling_fork(grp), ta['session_id'])
+        # 同事派的：同一个档案，但不接负责人的会话、不当会话头；决定标上没确认，约定只进笔记
+        mate = {'channel': 'feishu', 'id': 'ou_mate', 'name': '小李', 'owner': False}
+        gt = self.t.load(self.new_task(thing='登录', model='sonnet', requester=mate, status='done'))
+        self.assertEqual(self.t.sibling_key(gt), self.t.sibling_key(ta)); self.assertEqual(self.t.sibling_fork(gt), '')
+        self.assertIn('刷新令牌', self.t.first_prompt(gt, 'origin/main'))
+        self.t.sibling_save(gt, 1, '决定：日志用 JSON\n约定：分支名用英文')
+        s = self.t.sibling(ta)
+        self.assertEqual(s['head'], ta['session_id']); self.assertEqual(s['decisions'][-1].get('guest'), '小李')
+        self.assertIn('没确认', self.t.record_text(ta)); self.assertIn('分支名用英文', self.t.sibling_notes(ta))
+        self.assertNotIn('分支名用英文', (Path(self.t._conv_path(ta)).read_text(encoding='utf-8')))
+        self.assertEqual(self.b.thing_line(dict(gt, thing_new=True)), '新开了一件事“登录”。')   # 同事那边不列别的事
         # 第二轮：现状替换、决定追加不重复
         self.t.sibling_save(ta, 1, '现状：OAuth 完成\n决定：不用 cookie，因为要跨域\n决定：令牌放内存')
         s = self.t.sibling(ta)
-        self.assertEqual(s['now'], 'OAuth 完成'); self.assertEqual(len(s['decisions']), 2); self.assertEqual(s['todo'], '刷新令牌')
+        self.assertEqual(s['now'], 'OAuth 完成'); self.assertEqual(len(s['decisions']), 3); self.assertEqual(s['todo'], '刷新令牌')
         # 评审是每次新开的帮手：往档案里写，但不顶替负责人的会话
         rv = self.t.load(self.new_task(thing='登录', role='评审', status='done'))
         self.t.sibling_save(rv, 5, '其他：评审发现缺少过期测试')
@@ -940,6 +954,7 @@ class TaskTest(unittest.TestCase):
         self.t.update(a, _force=True, status='waiting')
         nx = self.t.load(self.new_task(thing='登录', model='sonnet', status='approved'))
         self.assertEqual(self.t.sibling_fork(nx), ''); self.assertTrue(self.t.thing_busy(nx))
+        self.assertTrue(self.t.thing_busy(self.t.load(self.new_task(thing='登录', requester=mate, status='approved'))))   # 同事的活也排在后面
         self.t.update(a, _force=True, status='done')
         # 名字相近归到已有的事
         self.assertEqual(self.t.load(self.new_task(thing='支付相关'))['thing'], '支付')
@@ -988,13 +1003,13 @@ class TaskTest(unittest.TestCase):
         k = self.new_task(); self.t.update(k, status='cancelled'); before = len(self.t.events(k))
         self.run_with(dead, k)
         self.assertEqual(self.t.load(k)['status'], 'cancelled'); self.assertEqual(len(self.t.events(k)), before)
-        # 受众：主人私聊、群、同事私聊各是各的；同名仓库不撞
+        # 负责人不分聊天和派活人：同一件事一个键；同名仓库不撞
         base = self.t.load(self.new_task())
         grp = dict(base, origin=dict(base['origin'], chat_type='group', chat_id='oc_x'))
         col = dict(base, requester={'channel': 'feishu', 'id': 'ou_c', 'name': '同事甲', 'owner': False})
         col2 = dict(col, requester=dict(col['requester'], id='ou_d'))
         grp_col = dict(grp, requester=col['requester'])
-        self.assertEqual(len({self.t.sibling_key(x) for x in (base, grp, col, col2, grp_col)}), 5)
+        self.assertEqual(len({self.t.sibling_key(x) for x in (base, grp, col, col2, grp_col)}), 1)
         self.assertNotEqual(self.t.sibling_key(base)[0], self.t.sibling_key(dict(base, repo='/tmp/other/proj'))[0])
         # 预算：同事不能改；做完后再来新要求自动续一段
         c = self.new_task(budget=10, requester={'channel': 'feishu', 'id': 'ou_c', 'name': '同事甲', 'owner': False})

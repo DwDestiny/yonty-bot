@@ -4,7 +4,7 @@
 Input:  实例目录（里面要有 config.json，样例见 app/config.example.json）
 Output: 在实例目录写 bridge.py、tasks.py、hooks/（含 hooks/git/ 钩子分发器）、rules.md、claude-settings.json、服务文件（Linux: systemd 用户服务；macOS: launchd plist）；
         启用企微时另写 wecom_gateway.mjs、package.json 并安装 @wecom/aibot-node-sdk
-Pos:    feishu-claude-bot skill 的生成器
+Pos:    Yonty Bot 的生成器
 用法:   python3 scaffold.py <实例目录> [--rules] [--no-npm] [--confirm-cross-im]
         默认不覆盖已有 rules.md；加 --rules 才按模板重写。
         config.json 打开 cross_im_read 时，第一次生成要加 --confirm-cross-im（先把提醒给主人看、主人同意后再加）
