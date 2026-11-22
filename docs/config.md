@@ -13,7 +13,7 @@
 | `cross_im_read` | `false` | 两个渠道都启用时：会话能不能读另一个 IM 的聊天记录。打开要主人确认，见 boundary.md |
 | `tasks.enabled` | `true` | 长任务开关，见 tasks.md |
 | `tasks.root` | `~/work/.bot-tasks` | 任务工作树放哪（按服务名分子目录）。不能在实例目录里 |
-| `tasks.max_running` | `2` | 同时跑几个后台任务（与聊天并发 `max_parallel` 分开） |
+| `tasks.resources` | 见说明 | 按资源放行：`floor_gb` 1.5、`floor_pct` 10（可用内存底线取两者较大）、`pressure_pct` 20、`max_units` 8（单元总数上限）、`freeze_gb` 0.75、`default_build_gb` 4、`default_light_gb` 1、`build_roles` `["开发","排查","验收"]`。见 tasks.md 第 1 节 |
 | `tasks.approval_hours` | `24` | 同事派的活多久没人批就作废 |
 | `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活时主控能挑的模型别名；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
 | `tasks.relay` | `true` | 任务的完成、提问、失败先交给派活的那个会话（主控）处理，再由主控对人汇报；`false` 就原话直发 |
@@ -26,7 +26,6 @@
 | `tasks.sibling_warm_min` | `55` | 同一件事的负责人会话多少分钟内用过（提示缓存 1 小时内还热），新任务就分叉接着它 |
 | `tasks.sibling_max_ctx` | `150000` | 上个会话的上下文超过这么多 token 就不再接着，新开会话读档案 |
 | `tasks.compact` | `{"idle_min": 50, "min_ctx": 120000}` | 缓存过期前压缩：上下文到 `min_ctx`、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务和还没到换新时间的聊天会话。`min_ctx` 写 0 关掉。别的时候交给 CLI 自己的自动压缩 |
-| `tasks.memory_max` | `"6G"` | 每个本机任务单元的内存上限（systemd `MemoryMax`，配 `OOMPolicy=continue`）。任务里的测试或构建失控时只杀那条命令，任务接着跑，不会吃光整机内存。写空串不设上限 |
 | `tasks.stuck_min` | `40` | 本机任务多少分钟没有任何动作（没调工具、没输出、进程 CPU 平均不到 5%）算卡住：停掉并交回主控；`0` 关闭 |
 | `tasks.verify_retries` | `2` | `[派活]` 写了验证命令时，验证没过最多退回返工几次 |
 | `tasks.verify_timeout_min` | `20` | 验证命令最长跑多久 |
@@ -67,3 +66,11 @@
 | `claude_timeout_min` | 40 | 单条消息最长处理时间 |
 | `processing_emoji` | `OnIt` | 处理中表情 |
 | `new_session_commands` | `["/new"]` | 私聊里发这些词开新会话 |
+| `timezone` | `Asia/Shanghai` | 定时任务和时间显示用的时区 |
+| `devices` | `[]` | 设备列表。每项 `name`、`match`（调用命令的正则，锚定命令开头）、`reset`、`release`、`idle_max_min`。模板为空，设备名是实例配置，见 boundary.md 4.1 |
+| `irreversible` | 见 app/config.example.json | 不可逆命令的正则。有没取的追加指令时 `irreversible_gate` 拦它们 |
+| `schedules` | `{"max_run_min": 120, "fail_pause": 3}` | 定时任务单次最长分钟数；连续失败几次暂停。见 schedules.md |
+| `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |
+| `delivery` | 见说明 | 投递：`max_hops` 3、`owner_max_chars` 300、`other_max_chars` 2000、`dedup_min` 30、`progress_gap_min` 10、`progress_max` 5、`owner_per_10min` 4、`owner_per_hour` 12 |
+
+注意：旧字段 `tasks.max_running` 和 `tasks.memory_max` 从 2.0 起不再生效：放行改按资源，内存上限随任务估计走。写了只在启动日志提醒一次，可以删掉。

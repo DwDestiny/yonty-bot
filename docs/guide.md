@@ -1,6 +1,6 @@
 # 搭建指南（给帮你安装的智能体看）
 
-> 1.3.0 · 2026-11-22 · 维护：Yonty Bot contributors
+> 2.0 · 2026-11-22 · 维护：Yonty Bot contributors
 
 ## 它是什么
 
@@ -128,7 +128,7 @@
 | 任务做完说“推不了/建不了合并请求”，把收尾甩给主人 | 提示词写死 `gh pr create`，远端是 Codeup；结果原话直发给人，没经过主控 | 1.6.0 起建合并请求走 `tasks.py mr`，结果先交主控收尾 |
 | 同事派的任务能读到主人的代码平台令牌 | 拒绝表和钩子只管 gh，不管 Codeup 令牌和 git 凭据助手 | 1.6.0 起 `credential_paths` 进拒绝表，`git_guard` 拦凭据路径、凭据助手和带令牌的请求头 |
 | 主人让机器人改汇报频率，机器人说改不了 | 行为偏好写死在代码里，代码在拒绝表里 | 1.5.1 起行为偏好都写进守则，主人私聊里机器人能改守则；代码类改动仍走终端 |
-| `/task 短名#N` 显示的花费比实际多 | `total_cost_usd` 是会话累计值，`--resume` 后接着累计，1.6.0 及以前逐轮相加 | 2.0.0 起取最大值，增量记进 `spend.jsonl` |
+| `/task 短名#N` 显示的花费比实际多 | `total_cost_usd` 是会话累计值，`--resume` 后接着累计，1.6.0 及以前逐轮相加 | 后续版本起取最大值，增量记进 `spend.jsonl` |
 | 机器人改 git 凭据脚本的仓库白名单被拦，主人在聊天里批了也没用 | 自动模式分类器把“扩大凭据范围”判为越权 | 主人在终端里改，或一次放宽到整个代码组，别指望机器人自己加 |
 
 ## 文件
@@ -146,6 +146,16 @@
 
 ## 变更记录
 
+- 2.0.0（2026-11-22）三层智能体、投递、按资源放行、设备和不可逆闸门、定时任务。详见 [architecture.md](architecture.md)、[tasks.md](tasks.md)、[schedules.md](schedules.md)、[boundary.md](boundary.md)。
+  - 新东西：主控 + 项目经理 + 执行层，话在层之间走投递；开工按内存放行，取代 `tasks.max_running`；设备租约和 `devices`；不可逆闸门 `irreversible`；定时任务（`[定时]`）带权限范围，读范围用 bwrap 落实；`/bind`、`/unbind`、`/why`、`/schedules`；守则加“分流和转交”一节（`[转交]` `[转给]` `[翻篇]` `[定时]`、放行、依赖）。
+  - 从 1.3.0 升级：`/upgrade` 能直接升。代码、钩子、`claude-settings.json`、缺的角色模板由升级补上；`actions/` 样例和看门狗单元文件由 scaffold 重新生成。
+  - 状态自动迁移：旧收件箱条目按位置编号 i1、i2…；1.3.0 建的老任务照旧回报给原聊天的主控，新派的才交项目经理。
+  - `config.json` 里的 `tasks.max_running`、`tasks.memory_max` 不再生效，启动日志提醒一次，可以删掉。
+  - 人工步骤（`/upgrade` 做不了的）：
+    1. `/upgrade` 不重写 `rules.md`。要用主控的新写法，在终端跑 `python3 scripts/scaffold.py <实例> --rules`，或者把 `app/rules/base.md` 新增的“分流和转交（2.0）”一节手工并进去。
+    2. 看门狗定时器只生成不启用。在终端跑：`ln -sf <实例>/<服务名>-yb-watchdog.service <实例>/<服务名>-yb-watchdog.timer ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now <服务名>-yb-watchdog.timer`
+    3. 要用设备和不可逆闸门时，在 `config.json` 写 `devices`、`irreversible`，见 [config.md](config.md)。
+    4. 带读范围的定时任务要机器上有 bwrap：`apt install bubblewrap`。
 - 1.3.0（2026-11-22）命令、后台工具、MCP、升级：
   - 命令统一成英文斜杠命令，中文写法去掉：`/tasks`、`/task 短名#N`、`/task brief|cancel|clean 短名#N`、`/team`、`/approve 短名#N`、`/reject 短名#N`、`/listen on|off|status`、`/new`。新增 `/help`（按身份列命令）、`/status`（主人私聊：额度、在跑的任务、最近报错，服务直接答，不花 token）、`/upgrade`。
   - `/upgrade`：只认主人私聊。服务起一个独立的升级单元：源码仓库要干净、在 main，只做快进；先跑测试，不过就退回；等本机任务单元都停（期间不开新的），备份实例，先回一句再重启，重新生成时不覆盖守则（模板改了会提醒）；新服务起不来就用备份回滚。

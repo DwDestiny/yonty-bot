@@ -21,6 +21,9 @@ bridge 给每次调用设环境变量，钩子据此判断：
 | `FCB_PRIVATE` | 1 = 主人本人的私聊（只有这里放开私密资料） |
 | `FCB_CHAT_ID` | 当前会话的 chat_id |
 | `FCB_CHANNEL` | `feishu` / `wecom`，消息从哪个渠道来 |
+| `FCB_LAYER` | `pm` = 项目经理那一轮。`scope_guard` 拦 Edit、Write、NotebookEdit，`device_guard` 拦设备 |
+| `FCB_SCHEDULE` | 定时运行的编号，只在定时运行里有 |
+| `FCB_SCOPE` | 范围文件 `state/schedules/<id>/scope.json`。`scope_guard` 按 `范围-工具` 拦，`private_guard` 只放 `范围-读` 里的私密路径，`mcp_guard` 只放 `范围-MCP` 里的服务器 |
 
 主人在群里 @ 机器人，`FCB_PRIVATE` 仍是 0：群里有别人看着。非私聊场景还会设 `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`，不读不写自动记忆。
 
@@ -68,6 +71,33 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - 只有主人能批；补充指令、回答提问、取消只认主人和派活人本人（按发送人 ID）。
 - 所有任务都不合并、不推主干、不发版。细节见 [tasks.md](tasks.md) 第 3 节。
 - git 护栏挡得住直接的绕法，挡不住写脚本再执行这类间接绕法。主干要靠 GitHub 分支保护兜底。
+
+### 设备（hooks/device_guard.py）
+
+- 调用设备的命令用正则匹配（`devices[].match`），锚定命令开头。复合命令按 `&&`、`;`、`|` 和 `env` 前缀拆段，逐段查。
+- 任何设备上都不运行 `claude`，不打开 claude.ai。
+- 身份：主人私聊会话短时可用（一轮 10 次、3 分钟）；主人派的任务独占租约；同事来源一律拦；项目经理不用设备。
+- 租约在 `state/devices/<名字>.json`。重置命令只给占用者；任务离开“进行中”就释放。
+
+### 动作
+
+`tasks.py act` 办修补、授权、花钱、方向、禁止这几类事，定义在 `actions/<名字>.json`。授权类要主人 `/approve 短名#N.aK` 批。
+
+### 权限范围
+
+定时运行带一份范围文件，各栏不能超过创建者。见 [schedules.md](schedules.md)。
+
+### 不可逆闸门（hooks/irreversible_gate.py）
+
+命令匹配 `irreversible` 里的正则，而任务还有没取的追加指令时，闸门拦下，先取指令再动手。
+
+### 沙箱实测（2026-11-22）
+
+目标：定时运行只能读范围内的目录。
+
+- 用户级 systemd 单元（systemd 255）里，`ProtectHome=tmpfs`、`BindReadOnlyPaths=`、`InaccessiblePaths=` 不生效：单元照样读得到被藏的文件，systemd 不报错。
+- 所以读范围改用 bwrap 落实：Claude 进程外包一层 bwrap，`--tmpfs` 盖住家目录和范围外的私密目录，只把 `~/.claude`、CLI 安装目录、实例代码（只读）、这次运行的 `state/tasks/<id>`、工作树和 `范围-读` 里的目录挂回来。
+- 机器上没有 bwrap 时，带读范围的定时运行不跑，不降级成只靠提示。
 
 ## 5. 私密资料（config.json 的 private）
 

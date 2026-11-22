@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 1.3.0 · 2026-11-22 · MIT · [中文](README.md) | English
+> 2.0.0 · 2026-11-22 · MIT · [中文](README.md) | English
 
 **Bring your Claude Code into Feishu/Lark and WeCom group chats, and run it as a dev team that takes tasks, checks its own work, and remembers what it decided.**
 
@@ -22,6 +22,18 @@ It drives the official CLI that is signed in on your machine. You don't need a s
 
 **Safe to put in a group.**
 Who you are and who your teammates are comes from Feishu or WeCom identity, not from what a message claims. A teammate's task waits for your approval. Hooks block sending as you, reading private folders and pushing to the main branch. This does not depend on the model behaving.
+
+**Three layers: controller, project manager, workers.**
+The controller is the coordinator in each chat. It talks with you and hands out work. Each project has a project manager, one session per audience. It takes task reports, closes out what it can on its own, and keeps the project board. Workers do the job in the background. Messages between layers go through delivery: only approvals, spending and direction go straight to you. Everything else goes to the controller first, so you are not pinged.
+
+**Admission by resources, not slots.**
+Before a task starts, the service checks free memory and pressure. It only starts the task if the estimate fits. Every admit and re-route is logged, and `/why` shows the reason.
+
+**Device leases.**
+A task that needs a test device takes a lease first. One holder at a time. The lease is released when the task ends or stops.
+
+**Scheduled tasks.**
+Ask it to look at something every morning or every 30 minutes. Each scheduled task has its own permission scope, never wider than its creator's. It pauses itself after repeated failures. See [docs/schedules.md](docs/schedules.md).
 
 **Built to save tokens.**
 A fixed prompt prefix, continuing warm sessions, compacting before the cache expires, and cheap models for simple jobs. A task stops and asks when it reaches its estimated cost, so it does not drain your quota.
@@ -72,6 +84,7 @@ To do it by hand, follow the steps section in [docs/guide.md](docs/guide.md). Th
 | [docs/guide.md](docs/guide.md) | Setup steps, acceptance checklist, operations, known pitfalls |
 | [docs/architecture.md](docs/architecture.md) | Layers, why one owner per piece of work, roadmap |
 | [docs/tasks.md](docs/tasks.md) | Long tasks, per-project task numbers (`name#N`), approval, verify gate, independent acceptance, cost checkpoints |
+| [docs/schedules.md](docs/schedules.md) | Scheduled tasks, permission scope, how to view and stop them |
 | [docs/boundary.md](docs/boundary.md) | Identity and privacy boundaries |
 | [docs/cache.md](docs/cache.md) | How caching saves money and how to check it |
 | [docs/config.md](docs/config.md) | All settings |
