@@ -74,6 +74,18 @@ class ExtraTest(pn.NumberingBase):
         self.assertIn('a#2', e.dispatch('a', '甲二'))
         self.assertIn('另一个甲', e.cmd('/任务 a-2#1'))
 
+    def test_bare_number_prefers_active_and_recent(self):
+        """只写 #N 时先在进行中和最近动过的里找：a#1 早就做完了，b#1 还在排队，#1 就是 b#1。"""
+        e = pn.Env(self)
+        e.dispatch('a', '甲一'); e.dispatch('b', '乙一')
+        old = e.by_title('甲一')['id']
+        e.t.update(old, _force=True, status='done')
+        e.t.update(old, _touch=False, updated=1000.0)   # 很久以前动过
+        got = e.spy_inbox()
+        self.assertIn('b#1', e.cmd('#1 加日志'))
+        self.assertEqual([g['title'] for g in got], ['乙一'])
+        self.assertIn('甲一', e.cmd('/任务 a#1'))   # 带上项目名照样找得到
+
     def test_unknown_prefix_goes_to_chat(self):
         """“问题#3 怎么办”不是任务编号：照常交给聊天。"""
         e = pn.Env(self)
