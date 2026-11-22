@@ -50,7 +50,10 @@
       "pressure_pct": 20,
       "max_units": 8,
       "default_build_gb": 4,
-      "default_light_gb": 1
+      "default_light_gb": 1,
+      "freeze_gb": 0.75,
+      "freeze_pressure_pct": 60,
+      "thaw_after_s": 60
     }
   },
   "persona": "work",
@@ -124,7 +127,10 @@
   ],
   "schedules": {
     "max_run_min": 120,
-    "fail_pause": 3
+    "fail_pause": 3,
+    "min_wake_min": 5,
+    "probe_timeout_s": 60,
+    "probe_mem_mb": 1024
   },
   "routing": {
     "sticky_min": 30,
@@ -140,6 +146,9 @@
     "progress_gap_min": 10,
     "progress_max": 5,
     "owner_per_10min": 4,
-    "owner_per_hour": 12
+    "owner_per_hour": 12,
+    "pingpong_max": 3,
+    "pingpong_min": 10,
+    "merge_s": 120
   }
 }

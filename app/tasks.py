@@ -810,6 +810,7 @@ def sandbox(t):
     if not bw: return None
     reads = [os.path.realpath(X(p)) for p in sc.get("read") or []]
     a = [bw, "--bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"] + _hide(reads)
+    if os.path.isdir("/run/user"): a += ["--tmpfs", "/run/user"]   # 用户级 systemd 和 D-Bus 的套接字：借它能在沙箱外跑命令（实测）
     st = os.path.join(ROOT, "state")
     keep = [tdir(t["id"]), os.path.join(st, "deliveries"), os.path.join(st, "devices"), os.path.dirname(t["scope"])]
     for d in keep: os.makedirs(d, exist_ok=True)

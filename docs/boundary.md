@@ -96,7 +96,9 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 目标：定时运行只能读范围内的目录。
 
 - 用户级 systemd 单元（systemd 255）里，`ProtectHome=tmpfs`、`BindReadOnlyPaths=`、`InaccessiblePaths=` 不生效：单元照样读得到被藏的文件，systemd 不报错。
-- 所以读范围改用 bwrap 落实：Claude 进程外包一层 bwrap，`--tmpfs` 盖住家目录和范围外的私密目录，只把 `~/.claude`、CLI 安装目录、实例代码（只读）、这次运行的 `state/tasks/<id>`、工作树和 `范围-读` 里的目录挂回来。
+- 所以读范围改用 bwrap 落实：Claude 进程外包一层 bwrap，`--tmpfs` 盖住范围外的私密目录和 `/run/user`，实例目录只读，只把这次运行的 `state/tasks/<id>`、投递、设备和范围目录挂成可写。
+- `/run/user` 必须盖：没盖时，沙箱里用 `XDG_RUNTIME_DIR=/run/user/<uid> systemd-run --user --pipe --wait cat <范围外的文件>` 读得到（2026-11-22 实测），用户级 systemd 在沙箱外替它跑命令。
+- 探针比定时运行收得更紧（探针不经过钩子）：家目录、`/tmp` 整个盖掉，只读放回该看的，见 schedules.md 第 4 节。测试 `test_probe_sees_only_scope_and_no_credentials` 用真的 bwrap 验证范围外的文件、凭据目录、实例目录和用户级 systemd 这条路都走不通。
 - 机器上没有 bwrap 时，带读范围的定时运行不跑，不降级成只靠提示。
 
 ## 5. 私密资料（config.json 的 private）
