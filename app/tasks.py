@@ -3,7 +3,8 @@
 
 Input:  同目录 config.json；bridge.py 调用本模块的函数；python3 tasks.py run <id>（后台单元的入口）
 Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（要发回聊天的事件）、inbox.jsonl（追加指令）、
-        stream.log（Claude 原始输出）；任务工作树 <tasks.root>/<服务名>/<id>，分支 bot/<id>-<月日>
+        stream.log（Claude 原始输出）；任务工作树 <tasks.root>/<服务名>/<id>，分支 bot/<短名>-<N>-<月日>
+        <id> 是内部句柄（目录名、单元名、FCB_TASK_ID）；对人一律显示“短名#N”：每个项目（仓库）各自从 1 编，见 ref()
 Pos:    bridge.py 的任务层。bridge 管收消息、审批、往聊天里发；本文件管任务存储和后台运行。
         后台任务跑在独立的 systemd 用户单元里（macOS 用独立进程组），bridge 重启不影响任务，重启后接着看事件。
 """
@@ -93,24 +94,21 @@ TRANSITIONS = {
 class InvalidTransition(ValueError):
     pass
 
-def update(tid, _force=False, **kv):
-    """改任务字段。改 status 要符合 TRANSITIONS；_force 只给测试造场景用。"""
+def update(tid, _force=False, _touch=True, **kv):
+    """改任务字段。改 status 要符合 TRANSITIONS；_force 只给测试造场景用；_touch=False 不改 updated（迁移用）。"""
     with _Lock(os.path.join(tdir(tid), ".lock")):
         t = load(tid) or {}
         old, new = t.get("status"), kv.get("status")
         if not _force and new and old and new != old and new not in TRANSITIONS.get(old, set()):
-            raise InvalidTransition(f"#{tid} 不能从 {old} 变成 {new}")
-        t.update(kv); t["updated"] = time.time()
+            raise InvalidTransition(f"{ref(t)} 不能从 {old} 变成 {new}")
+        t.update(kv)
+        if _touch or not t.get("updated"): t["updated"] = time.time()
         tmp = os.path.join(tdir(tid), "task.json.tmp")
         with open(tmp, "w") as f: json.dump(t, f, ensure_ascii=False, indent=1)
         os.replace(tmp, os.path.join(tdir(tid), "task.json"))
         return t
 
 def create(**fields):
-    os.makedirs(STORE, exist_ok=True)
-    with _Lock(os.path.join(STORE, ".lock")):
-        n = 1 + max([int(d) for d in os.listdir(STORE) if d.isdigit()] or [0])
-        os.makedirs(tdir(n))
     r = roles().get(fields.get("role") or "")
     if r:   # 角色模板给默认模型和思考档；主控在 [派活] 里写了就以主控为准
         if not fields.get("model") and r["model"] in MODELS: fields["model"] = r["model"]
@@ -119,13 +117,95 @@ def create(**fields):
         fields["budget"], fields["budget_why"] = budget_basis(fields.get("role"), fields.get("model"))
     if fields.get("repo") and fields.get("origin") and fields.get("requester"):
         fields["thing"], fields["thing_new"] = resolve_thing(fields)
-    fields.update(id=n, created=time.time(), posted=0, turn=0, session_id=str(uuid.uuid4()),
-                  branch=f"bot/{n}-{time.strftime('%m%d')}", worktree=os.path.join(TASK_ROOT, str(n)))
-    return update(n, **fields)
+    os.makedirs(STORE, exist_ok=True)
+    with _Lock(os.path.join(STORE, ".lock")):   # 内部 id 和项目内编号在同一把锁里定下并写盘，并发派活不会撞号
+        n = 1 + max([int(d) for d in os.listdir(STORE) if d.isdigit()] or [0])
+        os.makedirs(tdir(n))
+        existing = all_tasks()
+        proj = project_of(fields.get("repo") or "", existing)
+        num = next_num(proj, existing)
+        fields.update(id=n, project=proj, num=num, created=time.time(), posted=0, turn=0, session_id=str(uuid.uuid4()),
+                      branch=f"bot/{proj}-{num}-{time.strftime('%m%d')}", worktree=os.path.join(TASK_ROOT, str(n)))
+        return update(n, **fields)
 
 def all_tasks():
     if not os.path.isdir(STORE): return []
     return [t for t in (load(int(d)) for d in sorted((d for d in os.listdir(STORE) if d.isdigit()), key=int)) if t]
+
+# ---------- 任务编号：一个仓库是一个项目，短名取仓库目录名小写（tasks.project_alias 可改），项目内从 1 编 ----------
+ALIASES = {os.path.realpath(X(k)): v for k, v in (T.get("project_alias") or {}).items() if k and v}
+LIVE_S = 7 * 86400   # 只写 #N 时先在进行中和这么久以内动过的任务里找
+REF_RE = re.compile(r"^([^\s#]*)#(\d+)$|^(\d+)$")
+
+def short_name(s):
+    """短名只留字母、数字、点、横线、下划线，放进分支名、写在 # 前面都不出歧义。"""
+    return re.sub(r"[^\w.-]+", "-", (s or "").lower()).strip("-.") or "task"
+
+def _real(p): return os.path.realpath(X(p)) if p else ""
+
+def project_of(repo, existing=None):
+    """仓库的短名：配了别名用别名；否则沿用这个仓库已有任务的短名，再否则取目录名。
+    不同仓库撞了名（两个 app 目录）就在后面加 -2、-3，写进任务里不再变。"""
+    real = _real(repo)
+    existing = all_tasks() if existing is None else existing
+    same = [x.get("project") for x in existing if x.get("project") and _real(x.get("repo")) == real]
+    base = short_name(ALIASES[real]) if real in ALIASES else (same[-1] if same else short_name(os.path.basename(real)))
+    if base in same: return base
+    taken = {x.get("project") for x in existing if x.get("project") and _real(x.get("repo")) != real}
+    name, i = base, 2
+    while name in taken: name, i = f"{base}-{i}", i + 1
+    return name
+
+def next_num(proj, existing=None):
+    existing = all_tasks() if existing is None else existing
+    return 1 + max([x.get("num") or 0 for x in existing if x.get("project") == proj] or [0])
+
+def ref(t):
+    """对人显示的任务编号：短名#N。"""
+    if not t: return "?"
+    return f"{t.get('project') or 'task'}#{t.get('num') or t.get('id')}"
+
+def tref(tid):
+    """按内部 id 显示编号（档案里记的是内部 id）。"""
+    return ref(load(tid)) if load(tid) else f"任务{tid}"
+
+def parse_ref(s):
+    """“a#3”“#3”“3” -> (短名或 None, 3)；不是编号返回 None。"""
+    m = REF_RE.match((s or "").strip())
+    if not m: return None
+    return (short_name(m.group(1)) if m.group(1) else None), int(m.group(2) or m.group(3))
+
+def resolve(s, pool=None):
+    """按编号找任务，返回 (任务或 None, 候选)。带短名的精确匹配；只写 #N 时，新编号和升级前的旧全局号（legacy）一起算，
+    候选多于一个先只留进行中和最近动过的；还剩一个就用它，剩好几个返回 None 和候选，由调用方列出来让人带上项目名，不猜。"""
+    p = parse_ref(s) if isinstance(s, str) else s
+    if not p: return None, []
+    proj, n = p
+    pool = all_tasks() if pool is None else pool
+    if proj:
+        hit = [t for t in pool if t.get("project") == proj and t.get("num") == n]
+    else:
+        hit = [t for t in pool if t.get("num") == n or t.get("legacy") == n]
+        if len(hit) > 1:
+            now = time.time()
+            live = [t for t in hit if t.get("status") in ACTIVE + ("pending",) or now - (t.get("updated") or 0) < LIVE_S]
+            hit = live or hit
+    return (hit[0] if len(hit) == 1 else None), hit
+
+def migrate():
+    """升级到按项目编号：给还没有项目内编号的旧任务按各项目的创建顺序编号，旧全局号记在 legacy（过渡期 #N 还认）。
+    分支、工作树、事件都不动。幂等：编过号的跳过。bridge 启动时调；返回这次编了几个。"""
+    if not os.path.isdir(STORE): return 0
+    with _Lock(os.path.join(STORE, ".lock")):
+        tasks_ = all_tasks()
+        todo = sorted((t for t in tasks_ if not t.get("num")), key=lambda t: (t.get("created") or 0, t["id"]))
+        done = [t for t in tasks_ if t.get("num")]
+        for t in todo:
+            proj = project_of(t.get("repo") or "", done)
+            kv = dict(project=proj, num=next_num(proj, done), legacy=t["id"])
+            update(t["id"], _force=True, _touch=False, **kv)
+            done.append(dict(t, **kv))
+        return len(todo)
 
 def _append(tid, name, obj):
     with _Lock(os.path.join(tdir(tid), ".lock")):
@@ -244,7 +324,7 @@ def budget_basis(role, model):
 def checkpoint_text(t, cost, text=""):
     nb = round(max(cost * 1.5, cost + 5))
     return (f"结论：到检查点（已用 {cost} 美元当量，派活时估的是 {t.get('budget')}：{t.get('budget_why', '')}）。"
-            f"停在这里，分支和会话都留着。\n要接着干：主控写 [任务指令] #{t['id']} 继续，预算加到 {nb}；人直接回 #{t['id']} 继续。\n\n{text}").strip()
+            f"停在这里，分支和会话都留着。\n要接着干：主控写 [任务指令] {ref(t)} 继续，预算加到 {nb}；人直接回 {ref(t)} 继续。\n\n{text}").strip()
 
 # ---------- 团队：roles/*.md 是角色模板；每件事有一个负责人（项目 × 事，不分聊天），档案由服务写，会话可以换 ----------
 ROLES_DIR = os.path.join(ROOT, "roles")
@@ -350,10 +430,10 @@ def sibling_save(t, ctx, notes, total=0):
             h["notes"] += [f"（{t['requester'].get('name', '同事')}派的任务提议的项目约定，没确认）{x}" for x in h.pop("conventions")]
         if h["notes"]:
             with open(_sib_path(t, ".md"), "a", encoding="utf-8") as f:
-                f.write(f"\n## #{t['id']} {t['title']}（{time.strftime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
+                f.write(f"\n## {ref(t)} {t['title']}（{time.strftime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
         if h.get("conventions"):
             with open(_conv_path(t), "a", encoding="utf-8") as f:
-                f.write("".join(f"- {x.lstrip('-· ').strip()}（#{t['id']}）\n" for x in h["conventions"]))
+                f.write("".join(f"- {x.lstrip('-· ').strip()}（{ref(t)}）\n" for x in h["conventions"]))
     for name, text in h["notify"]:   # 跨事的改动：一个人改完，给受影响的那件事留话，它下次开工时会看到
         o = dict(t, thing=name); q = _sib_path(o, ".json")
         if name == (t.get("thing") or MAIN_THING) or not os.path.exists(q):   # 只给已有的事留话；“通知用户：”这类不算
@@ -372,9 +452,9 @@ def record_text(t, limit=6000):
     if s.get("now"): parts.append("现状：\n" + s["now"])
     if s.get("todo"): parts.append("待办：\n" + s["todo"])
     if s.get("decisions"): parts.append("已定的决定（不要推翻，除非任务书要求）：\n" + "\n".join(
-        f"- {d['text']}（#{d['task']}" + (f"，{d['guest']}派的任务定的，{OWNER_NAME}没确认，有更好的做法可以改" if d.get("guest") else "") + "）"
+        f"- {d['text']}（{tref(d['task'])}" + (f"，{d['guest']}派的任务定的，{OWNER_NAME}没确认，有更好的做法可以改" if d.get("guest") else "") + "）"
         for d in s["decisions"][-15:]))
-    if s.get("inbound"): parts.append("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” #{x['task']}：{x['text']}" for x in s["inbound"][-8:]))
+    if s.get("inbound"): parts.append("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” {tref(x['task'])}：{x['text']}" for x in s["inbound"][-8:]))
     try: conv = open(_conv_path(t), encoding="utf-8").read()[-2000:].strip()
     except FileNotFoundError: conv = ""
     if conv: parts.append("项目约定（这个项目的所有事都遵守）：\n" + conv)
@@ -651,7 +731,7 @@ def run_accept(tid):
     t = load(tid)
     a = dict(t, role=ACCEPT_ROLE, model=r.get("model") or t.get("model"), effort=r.get("effort") or t.get("effort"))
     sid = str(uuid.uuid4())
-    prompt = (f"[验收 #{t['id']}] {t['title']}\n仓库：{t['repo']}。你在它的工作树 {wt} 里，分支 {t['branch']}（基于 {t.get('base')}）。\n"
+    prompt = (f"[验收 {ref(t)}] {t['title']}\n仓库：{t['repo']}。你在它的工作树 {wt} 里，分支 {t['branch']}（基于 {t.get('base')}）。\n"
               + (f"派活时定的验证命令：{t['verify']}。\n" if t.get("verify") else "")
               + f"\n你的角色：{r['name']}。\n{r['body']}\n\n任务书：\n{t['brief']}")
     cmd = session_cmd(a) + ["--output-format", "stream-json", "--verbose", "--session-id", sid,
@@ -674,7 +754,7 @@ def run_accept(tid):
     update(tid, cost=round((load(tid).get("cost") or 0) + usd, 3), accept_cost=round((load(tid).get("accept_cost") or 0) + usd, 3), accept_session=sid)
     if load(tid).get("status") != "running": return
     if git(wt, "status", "--porcelain").stdout.strip():   # 写了没提交：服务替它提交
-        git(wt, "add", "-A"); git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-q", "-m", f"验收测试（#{tid}）")
+        git(wt, "add", "-A"); git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-q", "-m", f"验收测试（{tref(tid)}）")
     head = git(wt, "rev-parse", "HEAD").stdout.strip()
     t = dict(load(tid), accept_commit=head)
     rng = (t["accept_from"], head)
@@ -725,14 +805,14 @@ def first_prompt(t, base, forked=False):
         news = [x for x in s.get("inbound") or [] if x["at"] > s.get("last_used", 0)]
         team = (f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人，接着自己上次的会话干活，前面的上下文还在。"
                 f"这是一个新任务，在新的工作树和分支里，以前任务的工作树不要再动。\n"
-                + ("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” #{x['task']}：{x['text']}" for x in news) + "\n" if news else ""))
+                + ("别的事改动后给你留的话：\n" + "\n".join(f"- 来自“{x['from']}” {tref(x['task'])}：{x['text']}" for x in news) + "\n" if news else ""))
     else:
         rec = record_text(t)
         team = (f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人。下面是这件事的档案（以前的你留下的；和代码对不上时以代码为准，并在交接里改正）：\n{rec}\n"
                 if rec else f"\n你是 {proj.rsplit('-', 1)[0]} 上“{thing}”这件事的负责人，这是它的第一个任务。\n")
     src = ("私聊" if t["origin"]["chat_type"] == "p2p" else "群聊") + "（" + CH_LABEL.get(t["origin"]["channel"], "") + "）"
     ok = f"，{OWNER_NAME}已批准" if not who.get("owner") else ""
-    return f"""[长任务 #{t['id']}] {t['title']}
+    return f"""[长任务 {ref(t)}] {t['title']}
 派活人：{who['name']}（{'是' if who.get('owner') else '不是'}{OWNER_NAME}本人）{ok}；来自{src}
 仓库：{t['repo']}。你在它的独立工作树 {t['worktree']} 里，分支 {t['branch']}（基于 {base}）。只改这个工作树。
 
@@ -949,7 +1029,7 @@ def cloud_ok(repo, owner):
 def cloud_prompt(t, start, extra=""):
     v = t.get("verify")
     check = (f"- 验证命令（必须通过才算做完）：{v}\n" if v else "- 做完跑仓库自带的测试，命令和结果写进提交正文。\n")
-    return (f"[长任务 #{t['id']}] {t['title']}（云端执行，没人盯着，做完再说话）\n"
+    return (f"[长任务 {ref(t)}] {t['title']}（云端执行，没人盯着，做完再说话）\n"
             f"派活人：{t['requester']['name']}（{OWNER_NAME}本人）\n"
             f"开工：git fetch origin，然后 git checkout -B {t['branch']} {start}。只在这个分支上干。\n"
             "- 先列计划再做。能自己定的不要问；必须由人拍板的，写进最后一次提交的正文，按“做不下去”收尾。\n"
@@ -964,7 +1044,7 @@ def cloud_prompt(t, start, extra=""):
 
 def cloud_launch(t, prompt):
     """一次性的 haiku 会话调 RemoteTrigger 建例程并立刻触发（约 1 美分）。返回 (例程号, 云端会话号)。"""
-    body = {"name": f"{SLUG} #{t['id']} {t['title']}"[:80], "enabled": False,
+    body = {"name": f"{SLUG} {ref(t)} {t['title']}"[:80], "enabled": False,
             "job_config": {"ccr": {"environment_id": CLOUD["environment_id"],
                 "session_context": {"model": CLOUD_MODELS.get(t.get("model") or "sonnet", CLOUD_MODELS["sonnet"]),
                                     "sources": [{"git_repository": {"url": "https://github.com/" + github_slug(t["repo"])}}],

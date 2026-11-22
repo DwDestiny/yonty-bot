@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 1.0.0 · 2026-11-22 · MIT · 中文 | [English](README.en.md)
+> 1.1.0 · 2026-11-22 · MIT · 中文 | [English](README.en.md)
 
 **把你的 Claude Code 拉进飞书群和企业微信，当成一支会派活、会验收、记得住事的开发团队。**
 
@@ -71,7 +71,7 @@ Yonty Bot 跑在你自己的服务器上，驱动你在这台机器上已经登�
 |---|---|
 | [docs/guide.md](docs/guide.md) | 搭建步骤、验收清单、运维、踩过的坑 |
 | [docs/architecture.md](docs/architecture.md) | 分层架构、一件事一个负责人的设计依据、路线 |
-| [docs/tasks.md](docs/tasks.md) | 长任务、审批、验证闸门、独立验收、预算检查点 |
+| [docs/tasks.md](docs/tasks.md) | 长任务、按项目的任务编号（`短名#N`）、审批、验证闸门、独立验收、预算检查点 |
 | [docs/boundary.md](docs/boundary.md) | 身份和私密内容的边界 |
 | [docs/cache.md](docs/cache.md) | 缓存怎么省钱、怎么验证 |
 | [docs/config.md](docs/config.md) | 全部配置项 |
