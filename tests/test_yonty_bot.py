@@ -278,7 +278,7 @@ class AmbientTest(unittest.TestCase):
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT)
         (inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py'):
+        for f in ('bridge.py', 'tasks.py', 'delivery.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py'):
             (inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         spec = importlib.util.spec_from_file_location('fcb_bridge_test', inst / 'bridge.py')
         b = importlib.util.module_from_spec(spec)
@@ -520,7 +520,7 @@ class TaskTest(unittest.TestCase):
         cfg['channels']['wecom'].update(enabled=True, owner_userid='boss')
         cfg['ambient']['enabled'] = False
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py', 'upgrade.py'):
+        for f in ('bridge.py', 'tasks.py', 'upgrade.py', 'delivery.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py'):
             (cls.inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         shutil.copytree(TEMPLATES / 'roles', cls.inst / 'roles')
         gh = cls.inst / 'hooks' / 'git'; gh.mkdir(parents=True)
@@ -950,7 +950,7 @@ class TaskTest(unittest.TestCase):
         finally: self.t.subprocess.run = orig
         run = [c for c in calls if c and c[0] == 'systemd-run']
         if run:   # 没有 systemd 的机器走直接起进程，不检查
-            self.assertIn('MemoryMax=6G', run[0]); self.assertIn('OOMPolicy=continue', run[0])
+            self.assertTrue(any(a.startswith('MemoryHigh=') for a in run[0]) and any(a.startswith('MemoryMax=') for a in run[0]), run[0]); self.assertIn('OOMPolicy=continue', run[0])
 
     def test_mcp_follows_user_config(self):
         cfg = dict(self.t.CFG)

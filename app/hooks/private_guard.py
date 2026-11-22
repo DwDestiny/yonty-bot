@@ -41,6 +41,13 @@ X = lambda p: HOME + p[1:] if p.startswith("~") else p
 text = " ".join(str(v) for v in ti.values() if isinstance(v, (str, int)))
 text = text.replace("${HOME}", HOME).replace("$HOME", HOME)
 text = re.sub(r"(?<![\w/])~(?=/|\s|$)", HOME, text)
+# 定时任务的一次运行（FCB_SCOPE）：“范围-读”里明确列的私密目录放行，别的私密路径照拦（方案 6.6）
+try:
+    with open(os.environ.get("FCB_SCOPE") or "") as f: SCOPE_READ = [os.path.realpath(X(p)) for p in json.load(f).get("read") or []]
+except Exception:
+    SCOPE_READ = []
+for r in SCOPE_READ:
+    text = re.sub(re.escape(r) + r"(?=/|\s|$|['\"])", "<范围内>", text)
 
 def block(msg):
     sys.stderr.write("机器人红线：" + msg + " 私密资料只在主人私聊里能碰，被拦了不要绕路。\n"); sys.exit(2)

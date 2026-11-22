@@ -47,8 +47,9 @@ BASE_TASKS = {'enabled', 'root', 'max_running', 'approval_hours', 'heartbeat_min
 
 def new_config_keys():
     ex = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
-    top = [k for k in ex if k not in BASE_TOP]
-    sub = [k for k in ex.get('tasks', {}) if k not in BASE_TASKS]
+    v2 = {'timezone', 'devices', 'irreversible', 'schedules', 'routing', 'delivery', 'resources'}   # 2.0 新增的配置，不是别名字段
+    top = [k for k in ex if k not in BASE_TOP and k not in v2]
+    sub = [k for k in ex.get('tasks', {}) if k not in BASE_TASKS and k not in v2]
     return ex, top, sub
 
 
@@ -535,7 +536,7 @@ class DocsAndRulesTest(unittest.TestCase):
         """完成定义：VERSION 升一个小版本。"""
         v = tuple(int(x) for x in self.read('VERSION').strip().split('.'))
         self.assertGreater(v, (1, 0, 0), 'VERSION 要升一个小版本')
-        self.assertEqual(v[0], 1)
+        self.assertGreaterEqual(v[0], 1)
 
 
 if __name__ == '__main__':

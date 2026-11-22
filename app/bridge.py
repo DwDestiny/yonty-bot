@@ -321,7 +321,7 @@ def prime(sid):
     return subprocess.run(base_cmd() + ["--session-id", sid], input=PRIME, capture_output=True, text=True,
                           timeout=300, cwd=WORKDIR, env=hook_env(False, False, ""))
 
-def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None):
     """跑一轮聊天会话，返回最后一个结果。这一轮中途的结果（起了后台任务时）交给 on_extra。"""
     with lock: sid, started = s["id"], s["started"]
     if not started and PRIME_ON:
@@ -332,6 +332,8 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
     t0 = time.time()
     channel = "wecom" if key.startswith("wx:") else "feishu"   # 钩子按渠道判断能不能跨 IM 读聊天记录
     env = hook_env(owner, private, chat_id, channel)
+    env["FCB_SESSION_KEY"] = key   # tasks.py send 用它认出发送方是哪个会话；环境变量不进提示词，不动缓存前缀
+    if layer: env.update(FCB_LAYER="pm", FCB_PROJECT=layer)   # 项目经理：参数和聊天会话逐项相同，只按环境变量由钩子拦写文件
     if CHAT_MAX_TURNS: cmd += ["--max-turns", str(CHAT_MAX_TURNS)]
     out, text, rc, tail = stream_claude(cmd, prompt, env, on_extra)
     log.info("claude %s rc=%s %.0fs", key, rc, time.time() - t0)
@@ -384,6 +386,7 @@ def compact_chat(key):
 def handle(ev):
     if ev.get("relay"): return task_relay(ev)
     if ev.get("compact"): return compact_chat(ev["key"])
+    if ev.get("deliver"): return delivery_turn(ev)
     key = session_key(ev)
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
     text = (ev.get("content") or "").strip()
@@ -417,16 +420,29 @@ def handle(ev):
             mark_seen(s, [m.get("message_id") for m in ctx] + [ev["message_id"], (quoted or {}).get("message_id")],
                       int(ev.get("create_time", "0")) / 1000 or time.time())
             log.info("context %s: %d msgs%s", key, len(ctx), " +quoted" if quoted else "")
-            result = run_claude(key, s, build_prompt(ev, name, ctx, quoted), owner,
-                                owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
-                                on_extra=lambda x: deliver(ev, key, x, in_thread, sent))
+            pm = ev.get("pm")
+            if pm: key = ev["pm_key"]; s = get_session(key)
+            prompt = build_prompt(ev, name, ctx, quoted)
+            if pm:
+                prompt = (pm_intro(pm) if not s["started"] or not s.get("pm_intro") else "") + prompt
+                if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
+                with lock: s["pm_intro"] = True
+            result = run_claude(key, s, prompt, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
+                                on_extra=lambda x: deliver(ev, key, x, in_thread, sent), **({"layer": pm} if pm else {}))
+            if pm and (result or "").strip().startswith("[不是我的]"):   # 项目经理退回：主控重新判断这条消息
+                sticky.pop(session_key(ev), None)
+                enqueue(session_key(ev), dict(ev, pm=None, no_route=True)); result = ""
+            elif pm and result:
+                result = pm_marks(pm, key, owner, result)
+                if result.strip(): result = f"【{pm}】" + result
     except subprocess.TimeoutExpired:
         with lock: sessions.pop(key, None); save(SESS_FILE, sessions)
         result = "这活儿超时了，我先停了。太大的活儿请回终端开个会话来做。"
     except Exception as e:
         log.exception("handle failed")
         result = f"出岔子了：{type(e).__name__}，请看日志。"
-    if result or not sent: deliver(ev, key, result, in_thread, sent)   # 最后一句已经中途发过了就不补空回复
+    if ev.get("chat_type") == "p2p": devices.release_holder("chat:" + ev.get("chat_id", ""))   # 聊天一轮结束就还设备
+    if result or (not sent and not ev.get("pm") and not ev.get("no_route")): deliver(ev, key, result, in_thread, sent)
     if ev.get("channel") != "wecom": unreact(ev["message_id"], rid)
 
 def deliver(ev, key, result, in_thread, sent):
@@ -436,9 +452,15 @@ def deliver(ev, key, result, in_thread, sent):
         try: result = chat_followups(ev, result)   # 先拆 [任务指令]：再派活会在后面接说明，多行指令会把它吞进去
         except Exception:
             log.exception("chat followups failed")
+        try: result = handover(ev, result)
+        except Exception: log.exception("handover failed")
+        try: result = schedule_directive(ev, result)
+        except Exception:
+            log.exception("schedule directive failed"); result += "\n\n（定时任务没建成，请看日志。）"
         try: result = task_directive(ev, result)
         except Exception:
             log.exception("task directive failed"); result += "\n\n（派活没成，请看日志。）"
+        if not (result or "").strip() or result.strip() == AMB_SILENT: return
     n = len(sent); sent.append(1)
     if n and ev.get("channel") == "wecom":
         out_id = wecom_send({"op": "send", "chatid": ev["chat_id"], "content": wecom_trim(result), "ref": f"x{n}"})
@@ -475,6 +497,11 @@ def dispatch(ev):
     except ValueError: pass
     key = session_key(ev)
     log.info("recv %s from %s in %s", mid, ev.get("sender_id"), key)
+    try: r = route(ev)
+    except Exception:
+        log.exception("route failed"); r = None
+    if r and r[0] == "answer": return answer(ev, r[1])
+    if r and r[0] == "pm": return enqueue(r[2], dict(ev, pm=r[1], pm_key=r[2]))
     enqueue(key, ev)
 
 def enqueue(key, ev):
@@ -571,6 +598,10 @@ def task_detail(t, owner):
     if todos: lines += ["计划："] + [f"{mark.get(x.get('status'), '·')} {x.get('content', '')}" for x in todos[:12]]
     prog = [e for e in tasks.events(t["id"]) if e["kind"] == "progress"]
     if prog: lines.append("最近进展：" + prog[-1]["text"])
+    box = tasks.inbox_items(t["id"])[-6:]
+    if box: lines += ["收件箱："] + [f"i{x['n']} {x['kind']}（{x['who']}）：{'已取' if x['fetched'] else '没取'}" + (f"，{x['ack']}" if x.get("ack") else "")
+                                    for x in box]
+    if t.get("wait_why") and t["status"] == "approved": lines.append("排队原因：" + t["wait_why"])
     return "\n".join(lines)
 
 def service_command(ev):
@@ -663,6 +694,8 @@ def task_command(ev):
     owner = is_owner(ev)
     usage = (f"用法：{BT}/task 短名#N{BT} 看详情，{BT}/task brief 短名#N{BT} 看任务书，{BT}/task cancel 短名#N{BT} 停掉"
              + (f"，{BT}/task clean 短名#N{BT} 删工作树" if owner else "") + "。只有一个项目有这个号时可以只写 #N。")
+    v2 = v2_command(ev, text, owner)
+    if v2 is not None: return v2
     if text == "/tasks":
         mine = [t for t in tasks.all_tasks() if can_see(t, ev)]
         act = [t for t in mine if t["status"] in tasks.ACTIVE + ("pending",)]
@@ -788,7 +821,8 @@ def task_directive(ev, result):
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], model=d["model"], effort=d["effort"],
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=d.get("thing", ""), accept=d.get("accept", False),
-                     budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""),
+                     budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
+                     mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
                      status="approved" if owner else "pending",
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
@@ -884,6 +918,7 @@ def quota_check(now):
 
 def task_tick():
     now = time.time()
+    cands = []
     for t in tasks.all_tasks():
         n = t["id"]
         for e in tasks.events(n, t.get("posted", 0)):
@@ -932,9 +967,191 @@ def task_tick():
                 continue
         except Exception: log.exception("task #%s compact check failed", t["id"])
         if t["status"] == "approved" and t.get("exec") != "cloud" and upgrading(): continue   # 升级要等本机任务单元都停下：先不开新的
-        if t["status"] == "approved" and (t.get("exec") == "cloud" or running < tasks.T["max_running"]) and not tasks.thing_busy(t):
-            log.info("task #%s launch turn %s", t["id"], t.get("turn", 0) + 1)
-            tasks.launch(t["id"]); running += t.get("exec") != "cloud"
+        if t["status"] == "approved" and not tasks.thing_busy(t): cands.append(t)
+        if t.get("schedule") and t["status"] in ("done", "failed", "lost") and not t.get("sched_after"):
+            tasks.update(t["id"], _touch=False, sched_after=True)
+            done = [e["text"] for e in tasks.events(t["id"]) if e["kind"] in ("done", "failed")]
+            alert = sch.after_run(tasks._me(), tasks.load(t["id"]), done[-1] if done else "")
+            if alert: owner_dm(t["origin"].get("channel", "feishu"), alert)
+    for t in tasks.admit(cands):   # 按资源放行（方案第 5 节），不再按固定并发数
+        if tasks.thing_busy(tasks.load(t["id"])): continue
+        log.info("task #%s launch turn %s", t["id"], t.get("turn", 0) + 1)
+        tasks.launch(t["id"])
+    v2_tick()
+
+# ---------- 2.0：路由、项目经理、投递、定时任务、设备、命令（方案第 4 至 8 节） ----------
+def _mod(name):
+    sp = importlib.util.spec_from_file_location(f"fcb_{name}_" + uuid.uuid4().hex[:8], os.path.join(ROOT, name + ".py"))
+    m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); return m
+
+devices, sch, acts = _mod("devices"), _mod("scheduler"), _mod("actions")
+ROUTING = dict({"sticky_min": 30, "fast_path": {"max_chars": 20}}, **CFG.get("routing", {}))
+POSTED_FILE, BIND_FILE = os.path.join(ROOT, "state", "posted.json"), os.path.join(ROOT, "state", "bindings.json")
+posted, bindings, sticky = load(POSTED_FILE, {}), load(BIND_FILE, {}), {}
+if {"max_running", "memory_max"} & set(CFG.get("tasks", {})):
+    log.warning("config.json 的 tasks.max_running、memory_max 是 1.x 的配置，2.0 按资源放行，已不再生效")
+
+def projects():
+    return {t.get("project") for t in tasks.all_tasks()} | {x["project"] for x in sch.all_()} - {None, ""}
+
+def pm_key(project, key): return f"proj:{project}:{key}"
+
+def route(ev):
+    """一条人发的消息交给谁：引用回复和编号回复直接回给发送方；绑定的群、“项目名：”、30 分钟内粘着的交给项目经理；其余主控。"""
+    if ev.get("no_route"): return None
+    text, key, now = plain(ev), session_key(ev), time.time()
+    if text.startswith("/") or FOLLOW_RE.match(text): return None
+    rid = posted.get(ev.get("parent_id") or "")
+    if rid: return ("answer", rid)
+    m = re.match(r"^(\S+\.q\d+)\s+\S", text)
+    rec = tasks.dl.by_qid(tasks._me(), m.group(1)) if m else None
+    if rec and rec["status"] == "open": return ("answer", rec["id"])
+    b = bindings.get(ev.get("chat_id", ""))
+    if b and ev.get("chat_type") != "p2p": return ("pm", b, pm_key(b, key))
+    m = re.match(r"^\s*([\w.-]+)\s*[:：]", text)
+    if m and m.group(1) == "主控": sticky.pop(key, None); return None
+    if m and m.group(1) in projects():
+        if is_owner(ev): sticky[key] = (m.group(1), now)
+        return ("pm", m.group(1), pm_key(m.group(1), key))
+    st = sticky.get(key)
+    if st and now - st[1] < ROUTING["sticky_min"] * 60 and is_owner(ev):
+        sticky[key] = (st[0], now); return ("pm", st[0], pm_key(st[0], key))
+    acts_ = tasks.dl.open_in_chat(tasks._me(), key, ("动作",))
+    if len(acts_) == 1 and len(text) <= ROUTING["fast_path"]["max_chars"] and not tasks.dl.open_in_chat(tasks._me(), key, ("授权", "花钱", "方向", "问题")):
+        return ("answer", acts_[0]["id"])
+    return None
+
+def answer(ev, rid):
+    """人对某条投递的回复：原样进发送方任务的收件箱（不经主控，不花 token）；发送方是会话的，排进那个会话。"""
+    tk = tasks._me()
+    rec = tasks.dl.answered(tk, rid)
+    if not rec: return
+    who, text, fr = sender_name(ev.get("sender_id", "")), plain(ev), rec["from"]
+    if fr.get("task"):
+        t = tasks.load(fr["task"])
+        n = tasks.inbox_add(t["id"], who, is_owner(ev), f"回复 {tasks.dl.head(rec)}：{text}")
+        if t["status"] == "waiting": tasks.update(t["id"], status="approved")
+        reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
+    else:
+        k = fr.get("key") or session_key(ev)
+        enqueue(k, {"deliver": dict(rec, text=f"{who} 回复了你的 {tasks.dl.head(rec)}：{text}", kind="留言", need=False), "key": k})
+        reply(ev, "转过去了。", in_topic(ev))
+
+def pm_intro(project):
+    r = tasks.roles().get("项目经理") or {}
+    ts = sorted((t for t in tasks.all_tasks() if t.get("project") == project), key=lambda t: t["id"])
+    rec = tasks.record_text(ts[-1]) if ts else ""
+    return (f"[项目经理 {project}] 你是项目 {project} 的项目经理。\n{r.get('body', '')}\n" + (f"\n项目档案：\n{rec}\n" if rec else "") + "\n---\n")
+
+def pm_marks(project, key, owner, text):
+    text, marks = tasks.dl.parse_marks(text)
+    for to, kind, body, need in marks:
+        try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, 0, need)
+        except ValueError as e: log.warning("pm delivery rejected: %s", e)
+    return text
+
+def handover(ev, result):
+    """主控写 [转交] 项目名 备注：…：把这条人发的原话原样交给那个项目的项目经理，备注单独标出。"""
+    m = re.search(r"^\s*\[转交\]\s*(\S+)\s*(?:备注\s*[:：]\s*(.*))?$", result or "", re.M)
+    if not m or ev.get("deliver") or not ev.get("message_id"): return result
+    proj = m.group(1)
+    if proj not in projects(): return result.replace(m.group(0), f"（没有项目 {proj}，没转交）")
+    k = pm_key(proj, session_key(ev))
+    if is_owner(ev): sticky[session_key(ev)] = (proj, time.time())
+    enqueue(k, dict(ev, pm=proj, pm_key=k, handover_note=(m.group(2) or "").strip(), no_route=True))
+    return (result[:m.start()] + result[m.end():]).strip()
+
+def schedule_directive(ev, result):
+    head, f = sch.parse_block(result)
+    if not f: return result
+    owner = is_owner(ev)
+    creator = {"owner": owner, "private": owner and ev.get("chat_type") == "p2p", "name": sender_name(ev.get("sender_id", "")),
+               "origin": {"channel": ev.get("channel", "feishu"), "chat_id": ev.get("chat_id", ""), "chat_type": ev.get("chat_type", ""),
+                          "message_id": ev.get("message_id", ""), "key": session_key(ev)}}
+    ok, msg = sch.create(tasks._me(), f, creator)
+    if ok and not owner:
+        owner_dm(ev.get("channel", "feishu"), f"{creator['name']} 建了一个定时任务，等你批：{msg}")
+    return (head + "\n\n" + msg).strip()
+
+def delivery_turn(ev):
+    """投递排进主控或项目经理的会话：一轮只处理这一条投递，要对人说的话发回投递来源的聊天。"""
+    rec, key = ev["deliver"], ev["key"]
+    pm = key.split(":")[1] if key.startswith("proj:") else None
+    s = get_session(key)
+    o_owner, o_priv, chat_id, _ = s.get("env") or [rec["from"].get("owner"), key.split(":")[-2] == "p2p", key.rsplit(":", 1)[-1], ""]
+    fr = rec["from"]
+    prompt = (pm_intro(pm) if pm and not s["started"] else "") + (
+        f"[投递 来自 {fr.get('label', fr.get('ref'))} · {rec['kind']}{' · 要回复' if rec.get('need') else ''}]\n{rec['text']}\n"
+        f"（要回它就用 tasks.py send --to {fr.get('ref')} …；不用回就只输出 [不回]）")
+    with sem:
+        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm) or ""
+    if pm: result = pm_marks(pm, key, o_owner, result)
+    t = tasks.load(fr["task"]) if fr.get("task") else None
+    if t and result.strip() and result.strip() != AMB_SILENT:
+        fake = {"channel": t["origin"].get("channel", "feishu"), "chat_id": t["origin"].get("chat_id", ""), "message_id": t["origin"].get("message_id"),
+                "chat_type": t["origin"].get("chat_type", ""), "sender_id": OWNER_OPEN_ID if o_owner else ""}
+        try: result = task_directive(fake, chat_followups(fake, result))
+        except Exception: log.exception("delivery turn directives failed")
+        if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dl{rec['id']}")
+
+def delivery_tick():
+    """把新投递送出去：主人、派活人、聊天发到来源聊天（带编号），主控、项目经理排进会话队列。"""
+    tk = tasks._me()
+    for r in tasks.dl.load(tk):
+        if r["status"] != "new": continue
+        to, fr = r["to"]["to"], r["from"]
+        t = tasks.load(fr["task"]) if fr.get("task") else None
+        try:
+            if to in ("主人", "派活人", "聊天"):
+                text = f"{tasks.dl.head(r)} {r['text']}"
+                if to == "主人" and not (t and t["requester"].get("owner")): text = owner_ref(t["origin"]["channel"] if t else "feishu") + " " + text
+                if t: out = task_say(t, text, f"dl{r['id']}")
+                else: out = None; owner_dm("feishu", text)
+                if isinstance(out, str): posted[out] = r["id"]; save(POSTED_FILE, dict(list(posted.items())[-500:]))
+                tasks.dl.update(tk, r["id"], status="open" if r.get("need") else "sent", chat=tasks.dl.origin_key(t) if t else "")
+            elif to == "主控":
+                k = fr.get("key") or ("p2p:" + OWNER_OPEN_ID)
+                tasks.dl.update(tk, r["id"], status="sent"); enqueue(k, {"deliver": r, "key": k})
+            elif to == "项目经理":
+                k = pm_key(r["to"]["project"], fr.get("key") or "")
+                tasks.dl.update(tk, r["id"], status="sent"); enqueue(k, {"deliver": r, "key": k})
+        except Exception:
+            log.exception("delivery %s failed", r["id"])
+
+def v2_tick():
+    try:
+        os.makedirs(os.path.join(ROOT, "state"), exist_ok=True)
+        with open(os.path.join(ROOT, "state", "heartbeat"), "w") as f: f.write(str(int(time.time())))   # 看门狗读它
+    except OSError: pass
+    for name, fn in (("delivery", delivery_tick),
+                     ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
+                     ("schedules", lambda: [owner_dm("feishu", a) for a in sch.tick(tasks._me(), upgrading=upgrading())])):
+        try: fn()
+        except Exception: log.exception("%s tick failed", name)
+
+def v2_command(ev, text, owner):
+    if text == "/schedules": return sch.list_text(tasks._me())
+    m = re.match(r"^/schedule\s+(pause|resume|stop|approve)\s+(\S+)$", text)
+    if m: return sch.command(tasks._me(), m.group(1), m.group(2), owner)
+    m = re.match(r"^/(approve|reject)\s+(\S+\.a\d+)\s*$", text)
+    if m: return acts.approve(tasks._me(), m.group(2), m.group(1) == "approve") if owner else "动作只有主人能批。"
+    m = re.match(r"^/why\s+(\S+)$", text)
+    if m:
+        try:
+            with open(tasks.DECISIONS) as f: rows = [json.loads(l) for l in f if l.strip()]
+        except FileNotFoundError: rows = []
+        hit = [r for r in rows if m.group(1) in (r.get("task"), r.get("sender"), r.get("schedule"))][-8:]
+        return "\n".join(f"{time.strftime('%m-%d %H:%M', time.localtime(r['ts']))} {r['kind']}：{r.get('why') or r.get('to') or ''}" for r in hit) \
+            or f"{m.group(1)} 还没有决策记录（放行、改投、去重、排队都会记）。"
+    m = re.match(r"^/(bind|unbind)(?:\s+(\S+))?$", text)
+    if m:
+        if not owner: return "绑定只有主人能改。"
+        if ev.get("chat_type") == "p2p": return "绑定是给群用的：在群里发 /bind 短名。"
+        if m.group(1) == "unbind": bindings.pop(ev.get("chat_id", ""), None); save(BIND_FILE, bindings); return "解绑了，这个群的消息回到主控。"
+        if m.group(2) not in projects(): return f"没有项目 {m.group(2)}。"
+        bindings[ev.get("chat_id", "")] = m.group(2); save(BIND_FILE, bindings)
+        return f"绑好了：这个群的消息直接交给 {m.group(2)} 的项目经理。/unbind 解绑。"
+    return None
 
 # ---------- 任务回报交给主控：后台任务的完成、提问、失败先进派活的那个会话，主控自己收尾，再对人汇报 ----------
 RELAY_ON = tasks.T.get("relay", True)

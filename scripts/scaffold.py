@@ -45,10 +45,11 @@ if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
     sys.exit("workdir 不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
 
 # 1. 代码和钩子：总是用模板覆盖，保证和 skill 同版本
-for f in ("bridge.py", "tasks.py", "upgrade.py"):
+for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py"):
     shutil.copy(os.path.join(T, f), os.path.join(INST, f))
 os.makedirs(os.path.join(INST, "hooks", "git"), exist_ok=True)
-for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py"):
+for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
+          "device_guard.py", "irreversible_gate.py", "scope_guard.py"):
     shutil.copy(os.path.join(T, "hooks", f), os.path.join(INST, "hooks", f))
 # git 钩子分发器：非主人触发的会话把 core.hooksPath 指到 hooks/git，pre-push 只放行 bot/ 分支
 gh = os.path.join(INST, "hooks", "git")
@@ -105,7 +106,7 @@ else:
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
-INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
+INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
                "package.json", "package-lock.json", "node_modules/**", "state/**", "logs/**", "inbox/**", "AGENTS.md", "CLAUDE.md",
                "*.service", "*.plist"]
 deny = [f"Read({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if p.startswith(("~", "/")) and "(" not in p and "\\" not in p]
@@ -129,7 +130,8 @@ settings = {"permissions": {"deny": list(dict.fromkeys(deny))},
                                                                   hook("git_guard.py")]},
                                      {"matcher": "Read|Grep|Glob|Bash|Edit|Write|NotebookEdit", "hooks": [hook("private_guard.py")]},
                                      {"matcher": "mcp__.*", "hooks": [hook("mcp_guard.py")]},
-                                     {"matcher": "Bash", "hooks": [hook("command_guard.py")]}],
+                                     {"matcher": "Bash", "hooks": [hook("command_guard.py"), hook("device_guard.py"), hook("irreversible_gate.py")]},
+                                     {"matcher": "*", "hooks": [hook("scope_guard.py")]}],
                       # 长任务运行中把聊天里的补充指令塞进去；聊天会话里这个钩子直接退出
                       "PostToolUse": [{"matcher": "*", "hooks": [hook("task_inbox.py")]}]}}
 json.dump(settings, open(os.path.join(INST, "claude-settings.json"), "w"), ensure_ascii=False, indent=2)
@@ -178,6 +180,20 @@ WantedBy=default.target
           f"\n服务器上还要：sudo loginctl enable-linger $USER")
 # 服务的 /upgrade 靠这份记录：从哪个仓库、哪个提交生成的，下次用同样的参数重新生成（不带 --rules，守则不覆盖）
 _commit = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+# 动作目录：每个动作一个 json，以 _ 开头的是示例（方案第 8 节）
+os.makedirs(os.path.join(INST, "actions"), exist_ok=True)
+_ex = os.path.join(INST, "actions", "_example.json")
+if not os.path.exists(_ex):
+    with open(_ex, "w") as f:
+        json.dump({"script": "echo 清理 $ACT_TARGET", "params": {"target": "[\\w./-]{1,80}"}, "category": "修补", "coworker_ok": False,
+                   "undo": "", "why": "示例：复制成 名字.json 才算登记"}, f, ensure_ascii=False, indent=1)
+# 看门狗：用户级 systemd 定时器每 2 分钟看一眼 state/heartbeat，超过 300 秒（5 分钟）没更新就私聊主人（不靠 bridge 活着）。
+# 只写文件不启用：systemctl --user link 这两个文件再 enable --now 定时器，见 docs/guide.md
+with open(os.path.join(INST, f"{SLUG}-yb-watchdog.service"), "w") as f:
+    f.write(f"[Unit]\nDescription={SLUG} 看门狗：heartbeat 超过 300 秒没更新就私聊主人\n\n[Service]\nType=oneshot\n"
+            f"WorkingDirectory={INST}\nExecStart={sys.executable} {os.path.join(INST, 'scheduler.py')} watchdog\n")
+with open(os.path.join(INST, f"{SLUG}-yb-watchdog.timer"), "w") as f:
+    f.write(f"[Unit]\nDescription={SLUG} 看门狗定时器（每 2 分钟）\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n\n[Install]\nWantedBy=timers.target\n")
 json.dump({"version": VERSION, "source": ROOT, "commit": _commit, "service": SLUG,
            "flags": [a for a in sys.argv[2:] if a in ("--no-npm",)]},
           open(os.path.join(INST, "yonty-bot.json"), "w"), ensure_ascii=False, indent=1)
