@@ -63,6 +63,10 @@ os.makedirs(STATE, exist_ok=True); os.makedirs(LOGS, exist_ok=True)
 logging.basicConfig(filename=os.path.join(LOGS, "bridge.log"), level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("bridge")
+try:   # 升级到按项目编号：旧任务第一次启动时编号，幂等（编过的跳过）
+    _migrated = tasks.migrate()
+    if _migrated: log.info("task numbering: migrated %s old tasks to per-project numbers", _migrated)
+except Exception: log.exception("task numbering migration failed")
 lock = threading.Lock()
 SESS_FILE, SEEN_FILE = os.path.join(STATE, "sessions.json"), os.path.join(STATE, "seen.json")
 
@@ -368,12 +372,12 @@ def handle(ev):
         log.exception("handle failed")
         result = f"出岔子了：{type(e).__name__}，请看日志。"
     if TASKS_ON and result:
+        try: result = chat_followups(ev, result)   # 先拆 [任务指令]：再派活会在后面接说明，多行指令会把它吞进去
+        except Exception:
+            log.exception("chat followups failed")
         try: result = task_directive(ev, result)
         except Exception:
             log.exception("task directive failed"); result += "\n\n（派活没成，请看日志。）"
-        try: result = chat_followups(ev, result)
-        except Exception:
-            log.exception("chat followups failed")
     out_id = reply(ev, result, in_thread)
     with lock: cur_s = sessions.get(key)
     if cur_s is not None: mark_seen(cur_s, [out_id])
@@ -426,8 +430,8 @@ TASKS_ON = tasks.T["enabled"]
 APPROVAL_S = tasks.T["approval_hours"] * 3600
 HEARTBEAT_S = tasks.T["heartbeat_min"] * 60
 TASK_CMD = "/任务"
-APPROVE_RE = re.compile(r"^(批|不批)\s*#?(\d+)\s*$")
-FOLLOW_RE = re.compile(r"^#(\d+)\s+(.+)$", re.S)
+APPROVE_RE = re.compile(r"^(批|不批)\s*([^\s#]*#\d+|\d+)\s*$")
+FOLLOW_RE = re.compile(r"^([^\s#]*#\d+)\s+(.+)$", re.S)   # 短名#N 内容；只写 #N 也认（有歧义时列候选）
 BT = chr(96)   # 反引号
 
 def plain(ev):
@@ -474,10 +478,23 @@ def can_steer(t, ev):
 def mins(t): return int((time.time() - (t.get("started") or t["created"])) / 60)
 
 def task_line(t):
-    return f"#{t['id']} {tasks.LABEL.get(t['status'], t['status'])} · {t['title']}（{t['requester']['name']}）"
+    return f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])} · {t['title']}（{t['requester']['name']}）"
+
+def ambiguous(s, cands):
+    """只写了号、好几个项目都有：列出候选，让对方带上项目名。"""
+    n = tasks.parse_ref(s)[1]
+    shown = "、".join(f"{tasks.ref(t)}（{t['title']}）" for t in sorted(cands, key=lambda t: (t.get("project") or "", t.get("num") or 0)))
+    return f"编号 {n} 有好几个任务：{shown}。带上项目名再说一遍，比如 {tasks.ref(cands[0])}。"
+
+def find_task(s, pool):
+    """(任务, 回给人的话)：找到了话是 None；没找到或有歧义时任务是 None。"""
+    t, cands = tasks.resolve(s, pool)
+    if t: return t, None
+    return None, (ambiguous(s, cands) if len(cands) > 1 else "没有这个任务。")
 
 def task_detail(t, owner):
-    lines = [f"#{t['id']} {t['title']} · {tasks.LABEL.get(t['status'], t['status'])}",
+    lines = [f"{tasks.ref(t)} {t['title']} · {tasks.LABEL.get(t['status'], t['status'])}"
+             + (f"（升级前的 {t['legacy']} 号）" if t.get("legacy") else ""),
              f"仓库 {BT}{t['repo']}{BT}，分支 {BT}{t['branch']}{BT}，{tasks.model_label(t)}"]
     if t.get("started"):
         lines.append(f"已经 {mins(t)} 分钟，调用工具 {t.get('tools', 0)} 次")
@@ -497,7 +514,8 @@ def task_command(ev):
     """/任务 命令、批 N、#N 补充。不是这些就返回 None，照常交给 Claude。"""
     text = plain(ev)
     owner = is_owner(ev)
-    usage = f"用法：{TASK_CMD}、{TASK_CMD} N、{TASK_CMD} 全文 N、{TASK_CMD} 取消 N" + (f"、{TASK_CMD} 清理 N" if owner else "")
+    usage = (f"用法：{TASK_CMD}、{TASK_CMD} 短名#N、{TASK_CMD} 全文 短名#N、{TASK_CMD} 取消 短名#N" + (f"、{TASK_CMD} 清理 短名#N" if owner else "")
+             + "。只有一个项目有这个号时可以只写 #N。")
     if text == TASK_CMD or text.startswith(TASK_CMD + " "):
         arg = text[len(TASK_CMD):].split()
         mine = [t for t in tasks.all_tasks() if can_see(t, ev)]
@@ -505,36 +523,46 @@ def task_command(ev):
             act = [t for t in mine if t["status"] in tasks.ACTIVE + ("pending",)]
             done = [t for t in mine if t not in act][-3:]
             if not act and not done: return "现在没有长任务。"
-            out = (["在跑的："] + [task_line(t) for t in act]) if act else ["现在没有在跑的任务。"]
-            if done: out += ["最近结束的："] + [task_line(t) for t in done]
-            return "\n".join(out + [f"{BT}/任务 N{BT} 看详情，{BT}/任务 取消 N{BT} 停掉。"])
-        n = arg[-1].lstrip("#")
-        t = tasks.load(int(n)) if n.isdigit() else None
-        if not n.isdigit(): return usage
-        if not t or not can_see(t, ev): return "没有这个任务。"
+            out = [] if act else ["现在没有在跑的任务。"]
+            groups = {}   # 按项目分组：最近有动静的项目在前，组内按编号
+            for t in sorted(act + done, key=lambda t: -(t.get("updated") or 0)): groups.setdefault(t.get("project") or "task", []).append(t)
+            for proj, ts in groups.items():
+                out += [f"{proj}："] + ["· " + task_line(t) for t in sorted(ts, key=lambda t: t.get("num") or 0)]
+            return "\n".join(out + [f"{BT}/任务 短名#N{BT} 看详情，{BT}/任务 取消 短名#N{BT} 停掉。"])
+        if not tasks.parse_ref(arg[-1]): return usage
+        t, err = find_task(arg[-1], mine)
+        if not t: return err
+        n = tasks.ref(t)
         if len(arg) == 1: return task_detail(t, owner)
-        if arg[0] == "全文": return f"#{n} {t['title']} 的任务书：\n{t['brief']}"
+        if arg[0] == "全文": return f"{n} {t['title']} 的任务书：\n{t['brief']}"
         if arg[0] in ("取消", "停"):
-            if not can_steer(t, ev): return f"#{n} 不是你派的，取消找{t['requester']['name']}或{OWNER_NAME}。"
-            if t["status"] not in tasks.ACTIVE + ("pending",): return f"#{n} 已经{tasks.LABEL.get(t['status'])}了。"
+            if not can_steer(t, ev): return f"{n} 不是你派的，取消找{t['requester']['name']}或{OWNER_NAME}。"
+            if t["status"] not in tasks.ACTIVE + ("pending",): return f"{n} 已经{tasks.LABEL.get(t['status'])}了。"
             tasks.update(t["id"], status="cancelled")
             if t["status"] == "running": tasks.stop(t)
-            return f"#{n} 停了。" + (f"分支 {BT}{t['branch']}{BT} 留着。" if t.get("session_started") else "")
+            return f"{n} 停了。" + (f"分支 {BT}{t['branch']}{BT} 留着。" if t.get("session_started") else "")
         if arg[0] == "清理":
             if not owner: return f"清理只有{OWNER_NAME}能做。"
-            if t["status"] in tasks.ACTIVE: return f"#{n} 还没结束。"
+            if t["status"] in tasks.ACTIVE: return f"{n} 还没结束。"
             ok, err = tasks.remove_worktree(t)
             if ok: tasks.update(t["id"], cleaned=True)
-            return f"#{n} 的工作树删了，分支留着。" if ok else f"没删成：{err}"
+            return f"{n} 的工作树删了，分支留着。" if ok else f"没删成：{err}"
         return usage
     if text == TEAM_CMD:
         if not owner: return f"{TEAM_CMD} 只有{OWNER_NAME}能看。"
         return team_view()
     m = APPROVE_RE.match(text)
-    if m: return task_approve(ev, m.group(1) == "批", int(m.group(2)))
+    if m: return task_approve(ev, m.group(1) == "批", m.group(2))
     m = FOLLOW_RE.match(text)
-    if m and owner: return task_follow(ev, int(m.group(1)), m.group(2).strip())   # 主人的话直接转给任务
+    if m and owner and known_ref(m.group(1)):   # 主人的话直接转给任务
+        t, err = find_task(m.group(1), tasks.all_tasks())
+        return task_follow(ev, t, m.group(2).strip()) if t else err
     return None   # 别人的 #N 补充也交给主控：它决定转不转、怎么转（[任务指令]），见 chat_followups
+
+def known_ref(s):
+    """开头的“xx#N”是不是任务编号：只写 #N，或 # 前面是已有任务的短名。别的（“问题#3 怎么办”）照常交给聊天。"""
+    p = tasks.parse_ref(s)
+    return bool(p) and (p[0] is None or any(t.get("project") == p[0] for t in tasks.all_tasks()))
 
 TEAM_CMD = "/团队"
 
@@ -551,48 +579,54 @@ def team_view():
         hot = "缓存热，下个任务接着它的会话" if s.get("head") and age * 60 < warm and (s.get("ctx") or 0) <= tasks.T["sibling_max_ctx"] else "下个任务新开会话、读档案"
         now_ = (s.get("now") or "").splitlines()[0][:60] if s.get("now") else ""
         out.append(f"· {s['project'].rsplit('-', 1)[0]} · {s.get('thing') or tasks.MAIN_THING}："
-                   f"做过 {'、'.join('#' + str(x) for x in s.get('tasks', [])[-5:]) or '无'}，上下文约 {int((s.get('ctx') or 0) / 1000)}k，{age} 分钟前，{hot}"
+                   f"做过 {'、'.join(tasks.tref(x) for x in s.get('tasks', [])[-5:]) or '无'}，上下文约 {int((s.get('ctx') or 0) / 1000)}k，{age} 分钟前，{hot}"
                    + (f"；现状：{now_}" if now_ else "") + (f"；有 {len(s['inbound'])} 条别处留言" if s.get("inbound") else ""))
     return "\n".join(out)
 
-def task_approve(ev, yes, n):
-    t = tasks.load(n)
-    if not t: return f"没有 #{n} 这个任务。"
+def task_approve(ev, yes, s):
+    t, cands = tasks.resolve(s)
+    if not t and len(cands) > 1:   # 只写了号：只有一个在等批的就是它
+        wait = [x for x in cands if x["status"] == "pending"]
+        t = wait[0] if len(wait) == 1 else None
+        if not t: return ambiguous(s, cands)
+    if not t: return "没有这个任务。"
     if not is_owner(ev): return f"这个只有{OWNER_NAME}能批。"
-    if t["status"] != "pending": return f"#{n} 现在是“{tasks.LABEL.get(t['status'])}”，不用批。"
+    n, tid = tasks.ref(t), t["id"]
+    if t["status"] != "pending": return f"{n} 现在是“{tasks.LABEL.get(t['status'])}”，不用批。"
     if time.time() - t["created"] > APPROVAL_S:
-        tasks.update(n, status="expired"); return f"#{n} 过期了，让对方重新提。"
-    tasks.update(n, status="approved" if yes else "rejected", approved_at=time.time())
+        tasks.update(tid, status="expired"); return f"{n} 过期了，让对方重新提。"
+    tasks.update(tid, status="approved" if yes else "rejected", approved_at=time.time())
     if not same_chat(t, ev):   # 在私聊里批的：回原会话说一声
-        task_say(t, f"{OWNER_NAME}{'批了' if yes else '没批'} #{n}（{t['title']}）" + ("，开工后在这儿报进度。" if yes else "。"), f"ap{n}")
-    return f"批了，#{n} 排上了。" if yes else f"好，#{n} 不做了。"
+        task_say(t, f"{OWNER_NAME}{'批了' if yes else '没批'} {n}（{t['title']}）" + ("，开工后在这儿报进度。" if yes else "。"), f"ap{tid}")
+    return f"批了，{n} 排上了。" if yes else f"好，{n} 不做了。"
 
-def task_follow(ev, n, text):
-    t = tasks.load(n)
-    if not t or not can_see(t, ev): return f"没有 #{n} 这个任务。"
-    if not can_steer(t, ev): return f"#{n} 不是你派的，有想法找{t['requester']['name']}或{OWNER_NAME}。"
+def task_follow(ev, t, text):
+    if not t or not can_see(t, ev): return "没有这个任务。"
+    n, tid = tasks.ref(t), t["id"]
+    if not can_steer(t, ev): return f"{n} 不是你派的，有想法找{t['requester']['name']}或{OWNER_NAME}。"
     st = t["status"]
-    if st == "pending": return f"#{n} 还在等{OWNER_NAME}批。"
-    if st in ("cancelled", "rejected", "expired"): return f"#{n} 已经{tasks.LABEL.get(st)}了，要做就重新提。"
+    if st == "pending": return f"{n} 还在等{OWNER_NAME}批。"
+    if st in ("cancelled", "rejected", "expired"): return f"{n} 已经{tasks.LABEL.get(st)}了，要做就重新提。"
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
-    tasks.inbox_add(n, name, is_owner(ev), text)
-    tasks.update(n, auto_follow=0)   # 人亲自发话了：主控的自动追加次数重新算
-    if st == "running" and t.get("exec") == "cloud": return f"收到。#{n} 在云端跑，这一轮交了结果后接着带上这条再跑。"
-    if st == "running": return f"收到，转给 #{n} 了。"
-    if st == "approved": return f"收到，#{n} 开工时一起带上。"
-    tasks.update(n, status="approved")   # 等回复、完成、失败、中断：排队接着跑同一个会话和工作树
-    return f"收到，#{n} 接着干。"
+    tasks.inbox_add(tid, name, is_owner(ev), text)
+    tasks.update(tid, auto_follow=0)   # 人亲自发话了：主控的自动追加次数重新算
+    if st == "running" and t.get("exec") == "cloud": return f"收到。{n} 在云端跑，这一轮交了结果后接着带上这条再跑。"
+    if st == "running": return f"收到，转给 {n} 了。"
+    if st == "approved": return f"收到，{n} 开工时一起带上。"
+    tasks.update(tid, status="approved")   # 等回复、完成、失败、中断：排队接着跑同一个会话和工作树
+    return f"收到，{n} 接着干。"
 
 def chat_followups(ev, result):
-    """聊天回复里的 [任务指令] #N 内容：主控替发消息的人转给任务。权限跟这个人自己发 #N 一样（只能管他能管的任务）。"""
+    """聊天回复里的 [任务指令] 短名#N 内容：主控替发消息的人转给任务。权限跟这个人自己发 短名#N 一样（只能管他能管的任务）。"""
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
-    def apply(m):
-        n, body = int(m.group(1)), m.group(2)
-        t = tasks.load(n)
-        if not t or not can_see(t, ev) or not can_steer(t, ev): return f"（#{n} 不归这边管，没转。）"
-        r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), n, body)
+    pool = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)]
+    def apply(s, body):
+        t, cands = tasks.resolve(s, pool)
+        if not t: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
+        if not body: return f"（给 {tasks.ref(t)} 的指令是空的，没转。）"
+        r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), t, body)
         return "" if r.startswith("收到") else f"（{r}）"
-    return TASKCMD_RE.sub(apply, result).strip()
+    return apply_taskcmds(result, apply).strip()
 
 def task_directive(ev, result):
     """回复里有 [派活] 块就建任务，把块换成排期或审批的说明。"""
@@ -615,14 +649,14 @@ def task_directive(ev, result):
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
                              "message_id": ev["message_id"], "thread": in_topic(ev), "key": session_key(ev),
                              "thread_id": ev.get("thread_id"), "root_id": ev.get("root_id")}, target=d["target"])
-    n, h = t["id"], tasks.T["approval_hours"]
-    log.info("task #%s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
+    n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
+    log.info("task %s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
     head = (head + ("\n\n" + cloud_note if cloud_note else "")).strip()
     head = (head + "\n\n" + thing_line(t)).strip()
     if owner:
-        return (head + f"\n\n排上了，任务 #{n}。进展在这儿报，{BT}/任务 {n}{BT} 随时看，@我 {BT}#{n} 内容{BT} 补充。").strip()
+        return (head + f"\n\n排上了，任务 {n}。进展在这儿报，{BT}/任务 {n}{BT} 随时看，@我 {BT}{n} 内容{BT} 补充。").strip()
     brief = d["brief"] if len(d["brief"]) <= 3000 else d["brief"][:3000] + f"\n……（后面还有 {len(d['brief']) - 3000} 字，{BT}/任务 {n} 全文{BT} 看完整任务书）"
-    snap = (f"#{n} {d['title']}\n仓库：{BT}{repo}{BT}（{tasks.model_label(t)}）\n" + (f"验证：{BT}{t['verify']}{BT}\n" if t.get("verify") else "")
+    snap = (f"{n} {d['title']}\n仓库：{BT}{repo}{BT}（{tasks.model_label(t)}）\n" + (f"验证：{BT}{t['verify']}{BT}\n" if t.get("verify") else "")
             + f"检查点：{t['budget']} 美元当量（{t.get('budget_why', '')}）\n"
             + ("独立验收：先由验收角色写测试，负责人不能改\n" if t.get("accept") else "")
             + f"归到：“{t.get('thing') or tasks.MAIN_THING}”" + ("（新开的事）" if t.get("thing_new") else "（已有的事，接着它的负责人干）")
@@ -632,8 +666,8 @@ def task_directive(ev, result):
                 f"@我 回复「批 {n}」开工，「不批 {n}」作罢，{h} 小时内有效。").strip()
     where = owner_dm(ev["channel"], f"{name}（{CHANNEL_LABEL[ev['channel']]}私聊）想派个长任务，等你批：\n{snap}\n\n"
                                     f"回复「批 {n}」开工，「不批 {n}」作罢，{h} 小时内有效。")
-    tasks.update(n, approval_where=where)
-    return (head + f"\n\n这活儿得{OWNER_NAME}批，我已经去问了，批了就开工（任务 #{n}）。").strip()
+    tasks.update(tid, approval_where=where)
+    return (head + f"\n\n这活儿得{OWNER_NAME}批，我已经去问了，批了就开工（任务 {n}）。").strip()
 
 def owner_dm_task(t):
     return tasks.by_owner(t) and t["origin"].get("chat_type") == "p2p"
@@ -647,22 +681,22 @@ def thing_line(t):
     return f"新开了一件事“{name}”。" + (f"这个项目已有：{'、'.join(others)}；归错了说一声。" if others else "")
 
 def task_event_text(t, e):
-    n, k, r, o = t["id"], e["kind"], t["requester"], t["origin"]
+    n, k, r, o = tasks.ref(t), e["kind"], t["requester"], t["origin"]
     at = (mention(o["channel"], r["id"], r["name"]) + " ") if o["chat_type"] != "p2p" else ""
     if k == "start":
-        return f"#{n} 开工：{t['title']}\n分支 {BT}{t['branch']}{BT}，{tasks.model_label(t)}。有进展在这儿说，{BT}/任务 {n}{BT} 随时看。"
-    if k == "progress": return f"#{n} 进展：{e['text']}"
-    if k == "question": return f"{at}#{n} 有事要你定：\n{e['text']}\n\n@我 回复「#{n} 你的意见」。"
+        return f"{n} 开工：{t['title']}\n分支 {BT}{t['branch']}{BT}，{tasks.model_label(t)}。有进展在这儿说，{BT}/任务 {n}{BT} 随时看。"
+    if k == "progress": return f"{n} 进展：{e['text']}"
+    if k == "question": return f"{at}{n} 有事要你定：\n{e['text']}\n\n@我 回复「{n} 你的意见」。"
     if k == "done":
         extra = ""
         if r.get("owner") and o["chat_type"] == "p2p":   # 只在主人私聊里给接手命令
             extra = f"\n\n要在终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}"
-        return f"{at}#{n} 完成：\n{e['text']}{extra}"
-    return f"{at}#{n} {'挂了' if k == 'failed' else '中断了'}：{e['text']}\n@我 回复「#{n} 继续」接着干。"
+        return f"{at}{n} 完成：\n{e['text']}{extra}"
+    return f"{at}{n} {'挂了' if k == 'failed' else '中断了'}：{e['text']}\n@我 回复「{n} 继续」接着干。"
 
 def heartbeat_text(t):
     now = next((x.get("activeForm") or x.get("content") for x in (t.get("todos") or []) if x.get("status") == "in_progress"), "")
-    return f"#{t['id']} 还在干，{mins(t)} 分钟了" + (f"，正在：{now}" if now else "") + "。"
+    return f"{tasks.ref(t)} 还在干，{mins(t)} 分钟了" + (f"，正在：{now}" if now else "") + "。"
 
 STUCK_S = (tasks.T.get("stuck_min") or 0) * 60
 CLOUD_POLL_S = 120
@@ -696,8 +730,8 @@ def quota_check(now):
         if key in sent: continue
         run = [t for t in tasks.all_tasks() if t["status"] == "running"]
         lines = [f"额度提醒：{why}，{time.strftime('%m-%d %H:%M', time.localtime(reset))} 重置。这是整个订阅的用量，包括你终端里的会话。"]
-        if run: lines.append("在跑的任务：" + "；".join(f"#{t['id']} {t['title']}（{tasks.model_label(t)}，已用 {t.get('cost') or 0} 美元当量）" for t in run))
-        lines.append(f"只是提醒，活照常干。要省着用：{BT}/任务 取消 N{BT} 停掉不急的，或跟我说改派便宜模型、放到云端。")
+        if run: lines.append("在跑的任务：" + "；".join(f"{tasks.ref(t)} {t['title']}（{tasks.model_label(t)}，已用 {t.get('cost') or 0} 美元当量）" for t in run))
+        lines.append(f"只是提醒，活照常干。要省着用：{BT}/任务 取消 短名#N{BT} 停掉不急的，或跟我说改派便宜模型、放到云端。")
         owner_dm("feishu" if FEISHU_ON else "wecom", "\n".join(lines))
         sent[key] = now
         save(QUOTA_SENT, dict(list(sent.items())[-50:]))
@@ -723,7 +757,7 @@ def task_tick():
         st = t["status"]
         if st == "pending" and now - t["created"] > APPROVAL_S:
             t = tasks.update(n, status="expired")
-            task_say(t, f"#{n} 等了 {tasks.T['approval_hours']} 小时没人批，作废了。", f"t{n}x")
+            task_say(t, f"{tasks.ref(t)} 等了 {tasks.T['approval_hours']} 小时没人批，作废了。", f"t{n}x")
         elif st == "running" and now - (t.get("launched") or now) > 20 and not tasks.alive(t):
             if tasks.load(n)["status"] == "running":   # 进程没了，也没写结果
                 tasks.update(n, status="lost"); tasks.event(n, "lost", "后台进程没了（机器重启或被杀）")
@@ -760,8 +794,40 @@ RELAY_ON = tasks.T.get("relay", True)
 RELAY_KINDS = ("question", "done", "failed", "lost")
 RELAY_HEAD = {"done": "完成", "question": "有提问", "failed": "失败", "lost": "中断"}
 RELAY_MAX = 3                     # 每个任务主控最多自动追加几次指令，超了交给人
-TASKCMD_RE = re.compile(r"^\s*\[任务指令\]\s*#(\d+)\s+(.+?)\s*$", re.M)
+# [任务指令] 短名#N 内容：从这一行起，取到下一个 [任务指令]、[派活]、[不回]、[/任务指令] 或回复结束，整段原样转。
+# 冒号后面换行也行。给人看的话写在指令前面；非要写在后面，就先单独一行 [/任务指令] 收尾。[派活] 起到结尾都是派活块，不拆。
+TASKCMD_HEAD = re.compile(r"^\s*\[任务指令\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
+TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|不回|/任务指令)\]")
+TASKCMD_END = re.compile(r"^\s*\[/任务指令\]\s*$")
+DISPATCH_LINE = re.compile(r"^\s*\[派活\]\s*$")
+FENCE_LINE = re.compile(r"^\s*(`{3,}|~{3,})\w*\s*$")
 relaying = set()                  # (任务号, 事件序号)：已排进会话队列，还没处理完
+
+def split_taskcmds(text):
+    """把回复拆成 [(None, 正文行)] 和 [(编号, 指令内容)]，顺序不变。"""
+    out, lines, i = [], text.split("\n"), 0
+    while i < len(lines):
+        if DISPATCH_LINE.match(lines[i]):
+            out.append((None, "\n".join(lines[i:]))); break
+        m = TASKCMD_HEAD.match(lines[i])
+        if not m:
+            out.append((None, lines[i])); i += 1; continue
+        body, i = ([m.group(2)] if m.group(2).strip() else []), i + 1
+        while i < len(lines) and not TASKCMD_STOP.match(lines[i]):
+            body.append(lines[i]); i += 1
+        if i < len(lines) and TASKCMD_END.match(lines[i]): i += 1
+        while body and (not body[-1].strip() or FENCE_LINE.match(body[-1])): body.pop()   # 尾巴上的空行、代码块围栏不算
+        while body and not body[0].strip(): body.pop(0)
+        out.append((m.group(1), "\n".join(body).rstrip()))
+    return out
+
+def apply_taskcmds(text, fn):
+    """每条指令交给 fn(编号, 内容)，换成它的返回值（空串就是转走了，不留在回复里）。"""
+    parts = []
+    for s, body in split_taskcmds(text):
+        r = body if s is None else fn(s, body)
+        if s is None or r: parts.append(r)
+    return "\n".join(parts)
 
 def origin_key(t):
     o = t["origin"]
@@ -773,7 +839,7 @@ def relay_prompt(t, e):
     state = {"done": "完成", "question": "有提问，等回复", "failed": "失败", "lost": "中断（后台进程没了）"}[e["kind"]]
     brief = t["brief"] if len(t["brief"]) <= 1500 else t["brief"][:1500] + "……（后面省略）"
     base = (t.get("base") or "").split("/", 1)[-1]
-    return (f"[任务回报]\n任务 #{t['id']}：{t['title']}\n状态：{state}\n"
+    return (f"[任务回报]\n任务 {tasks.ref(t)}：{t['title']}\n状态：{state}\n"
             f"派活人：{r['name']}（{'是' if r.get('owner') else '不是'}{OWNER_NAME}本人）；"
             f"会话：{'私聊' if o['chat_type'] == 'p2p' else '群聊'}\n"
             f"仓库 {t['repo']}，工作树 {t['worktree']}，分支 {t['branch']}"
@@ -800,6 +866,7 @@ def task_relay(ev):
     t = tasks.load(n)
     try:
         if not t or t.get("posted", 0) != idx: return   # 已经处理过（重启后重复排队）
+        ref = tasks.ref(t)
         pend = t.get("relay_pending") or {}
         if pend.get("idx") == idx:                     # 主控已经回过，只是上次没发出去：直接重发，不再跑一轮
             return relay_post(t, idx, pend["text"])
@@ -820,7 +887,7 @@ def task_relay(ev):
             text = relay_followups(t, result)
             if TASKS_ON and tasks.parse_directive(text)[1]:
                 if tasks.load(n).get("auto_follow", 0) >= RELAY_MAX:
-                    text = tasks.parse_directive(text)[0] + f"\n\n（#{n} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
+                    text = tasks.parse_directive(text)[0] + f"\n\n（{ref} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
                 else:
                     tasks.update(n, auto_follow=tasks.load(n).get("auto_follow", 0) + 1)
                     text = task_directive(rev, text)
@@ -830,7 +897,7 @@ def task_relay(ev):
             else:
                 r, o = t["requester"], t["origin"]
                 at = (mention(o["channel"], r["id"], r["name"]) + " ") if o["chat_type"] != "p2p" else ""
-                text = f"{at}#{n} {RELAY_HEAD[e['kind']]}：\n{text}"
+                text = f"{at}{ref} {RELAY_HEAD[e['kind']]}：\n{text}"
                 if e["kind"] == "done" and r.get("owner") and o["chat_type"] == "p2p":
                     text += f"\n\n要在终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}"
         relay_post(t, idx, text)
@@ -850,25 +917,26 @@ def relay_post(t, idx, text):
     tasks.update(n, posted=idx + 1, last_post=time.time(), post_fail=0, relay_pending=None)
 
 def relay_followups(t, text):
-    """主控回复里的 [任务指令] #N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。"""
-    def apply(m):
-        n, body = int(m.group(1)), m.group(2)
-        x = tasks.load(n)
-        if not x or x["requester"].get("id") != t["requester"].get("id") and not t["requester"].get("owner"):
-            return f"（#{n} 不归这边管，没转。）"
+    """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。"""
+    pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or t["requester"].get("owner")]
+    def apply(s, body):
+        x, cands = tasks.resolve(s, pool)
+        if not x: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
+        n, tid = tasks.ref(x), x["id"]
+        if not body: return f"（给 {n} 的指令是空的，没转。）"
         raise_budget = bool(tasks.BUDGET_RE.search(body))
         if x.get("checkpoint") and not raise_budget:
-            return f"（#{n} 停在检查点，要接着干请写“预算加到 X”，没转。）"
+            return f"（{n} 停在检查点，要接着干请写“预算加到 X”，没转。）"
         if x.get("auto_follow", 0) >= RELAY_MAX and not raise_budget:   # 加预算是主控看过进展的决定，不占自动追加次数
-            return f"（#{n} 已经自动追加 {RELAY_MAX} 次了，下一步请人来定：{body}）"
+            return f"（{n} 已经自动追加 {RELAY_MAX} 次了，下一步请人来定：{body}）"
         if x["status"] in ("pending", "cancelled", "rejected", "expired"):
-            return f"（#{n} {tasks.LABEL.get(x['status'])}，没转。）"
-        tasks.inbox_add(n, f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body)
-        tasks.update(n, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
+            return f"（{n} {tasks.LABEL.get(x['status'])}，没转。）"
+        tasks.inbox_add(tid, f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body)
+        tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
-        log.info("task #%s auto follow-up from relay", n)
+        log.info("task %s auto follow-up from relay", n)
         return ""
-    return TASKCMD_RE.sub(apply, text)
+    return apply_taskcmds(text, apply)
 
 def task_loop(stopping):
     while not stopping.wait(5):

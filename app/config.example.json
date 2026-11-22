@@ -30,7 +30,8 @@
     "stuck_min": 40,
     "verify_retries": 2,
     "verify_timeout_min": 20,
-    "cloud": {"environment_id": "", "timeout_min": 180}
+    "cloud": {"environment_id": "", "timeout_min": 180},
+    "project_alias": {}
   },
   "persona": "work",
   "style": "veteran",

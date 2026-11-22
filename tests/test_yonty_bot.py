@@ -551,9 +551,9 @@ class TaskTest(unittest.TestCase):
 
     def test_owner_directive_queues(self):
         out = self.b.task_directive(self.ev('x'), self.directive())
-        n = int(re.search(r'任务 #(\d+)', out).group(1))
+        ref = re.search(r'任务 ([\w.-]+#\d+)', out).group(1)
         self.assertNotIn('[派活]', out)
-        t = self.t.load(n)
+        t = self.t.resolve(ref)[0]
         self.assertEqual(t['status'], 'approved')
         self.assertTrue(t['requester']['owner'])
         self.assertTrue(t['branch'].startswith('bot/'))
@@ -561,18 +561,19 @@ class TaskTest(unittest.TestCase):
     def test_group_colleague_needs_approval_in_group(self):
         ev = self.ev('x', sender='ou_mate')
         out = self.b.task_directive(ev, self.directive())
-        n = int(re.search(r'批 (\d+)', out).group(1))
+        ref = re.search(r'批 ([\w.-]+#\d+)', out).group(1)
+        n = self.t.resolve(ref)[0]['id']
         self.assertIn(f'<at user_id="{OWNER}">', out)      # 在原群里 @ 主人
         self.assertEqual(self.t.load(n)['status'], 'pending')
-        self.assertIn('只有小王能批', self.b.task_command(self.ev(f'@_user_1 批 {n}', sender='ou_mate')))
+        self.assertIn('只有小王能批', self.b.task_command(self.ev(f'@_user_1 批 {ref}', sender='ou_mate')))
         self.assertEqual(self.t.load(n)['status'], 'pending')
-        self.assertIn('排上了', self.b.task_command(self.ev(f'@_user_1 批 {n}')))
+        self.assertIn('排上了', self.b.task_command(self.ev(f'@_user_1 批 {ref}')))
         self.assertEqual(self.t.load(n)['status'], 'approved')
 
     def test_p2p_colleague_asks_owner_by_dm(self):
         ev = self.ev('x', sender='mate', chat='mate', chat_type='p2p', channel='wecom')
         out = self.b.task_directive(ev, self.directive())
-        n = int(re.search(r'任务 #(\d+)', out).group(1))
+        n = re.search(r'任务 ([\w.-]+#\d+)', out).group(1)
         self.assertEqual(self.wx[-1]['chatid'], 'boss')    # 私聊主人
         self.assertIn(f'批 {n}', self.wx[-1]['content'])
         self.wx.clear()
@@ -684,7 +685,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(self.t.load(n)['posted'], 1)
         self.assertEqual(self.sent, [])                    # 主控替它答了、不用跟人说：一条都不发
         m = self.relay_task('done', '做完了', auto_follow=3)
-        self.run_relay(m, f'[任务指令] #{m} 再跑一遍测试\n做完了，链接在这。')
+        self.run_relay(m, f'做完了，链接在这。\n[任务指令] #{m} 再跑一遍测试')   # 给人看的话写在指令前面
         self.assertEqual(self.t.load(m)['auto_follow'], 3)   # 到上限不再自动追加
         self.assertIn('请人来定', self.sent[-1][1])
         self.assertIn('claude --resume', self.sent[-1][1])  # 主人私聊的完成汇报带接手命令
@@ -695,7 +696,7 @@ class TaskTest(unittest.TestCase):
     def test_relay_colleague_cannot_steer_others(self):
         other = self.relay_task('done', 'x', owner=True)
         n = self.relay_task('question', '问个事', owner=False, chat_type='group')
-        prompts = self.run_relay(n, f'[任务指令] #{other} 删库\n好的')
+        prompts = self.run_relay(n, f'好的\n[任务指令] #{other} 删库')
         self.assertEqual(prompts[0][2:], (False, False))   # 同事派的：主控按同事权限跑
         self.assertEqual(self.t.load(other).get('auto_follow', 0), 0)
         self.assertIn('不归这边管', self.sent[-1][1])
