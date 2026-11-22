@@ -584,13 +584,13 @@ def team_view():
     return "\n".join(out)
 
 def task_approve(ev, yes, s):
+    if not is_owner(ev): return f"这个只有{OWNER_NAME}能批。"   # 先认人：候选列表里有别的聊天的任务名
     t, cands = tasks.resolve(s)
     if not t and len(cands) > 1:   # 只写了号：只有一个在等批的就是它
         wait = [x for x in cands if x["status"] == "pending"]
         t = wait[0] if len(wait) == 1 else None
         if not t: return ambiguous(s, cands)
     if not t: return "没有这个任务。"
-    if not is_owner(ev): return f"这个只有{OWNER_NAME}能批。"
     n, tid = tasks.ref(t), t["id"]
     if t["status"] != "pending": return f"{n} 现在是“{tasks.LABEL.get(t['status'])}”，不用批。"
     if time.time() - t["created"] > APPROVAL_S:

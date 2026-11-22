@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 1.0.0 · 2026-11-22 · MIT · [中文](README.md) | English
+> 1.1.0 · 2026-11-22 · MIT · [中文](README.md) | English
 
 **Bring your Claude Code into Feishu/Lark and WeCom group chats, and run it as a dev team that takes tasks, checks its own work, and remembers what it decided.**
 
@@ -71,7 +71,7 @@ To do it by hand, follow the steps section in [docs/guide.md](docs/guide.md). Th
 |---|---|
 | [docs/guide.md](docs/guide.md) | Setup steps, acceptance checklist, operations, known pitfalls |
 | [docs/architecture.md](docs/architecture.md) | Layers, why one owner per piece of work, roadmap |
-| [docs/tasks.md](docs/tasks.md) | Long tasks, approval, verify gate, independent acceptance, cost checkpoints |
+| [docs/tasks.md](docs/tasks.md) | Long tasks, per-project task numbers (`name#N`), approval, verify gate, independent acceptance, cost checkpoints |
 | [docs/boundary.md](docs/boundary.md) | Identity and privacy boundaries |
 | [docs/cache.md](docs/cache.md) | How caching saves money and how to check it |
 | [docs/config.md](docs/config.md) | All settings |

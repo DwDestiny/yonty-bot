@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""PostToolUse 钩子：长任务运行中，把聊天里补充的指令（@机器人 #N ...）塞给正在跑的 Claude。
+"""PostToolUse 钩子：长任务运行中，把聊天里补充的指令（@机器人 短名#N ...）塞给正在跑的 Claude。
 
 Input:  Claude Code 的 PostToolUse JSON（stdin）；环境变量 FCB_TASK_ID（只有后台任务会话有）
 Output: 有新指令时输出 additionalContext；否则什么都不输出
