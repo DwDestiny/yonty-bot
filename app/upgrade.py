@@ -104,7 +104,7 @@ def main():
     t0 = time.time()
     restart(slug)
     if healthy(slug, ver, t0): return put(status="done")
-    j = sh("journalctl", "--user", "-u", slug, "-n", "30", "--no-pager", "--since", f"@{int(t0)}")
+    j = sh("journalctl", "--user", "-u", slug, "-n", "15", "-o", "cat", "--no-pager", "--since", f"@{int(t0)}")
     restore()
     if old != new: git(src, "reset", "-q", "--hard", old)
     t1 = time.time(); restart(slug)
