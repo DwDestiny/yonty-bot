@@ -24,10 +24,10 @@ class ExtraTest(pn.NumberingBase):
         out = e.cmd('#3 补一句')
         self.assertIn('a#2', out); self.assertIn('a#3', out)
         self.assertEqual(got, [])
-        out = e.cmd('/任务 取消 #3')
+        out = e.cmd('/task cancel #3')
         self.assertIn('a#2', out); self.assertIn('a#3', out)
         self.assertEqual(e.status('旧任务5'), 'approved')
-        self.assertIn('旧任务3', e.cmd('/任务 a#2'))   # 带上项目名就准
+        self.assertIn('旧任务3', e.cmd('/task a#2'))   # 带上项目名就准
 
     def test_end_marker_keeps_prose_after_directive(self):
         """[/任务指令] 单独一行收尾，后面给人看的话留在回复里，不混进指令。"""
@@ -72,7 +72,7 @@ class ExtraTest(pn.NumberingBase):
         self.assertIn('a-2#1', e.b.task_directive(e.ev('x'), e.directive(str(other.resolve()), '另一个甲')))
         self.assertRegex(e.by_title('另一个甲')['branch'], r'^bot/a-2-1-\d{4,8}$')
         self.assertIn('a#2', e.dispatch('a', '甲二'))
-        self.assertIn('另一个甲', e.cmd('/任务 a-2#1'))
+        self.assertIn('另一个甲', e.cmd('/task a-2#1'))
 
     def test_bare_number_prefers_active_and_recent(self):
         """只写 #N 时先在进行中和最近动过的里找：a#1 早就做完了，b#1 还在排队，#1 就是 b#1。"""
@@ -84,7 +84,7 @@ class ExtraTest(pn.NumberingBase):
         got = e.spy_inbox()
         self.assertIn('b#1', e.cmd('#1 加日志'))
         self.assertEqual([g['title'] for g in got], ['乙一'])
-        self.assertIn('甲一', e.cmd('/任务 a#1'))   # 带上项目名照样找得到
+        self.assertIn('甲一', e.cmd('/task a#1'))   # 带上项目名照样找得到
 
     def test_unknown_prefix_goes_to_chat(self):
         """“问题#3 怎么办”不是任务编号：照常交给聊天。"""

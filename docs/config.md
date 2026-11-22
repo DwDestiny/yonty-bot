@@ -25,7 +25,7 @@
 | `tasks.quota_alert` | 见左 | 订阅额度提醒：`five_hour` 是 5 小时窗口用量到多少提醒；`seven_day_pace` 是 7 天窗口“已用比例 ÷ 已过时间比例”到多少提醒。只私聊提醒主人，不拦活 |
 | `tasks.sibling_warm_min` | `55` | 同一件事的负责人会话多少分钟内用过（提示缓存 1 小时内还热），新任务就分叉接着它 |
 | `tasks.sibling_max_ctx` | `150000` | 上个会话的上下文超过这么多 token 就不再接着，新开会话读档案 |
-| `tasks.compact` | `{"idle_min": 50, "min_ctx": 120000, "chat_max_ctx": 160000}` | 缓存过期前压缩：上下文到 `min_ctx`、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务和还没到换新时间的聊天会话。`min_ctx` 写 0 关掉。聊天会话一直有人说话、等不到闲置时，上下文到 `chat_max_ctx` 就在两轮之间压一次；写 0 关掉 |
+| `tasks.compact` | `{"idle_min": 50, "min_ctx": 120000}` | 缓存过期前压缩：上下文到 `min_ctx`、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务和还没到换新时间的聊天会话。`min_ctx` 写 0 关掉。别的时候交给 CLI 自己的自动压缩 |
 | `tasks.memory_max` | `"6G"` | 每个本机任务单元的内存上限（systemd `MemoryMax`，配 `OOMPolicy=continue`）。任务里的测试或构建失控时只杀那条命令，任务接着跑，不会吃光整机内存。写空串不设上限 |
 | `tasks.stuck_min` | `40` | 本机任务多少分钟没有任何动作（没调工具、没输出、进程 CPU 平均不到 5%）算卡住：停掉并交回主控；`0` 关闭 |
 | `tasks.verify_retries` | `2` | `[派活]` 写了验证命令时，验证没过最多退回返工几次 |
@@ -51,19 +51,19 @@
 | `context.max_chars` | 400 | 单条前文截断长度 |
 | `context.read_as` | `user` | 读前文用的身份。`bot` 读不了群历史 |
 | `ambient.enabled` | `true` | 允许旁听。开了也只对主人用命令加进白名单的群生效，默认没有群 |
-| `ambient.command` | `/旁听` | 主人在群里 @ 机器人发这个命令开关；加“ 状态”查看，加“ 关”关闭 |
+| `ambient.command` | `/listen` | 主人在群里 @ 机器人发 `/listen on` 打开、`/listen off` 关闭、`/listen status` 或只写 `/listen` 查看 |
 | `ambient.poll_seconds` | 40 | 多久拉一次白名单群的新消息 |
 | `ambient.quiet_seconds` / `max_wait_seconds` | 25 / 180 | 群里安静多久后整批处理；最多攒多久 |
 | `ambient.max_batch` | 30 | 一批最多几条 |
 | `ambient.cooldown_min` | 10 | 插话后多久内不再主动插话 |
 | `ambient.rotate_turns` | 40 | 旁听会话处理多少批后换新会话 |
 | `prime` | `true` | 固定开场白，见 cache.md |
-| `mcp_servers` | `[]` | 要挂的 MCP 服务器名，定义从用户级 `~/.claude.json` 的 `mcpServers` 取，生成到 `state/mcp.json`，用 `--strict-mcp-config` 加载。聊天和任务挂同一套，缓存前缀共用。空着就不挂。见 cache.md |
 | `mcp_open_to` | `[]` | 哪些 MCP 服务器同事触发的会话也能用。默认全部只给主人本人触发的会话（`hooks/mcp_guard.py` 拦） |
-| `disable_mcp` | `true` | 旧字段：没写 `mcp_servers` 时才看。`true` 不挂任何 MCP，`false` 加载用户的全部 MCP（缓存会乱，不建议） |
+| `disable_mcp` | `false` | `true` 一个 MCP 都不挂（`--strict-mcp-config`）。默认照用户级配置挂，并等连上再开工，见 cache.md。1.2.x 的 `mcp_servers` 不再用，写了只在启动日志里提醒 |
+| `command_guard` | `[]` | 按命令文字限制哪些会话能跑某类 Bash 命令（`hooks/command_guard.py`）。每条 `{"match": 正则, "allow": [...], "why": 原因}`，`allow` 可写 `owner_private`、`owner`、`owner_task`、`task`、`anyone`。用于把 MCP 换成命令行（如 `mcporter`）后照样按人限制。只挡正常使用，挡不住存心绕过；凭据文件另放进 `credential_paths` |
 | `p2p_idle_hours` | 6 | 私聊闲置多久开新会话 |
 | `group_idle_hours` | 2 | 群里（不在话题中）闲置多久开新会话 |
 | `max_parallel` | 3 | 同时跑几个 Claude 会话 |
 | `claude_timeout_min` | 40 | 单条消息最长处理时间 |
 | `processing_emoji` | `OnIt` | 处理中表情 |
-| `new_session_commands` | `/new` 等 | 私聊里发这些词开新会话 |
+| `new_session_commands` | `["/new"]` | 私聊里发这些词开新会话 |

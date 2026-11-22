@@ -206,7 +206,7 @@ class ProjectNumberingTest(NumberingBase):
         self.assertIn('alpha#1', out)
         self.assertRegex(e.by_title('用别名')['branch'], r'^bot/alpha-1-\d{4,8}$')
         self.assertIn('b#1', e.dispatch('b', '没别名'))   # 没配别名的仓库照旧用目录名
-        self.assertIn('用别名', e.cmd('/任务 alpha#1'))   # 命令里用别名也认
+        self.assertIn('用别名', e.cmd('/task alpha#1'))   # 命令里用别名也认
 
     def test_colleague_dispatch_and_approval_use_ref(self):
         """一.2、一.3：审批提示和 批 短名#N 也用新写法（任务书没点名，按“对外一律显示”推出来的）。"""
@@ -215,28 +215,28 @@ class ProjectNumberingTest(NumberingBase):
         self.assertIn('a#1', out)
         self.assertNoBare(out, '审批提示里')
         self.assertEqual(e.status('同事的活'), 'pending')
-        self.assertIn('a#1', e.cmd('批 a#1'))
+        self.assertIn('a#1', e.cmd('/approve a#1'))
         self.assertEqual(e.status('同事的活'), 'approved')
 
     # ---- 一.3 输入 ----
     def test_task_list_is_grouped_by_project(self):
         """一.3：/任务 按项目分组列出。"""
         e, _ = self.two_projects()
-        out = e.cmd('/任务')
+        out = e.cmd('/tasks')
         pos = {r: out.find(r) for r in ('a#1', 'a#2', 'b#1', 'b#2')}
         self.assertTrue(all(p >= 0 for p in pos.values()), out)
-        self.assertNoBare(out, '/任务 列表里')
+        self.assertNoBare(out, '/task 列表里')
         a, b = max(pos['a#1'], pos['a#2']), max(pos['b#1'], pos['b#2'])
         self.assertTrue(a < min(pos['b#1'], pos['b#2']) or b < min(pos['a#1'], pos['a#2']), f'没有按项目分组：\n{out}')
 
     def test_detail_and_cancel_by_full_ref(self):
-        """一.3：/任务 短名#N、/任务 取消 短名#N 只动那一个任务。"""
+        """一.3：/任务 短名#N、/task cancel 短名#N 只动那一个任务。"""
         e, _ = self.two_projects()
-        d = e.cmd('/任务 b#2')
+        d = e.cmd('/task b#2')
         self.assertIn('乙二', d); self.assertNotIn('乙一', d); self.assertIn('b#2', d)
         self.assertNoBare(d, '详情里')
-        self.assertIn('甲一', e.cmd('/任务 a#1'))
-        e.cmd('/任务 取消 a#2')
+        self.assertIn('甲一', e.cmd('/task a#1'))
+        e.cmd('/task cancel a#2')
         self.assertEqual(e.status('甲二'), 'cancelled')
         for t in ('甲一', '乙一', '乙二'):
             self.assertEqual(e.status(t), 'approved', f'{t} 不该被取消')
@@ -245,7 +245,7 @@ class ProjectNumberingTest(NumberingBase):
         """一.3：只写 #N 有歧义时列出候选，不执行任何动作。"""
         e, _ = self.two_projects()
         got = e.spy_inbox()
-        for text in ('/任务 #1', '/任务 1', '/任务 取消 #1', '#1 加日志', '@_user_1 #1 加日志'):
+        for text in ('/task #1', '/task 1', '/task cancel #1', '#1 加日志', '@_user_1 #1 加日志'):
             out = e.cmd(text)
             self.assertIn('a#1', out, text); self.assertIn('b#1', out, text)
             self.assertNotIn('a#2', out, text)   # 只列有这个号的候选
@@ -262,7 +262,7 @@ class ProjectNumberingTest(NumberingBase):
         self.assertIn('a#2', out)
         self.assertEqual([(g['title'], g['text']) for g in got], [('甲二', '加日志')])
         self.assertRegex(got[0]['branch'], r'^bot/a-2-')
-        self.assertIn('甲二', e.cmd('/任务 #2'))
+        self.assertIn('甲二', e.cmd('/task #2'))
 
     def test_follow_with_full_ref(self):
         """一.3：@机器人 短名#N 内容 精确命中。"""
@@ -309,7 +309,7 @@ class ProjectNumberingTest(NumberingBase):
         queued = []
         oq, orc, ol = e.b.enqueue, e.b.run_claude, e.t.launch
         e.b.enqueue = lambda key, ev: queued.append((key, ev))
-        e.b.run_claude = lambda key, s, prompt, owner, private, chat_id, quiet=False: '合并请求建好了。'
+        e.b.run_claude = lambda key, s, prompt, owner, private, chat_id, quiet=False, **k: '合并请求建好了。'
         e.t.launch = lambda tid: None
         try:
             e.b.task_tick(); e.b.task_tick()
@@ -327,7 +327,7 @@ class ProjectNumberingTest(NumberingBase):
         e, _ = self.two_projects()
         for title in ('甲一', '乙一'):
             e.t.sibling_save(e.t.load(e.by_title(title)['id']), 1000, '现状：做完了')
-        out = e.cmd('/团队')
+        out = e.cmd('/team')
         self.assertIn('a#1', out); self.assertIn('b#1', out)
         self.assertNoBare(out, '/团队 里')
 
@@ -365,10 +365,10 @@ class LegacyMigrationTest(NumberingBase):
         e = self.legacy_env()
         self.assertEqual(len(e.t.all_tasks()), 6)
         for ref, old in self.EXPECT.items():
-            d = e.cmd(f'/任务 {ref}')
+            d = e.cmd(f'/task {ref}')
             self.assertIn(f'旧任务{old}', d, f'{ref} 应该是旧 #{old}')
             self.assertNoBare(d)
-        self.assertIn('bot/5-1120', e.cmd('/任务 a#3'), '旧分支名不改')
+        self.assertIn('bot/5-1120', e.cmd('/task a#3'), '旧分支名不改')
         x = e.by_title('旧任务5')
         self.assertEqual(x['branch'], 'bot/5-1120')
         self.assertEqual(x['worktree'], str(e.base / 'tasks' / 'x' / '5'), '旧工作树路径不改')
@@ -384,13 +384,13 @@ class LegacyMigrationTest(NumberingBase):
         self.assertEqual(before, after)
         self.assertEqual(len(e.t.all_tasks()), 6)
         for ref, old in self.EXPECT.items():
-            self.assertIn(f'旧任务{old}', e.cmd(f'/任务 {ref}'))
+            self.assertIn(f'旧任务{old}', e.cmd(f'/task {ref}'))
         self.assertIn('a#5', e.dispatch('a', '新甲'))   # 接着旧的往下编
         self.assertIn('b#3', e.dispatch('b', '新乙'))
         e.start()
         self.assertEqual(len(e.t.all_tasks()), 8)
-        self.assertIn('新甲', e.cmd('/任务 a#5')); self.assertIn('新乙', e.cmd('/任务 b#3'))
-        self.assertIn('旧任务5', e.cmd('/任务 a#3'))
+        self.assertIn('新甲', e.cmd('/task a#5')); self.assertIn('新乙', e.cmd('/task b#3'))
+        self.assertIn('旧任务5', e.cmd('/task a#3'))
         self.assertRegex(e.by_title('新甲')['branch'], r'^bot/a-5-\d{4,8}$')
 
     def test_old_global_numbers_still_work(self):
@@ -400,12 +400,12 @@ class LegacyMigrationTest(NumberingBase):
         out = e.cmd('#5 补一句')
         self.assertIn('a#3', out)
         self.assertEqual([(g['branch'], g['text']) for g in got], [('bot/5-1120', '补一句')])
-        self.assertIn('旧任务5', e.cmd('/任务 5'))
-        self.assertIn('旧任务6', e.cmd('/任务 #6'))
+        self.assertIn('旧任务5', e.cmd('/task 5'))
+        self.assertIn('旧任务6', e.cmd('/task #6'))
         got.clear()
         e.b.chat_followups(e.ev('x'), '[任务指令] #6 继续')
         self.assertEqual([(g['branch'], g['text']) for g in got], [('bot/6-1120', '继续')])
-        self.assertIn('a#3', e.cmd('/任务 取消 #5'))
+        self.assertIn('a#3', e.cmd('/task cancel #5'))
         self.assertEqual(e.status('旧任务5'), 'cancelled')
         self.assertIn(e.status('旧任务6'), ('done', 'approved'))
 
