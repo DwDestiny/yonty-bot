@@ -184,6 +184,15 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli api POST /open-apis/im/v1/messages --as user').returncode, 2)
         self.assertEqual(self.bash('lark_identity.py', o, 'echo x && lark-cli im +messages-reply --message-id m').returncode, 2)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --as bot --text hi').returncode, 0)
+        self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +chat-search --as user -q x; lark-cli im +messages-send --help').returncode, 0)
+
+    def test_mcp_guard(self):
+        mcp = lambda env: self.hook('mcp_guard.py', env, 'mcp__mini__run', {}).returncode
+        self.assertEqual(mcp({'FCB_OWNER': '0'}), 2)
+        self.assertEqual(mcp({'FCB_OWNER': '1'}), 0)
+        self.assertEqual(self.hook('mcp_guard.py', {'FCB_OWNER': '0'}, 'Read', {}).returncode, 0)
+        st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
+        self.assertTrue(any(m['matcher'] == 'mcp__.*' and 'mcp_guard.py' in m['hooks'][0]['command'] for m in st['hooks']['PreToolUse']))
 
     def test_private_paths(self):
         p = {'FCB_PRIVATE': '0'}
@@ -692,6 +701,84 @@ class TaskTest(unittest.TestCase):
         k = self.relay_task('failed', '测试挂了')
         self.run_relay(k, None)                            # 主控没跑成：原话照发
         self.assertIn('测试挂了', self.sent[-1][1]); self.assertEqual(self.t.load(k)['posted'], 1)
+
+    def test_chat_runs_disable_background(self):
+        # 聊天、回报这类 -p 会话关掉后台命令：后台命令会让一轮出好几个结果，服务只拿到最后一个，中间的回报丢了
+        self.assertEqual(self.b.hook_env(True, True, 'oc_x')['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'], '1')
+        self.assertNotIn('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', self.t.hook_env(True, True, 'oc_x'))   # 任务会话照常能用
+
+    def test_relay_brief_only_once(self):
+        n = self.relay_task('done', '做完了')
+        prompts = self.run_relay(n, '做完了，链接在这。')
+        self.assertIn('写接口', prompts[0][1])                       # 第一次回报带任务书
+        self.assertIn(n, self.b.sessions['p2p:oc_r']['briefed'])
+        t = self.t.load(n)
+        self.assertNotIn('写接口', self.b.relay_prompt(t, {'kind': 'done', 'text': 'x'}, True))
+        self.assertIn('写接口', self.b.relay_prompt(t, {'kind': 'done', 'text': 'x'}, False))
+
+    def test_task_command_without_space(self):
+        n = self.relay_task('done', 'x')
+        r = self.t.ref(self.t.load(n))
+        for text in (f'/任务{r}', f'/任务 {r}'):
+            self.assertIsNotNone(self.b.task_command(self.ev(text, chat_type='p2p', chat='oc_r')), text)
+        self.assertIsNotNone(self.b.task_command(self.ev(f'/任务全文{r}', chat_type='p2p', chat='oc_r')))
+        self.assertIsNone(self.b.task_command(self.ev('/任务管理怎么做', chat_type='p2p', chat='oc_r')))
+
+    def test_chat_compacts_when_context_too_big(self):
+        now = 10000.0
+        due = self.b.chat_compact_due
+        self.assertTrue(due({'ctx': 170000, 'last': now - 10, 'compacted': 0}, now))    # 一直有人说话，也到了水位
+        self.assertFalse(due({'ctx': 100000, 'last': now - 10, 'compacted': 0}, now))
+        self.assertFalse(due({'ctx': 170000, 'last': now - 10, 'compacted': now - 5}, now))   # 上一轮后压过了
+
+    def test_lost_reason_from_journal(self):
+        fake = subprocess.CompletedProcess([], 0, stdout="Started x.\nx: A process of this unit has been killed by the OOM killer.\n"
+                                           "x: Failed with result 'oom-kill'.\nx: Consumed 9min CPU time, 12.4G memory peak.\n", stderr='')
+        orig = self.t.subprocess.run
+        self.t.subprocess.run = lambda *a, **k: fake
+        try: text = self.t.lost_text({'unit': 'u'})
+        finally: self.t.subprocess.run = orig
+        self.assertIn('内存用光', text); self.assertIn('12.4G', text)
+        self.assertIn('机器重启', self.t.lost_text({}))
+
+    def test_launch_sets_memory_cap(self):
+        n = self.new_task(status='approved')
+        calls, orig = [], self.t.subprocess.run
+        self.t.subprocess.run = lambda cmd, **k: calls.append(cmd) or subprocess.CompletedProcess(cmd, 0, '', '')
+        try: self.t.launch(n)
+        finally: self.t.subprocess.run = orig
+        run = [c for c in calls if c and c[0] == 'systemd-run']
+        if run:   # 没有 systemd 的机器走直接起进程，不检查
+            self.assertIn('MemoryMax=6G', run[0]); self.assertIn('OOMPolicy=continue', run[0])
+
+    def test_mcp_whitelist(self):
+        home = Path(self.tmp.name) / 'home'; home.mkdir(exist_ok=True)
+        (home / '.claude.json').write_text(json.dumps({'mcpServers': {
+            'mini': {'command': 'ssh', 'args': ['h', 'run']}, 'other': {'type': 'http', 'url': 'https://x'}}}))
+        cfg, old_home = dict(self.t.CFG), os.environ['HOME']
+        os.environ['HOME'] = str(home)
+        try:
+            self.t.CFG.pop('mcp_servers', None); self.t.CFG['disable_mcp'] = True
+            self.assertEqual(self.t.mcp_args()[-1], '{"mcpServers":{}}')               # 旧配置：不挂
+            self.t.CFG['disable_mcp'] = False
+            self.assertEqual(self.t.mcp_args(), [])                                     # 旧配置写了 false：照旧全加载
+            self.t.CFG['mcp_servers'] = ['mini', 'gone']
+            a = self.t.mcp_args()
+            self.assertEqual(a[:2], ['--strict-mcp-config', '--mcp-config'])
+            self.assertEqual(json.loads(Path(a[2]).read_text())['mcpServers'], {'mini': {'command': 'ssh', 'args': ['h', 'run']}})
+            self.assertEqual(oct(os.stat(a[2]).st_mode & 0o777), '0o600')
+            self.assertEqual(self.t.mcp_servers(), (['mini'], ['gone']))
+            self.assertEqual(self.t.mcp_args(), a)                                      # 再来一次：同一个文件，内容不变
+        finally:
+            self.t.CFG.clear(); self.t.CFG.update(cfg); os.environ['HOME'] = old_home
+
+    def test_diag_owner_only(self):
+        env = dict(os.environ, FCB_OWNER='0')
+        r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
+        self.assertNotEqual(r.returncode, 0)
+        env['FCB_OWNER'] = '1'
+        r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('在跑的任务', r.stdout)
 
     def test_relay_colleague_cannot_steer_others(self):
         other = self.relay_task('done', 'x', owner=True)

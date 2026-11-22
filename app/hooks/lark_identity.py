@@ -38,7 +38,7 @@ def block(msg):
 for seg in re.split(r"\|\||&&|[|;\n]", cmd):
     if "lark-cli" not in seg:
         continue
-    if re.search(r"--as[ =]bot\b", seg):
+    if re.search(r"--as[ =]bot\b", seg) or re.search(r"(^|\s)(--help|-h)(\s|$)", seg):   # 看帮助不算办事
         continue
     if not cross_ok and IM_READ.search(seg):
         block("跨 IM 读取已关闭：企业微信里的会话不能用主人身份读飞书聊天记录。")
