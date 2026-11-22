@@ -304,8 +304,9 @@ class ProjectNumberingTest(NumberingBase):
         t = e.t.load(x['id'])
         prompt = e.b.relay_prompt(t, {'kind': 'done', 'text': '做完了'})
         self.assertIn('a#2', prompt); self.assertNoBare(prompt, '给主控的材料里')
-        # 走完整的回报流程：主控回一句话，发到聊天里的那条要带 a#2
-        e.t.update(x['id'], _force=True, status='done')
+        # 走完整的回报流程：主控回一句话，发到聊天里的那条要带 a#2。
+        # 2.0 的任务（v2）回报先到项目经理，见 test_v2_round2；这里测 1.x 留下来的任务走的老路
+        e.t.update(x['id'], _force=True, status='done', v2=False)
         e.t.event(x['id'], 'done', '做完了')
         queued = []
         oq, orc, ol = e.b.enqueue, e.b.run_claude, e.t.launch

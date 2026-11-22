@@ -2,8 +2,9 @@
 """投递：发消息的一方自己选交给谁（方案第 7 节）。
 
 Input:  tasks.py send、任务和项目经理回复里的 [投递 目标 类别] 标记；tk 是调用方按路径加载的 tasks 模块
-Output: state/deliveries/records.json（每条投递和状态：new 待送、queued 排队、open 等回复、sent 已送、answered 已回）；
-        决策日志（改投、去重、排队）；任务收件箱；给发送方的回执文字
+Output: state/deliveries/records.json（每条投递和状态：new 待送、queued 排队、open 等回复、sent 已送、answered 已回、
+        held 进展留着到点再发、digest 并进给主人的摘要、dropped 只进记录）；state/deliveries/limits.json（进展和主人私聊的频率）；
+        决策日志（改投、拦下、去重、排队、限频）；任务收件箱；给发送方的回执文字
 Pos:    tasks.py 和 bridge 共用。本模块只做判断和记账；真正发到 IM、排进会话队列的是 bridge.delivery_tick
 """
 import json, os, re, time
@@ -12,7 +13,7 @@ CATS = ("授权", "花钱", "方向", "动作", "进展", "节点", "完成", "�
 OWNER_CATS = ("授权", "花钱", "方向")
 NEED_REPLY = ("授权", "花钱", "方向", "动作", "问题")
 DEFAULTS = {"max_hops": 3, "owner_max_chars": 300, "other_max_chars": 2000, "dedup_min": 30, "progress_gap_min": 10,
-            "progress_max": 5, "owner_per_10min": 4, "owner_per_hour": 12}
+            "progress_max": 5, "owner_per_10min": 4, "owner_per_hour": 12, "pingpong_max": 3, "pingpong_min": 10, "merge_s": 120}
 MARK = re.compile(r"^\s*\[投递\s+(.+?)\s+(\S+?)\]\s*$")
 TARGETS = "主人、派活人、聊天、主控、项目经理 短名、短名#N、事 项目/事名、记录"
 
@@ -44,7 +45,7 @@ def origin_key(t):
 
 
 def task_sender(tk, t):
-    return {"type": "schedule" if t.get("schedule") else "task", "task": t["id"], "ref": tk.ref(t),
+    return {"type": "schedule" if t.get("schedule") else "task", "task": t["id"], "ref": tk.ref(t), "hop": t.get("hop") or 0,
             "project": t.get("project"), "key": origin_key(t), "owner": bool(t["requester"].get("owner")),
             "label": f"{tk.ref(t)}（{t['title'][:24]}）"}
 
@@ -62,6 +63,13 @@ def parse_target(s, sender):
     if m: return {"to": "事", "project": m.group(1), "thing": m.group(2)}
     if re.match(r"^[^\s#]*#\d+$", s): return {"to": "任务", "ref": s}
     return None
+
+
+def node(x, target=False):
+    """来回推的计数用：发送方或目标是哪个智能体（人和聊天不算）。"""
+    if target:
+        return {"任务": x.get("ref"), "项目经理": "pm:" + str(x.get("project")), "主控": "主控"}.get(x["to"])
+    return {"pm": "pm:" + str(x.get("project")), "ctrl": "主控"}.get(x["type"], x.get("ref"))
 
 
 def upper(sender):
@@ -95,9 +103,11 @@ def parse_marks(text):
     return "\n".join(keep).strip(), [(a, b, "\n".join(c).strip(), d) for a, b, c, d in out if "\n".join(c).strip()]
 
 
-def submit(tk, sender, to_s, kind, text, hop=0, need_reply=None, extra=None):
-    """记一条投递，返回给发送方的回执。目标、类别不合法抛 ValueError。"""
+def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None):
+    """记一条投递，返回给发送方的回执。目标、类别不合法抛 ValueError。
+    hop：发送方这一轮是被第几跳叫起来的（不传就看 sender["hop"]），这条投递记成它加一。"""
     c = conf(tk.CFG)
+    hop = (sender.get("hop") or 0) if hop is None else hop
     if kind not in CATS: raise ValueError(f"类别只能是：{'、'.join(CATS)}")
     tg = parse_target(to_s, sender)
     if not tg: raise ValueError(f"目标只能是：{TARGETS}")
@@ -120,8 +130,17 @@ def submit(tk, sender, to_s, kind, text, hop=0, need_reply=None, extra=None):
         reroute("主人", "项目经理没有派活人") if kind in OWNER_CATS else reroute("主控", "项目经理没有派活人")
     if tg["to"] == "项目经理" and not tg.get("project"):
         reroute("主控", "没有项目")
-    if hop > c["max_hops"]:
-        reroute("记录" if sender["type"] == "ctrl" else "主控", f"一条链超过 {c['max_hops']} 跳，停下交给主控")
+    nh, now = hop + 1, time.time()   # 服务给每次投递的跳数自动加一：人发的消息触发的那一轮是 0
+    if nh > c["max_hops"]:
+        why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {c['max_hops']} 跳（delivery.max_hops）"
+        if sender["type"] == "ctrl": reroute("记录", why + "，主控发的只进运行记录")
+        elif tg["to"] != "主控": reroute("主控", why + "，停下交给主控")
+        else: tk.decide("超跳", sender=sender["ref"], category=kind, why=why + "，本来就是给主控的，照送"); notes.append(why + "，照送主控")
+    a, b = node(sender), node(tg, True)
+    if a and b and tg["to"] != "主控" and sender["type"] != "ctrl":
+        n = len([r for r in load(tk) if now - r["ts"] < c["pingpong_min"] * 60 and {node(r["from"]), node(r["to"], True)} == {a, b}])
+        if n >= c["pingpong_max"]:
+            reroute("主控", f"拦下：{a} 和 {b} {c['pingpong_min']} 分钟内已经来回 {n} 次，停下交给主控")
     if tg["to"] == "任务":
         t2, _ = tk.resolve(tg["ref"])
         if not t2: raise ValueError(f"没有 {tg['ref']} 这个任务")
@@ -132,7 +151,6 @@ def submit(tk, sender, to_s, kind, text, hop=0, need_reply=None, extra=None):
     if len(text) > lim:
         text = text[:lim] + (f"……（全文：/task {sender['ref']}）" if sender.get("task") else "……（后面截掉了）")
     need = (kind in NEED_REPLY) if need_reply is None else bool(need_reply)
-    now = time.time()
     with lock(tk):
         recs = load(tk)
         if not need:
@@ -140,12 +158,13 @@ def submit(tk, sender, to_s, kind, text, hop=0, need_reply=None, extra=None):
                 tk.decide("去重", sender=sender["ref"], category=kind, why=f"{c['dedup_min']} 分钟内送过一样的话")
                 return "".join(n + "；" for n in notes) + f"去重：{c['dedup_min']} 分钟内已经送过一样的话，这条不再送。"
         rec = dict(extra or {}, id=1 + max([r["id"] for r in recs] or [0]), ts=now, **{"from": sender}, to=tg, kind=kind,
-                   text=text, full=full, hop=hop, need=need, status="new")
+                   text=text, full=full, hop=nh, need=need, status="new")
         receipt = f"已交给{tg['to']}" + (f" {tg.get('project') or tg.get('ref') or ''}" if tg["to"] in ("项目经理", "任务") else "") + "，下一拍送到。"
         if tg["to"] == "任务":
             t2, _ = tk.resolve(tg["ref"])
             upstream = sender["type"] == "ctrl" or (sender["type"] == "pm" and sender.get("project") == t2.get("project"))
             n = tk.inbox_add(t2["id"], sender["label"], False, full, kind="指令" if upstream else "留言", src=sender)
+            tk.update(t2["id"], _touch=False, hop=max(t2.get("hop") or 0, nh))   # 任务再往外投时从这一跳接着数
             if t2["status"] == "waiting": tk.update(t2["id"], status="approved")
             rec["status"] = "sent"; receipt = f"已进 {tk.ref(t2)} 的收件箱（i{n}）。"
         elif tg["to"] == "事":
@@ -204,3 +223,93 @@ def answered(tk, rid):
         if nxt: nxt[0]["status"] = "new"
         save(tk, recs)
         return rec
+
+
+# ---------- 防刷屏（方案 7.5）：进展限频、主人私聊限额。bridge 每拍送投递时调 ----------
+def _lim(tk): return os.path.join(_dir(tk), "limits.json")
+
+
+def limits(tk):
+    try:
+        with open(_lim(tk)) as f: return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {"progress": {}, "owner": [], "digest": []}
+
+
+def limits_save(tk, st):
+    os.makedirs(_dir(tk), exist_ok=True)
+    tmp = _lim(tk) + ".tmp"
+    with open(tmp, "w") as f: json.dump(st, f, ensure_ascii=False)
+    os.replace(tmp, _lim(tk))
+
+
+def progress_key(t):
+    """进展按最终落到的聊天、按任务算；定时任务按每个定时任务、每天算。"""
+    return f"sched:{t['schedule']}:{time.strftime('%Y-%m-%d')}" if t.get("schedule") else f"task:{t['id']}"
+
+
+def progress_gate(tk, t, text, now=None):
+    """这条进展现在发不发：send 发；hold 没到间隔，留最新一条到点再发；drop 到了条数上限，只进记录。"""
+    c, now = conf(tk.CFG), now or time.time()
+    with lock(tk):
+        st = limits(tk)
+        p = st["progress"].setdefault(progress_key(t), {"n": 0, "last": 0})
+        if p["n"] >= c["progress_max"]:
+            verdict = "drop"
+        elif now - p["last"] < c["progress_gap_min"] * 60:
+            if p.get("held"): tk.decide("进展合并", task=tk.ref(t), why="没到间隔，留最新一条，旧的只进记录", text=p["held"]["text"][:200])
+            p["held"], verdict = {"task": t["id"], "text": text}, "hold"
+        else:
+            p.update(n=p["n"] + 1, last=now, held=None); verdict = "send"
+        limits_save(tk, st)
+    if verdict == "drop":
+        tk.decide("进展限频", task=tk.ref(t), why=f"这个任务已经发了 {c['progress_max']} 条进展（delivery.progress_max），之后的只进记录", text=text[:200])
+    elif verdict == "hold":
+        tk.decide("进展限频", task=tk.ref(t), why=f"离上一条不到 {c['progress_gap_min']} 分钟，到点再发")
+    return verdict
+
+
+def progress_due(tk, now=None):
+    """到点该补发的进展：[(任务号, 文字)]，取出即算发过。"""
+    c, now, out = conf(tk.CFG), now or time.time(), []
+    with lock(tk):
+        st = limits(tk)
+        for k, p in st["progress"].items():
+            if p.get("held") and now - p["last"] >= c["progress_gap_min"] * 60:
+                if p["n"] < c["progress_max"]:
+                    out.append((p["held"]["task"], p["held"]["text"])); p.update(n=p["n"] + 1, last=now)
+                p["held"] = None
+        limits_save(tk, st)
+    return out
+
+
+def owner_room(tk, now=None):
+    """主人私聊这段时间还能不能再落一条（10 分钟 4 条、1 小时 12 条，服务告警不算）。"""
+    c, now = conf(tk.CFG), now or time.time()
+    ts = [x for x in limits(tk)["owner"] if now - x < 3600]
+    return len([x for x in ts if now - x < 600]) < c["owner_per_10min"] and len(ts) < c["owner_per_hour"]
+
+
+def owner_sent(tk, now=None):
+    now = now or time.time()
+    with lock(tk):
+        st = limits(tk)
+        st["owner"] = [x for x in st["owner"] if now - x < 3600] + [now]
+        limits_save(tk, st)
+
+
+def digest_add(tk, rec):
+    with lock(tk):
+        st = limits(tk)
+        st["digest"].append({"head": head(rec), "text": rec["text"][:200], "id": rec["id"]})
+        limits_save(tk, st)
+    tk.decide("合并摘要", sender=rec["from"]["ref"], category=rec["kind"], why="主人私聊这段时间的条数到上限，不用回复的并进下一条摘要")
+
+
+def digest_take(tk):
+    with lock(tk):
+        st = limits(tk)
+        out, st["digest"] = st["digest"], []
+        limits_save(tk, st)
+    return out
+

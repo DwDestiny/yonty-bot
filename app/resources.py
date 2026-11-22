@@ -2,13 +2,15 @@
 """资源信号和放行：排队的任务开不开，按内存余量、压力和单元总数定，不花 token。
 
 Input:  /proc/meminfo、/proc/pressure/memory、/proc/pressure/cpu（每次现读）；tasks.py 传进来的任务列表和 tasks 配置
-Output: snapshot() 信号；estimate() 任务的内存估计和依据；admit() 放不放行和理由；limits() 单元的 MemoryHigh、MemoryMax；line() 资源行
+Output: snapshot() 信号；estimate() 任务的内存估计和依据；admit() 放不放行和理由；limits() 单元的 MemoryHigh、MemoryMax；
+        hot()/cool() 该不该冻结、能不能解冻和理由；line() 资源行
 Pos:    tasks.py 按文件路径加载本模块。估计由派活方写（[派活] 的“资源:”），服务只守底线、压力线和单元总数（方案第 5 节）
 """
 import re, shutil
 
 GB = 1024 ** 3
-DEFAULTS = {"floor_gb": 1.5, "floor_pct": 10, "pressure_pct": 20, "max_units": 8, "freeze_gb": 0.75,
+DEFAULTS = {"floor_gb": 1.5, "floor_pct": 10, "pressure_pct": 20, "max_units": 8, "freeze_gb": 0.75, "freeze_pressure_pct": 60,
+            "thaw_after_s": 60,
             "default_build_gb": 4, "default_light_gb": 1, "build_roles": ["开发", "排查", "验收"]}
 
 
@@ -99,6 +101,24 @@ def admit(t, snap, running, admitted, c, history, current=lambda r: 0):
         pred, how = snap["avail"] - grow - sum(admitted) - est, f"在跑的还会涨 {gb(grow)}，本拍已放行 {gb(sum(admitted))}，本任务估计 {gb(est)}（{basis}）"
     ok = pred >= fl
     return ok, ("放行：" if ok else "等内存：") + f"可用 {gb(snap['avail'])}，{how}，预计剩 {gb(pred)}，底线 {gb(fl)}", est
+
+
+def hot(snap, c):
+    """该不该冻结一个单元：可用内存低于 freeze_gb，或内存压力（some avg60）超过 freeze_pressure_pct。"""
+    if not snap["total"]: return False, ""
+    if snap["avail"] < c["freeze_gb"] * GB:
+        return True, f"可用内存 {gb(snap['avail'])} 低于冻结线 {c['freeze_gb']}G"
+    if snap["mem_some"] > c["freeze_pressure_pct"]:
+        return True, f"内存压力 {snap['mem_some']:.0f}% 超过冻结线 {c['freeze_pressure_pct']}%"
+    return False, ""
+
+
+def cool(snap, c):
+    """能不能解冻：可用内存回到底线以上，且内存压力不超过压力线。冻结线和解冻线隔开，免得来回冻。"""
+    fl = floor(snap, c)
+    if snap["total"] and snap["avail"] >= fl and snap["mem_some"] <= c["pressure_pct"]:
+        return True, f"可用内存 {gb(snap['avail'])} 回到底线 {gb(fl)} 以上，内存压力 {snap['mem_some']:.0f}% 不超过 {c['pressure_pct']}%"
+    return False, ""
 
 
 def limits(est, snap, c):

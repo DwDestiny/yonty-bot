@@ -785,9 +785,11 @@ def admit(cands):
     running = [x for x in hist if x["status"] == "running" and x.get("exec") != "cloud"]
     cur = {x["id"]: mem_current(x) for x in running}
     admitted, out = [], []
+    frozen = [ref(x) for x in running if x.get("frozen")]
     for t in cands:
         if t.get("exec") == "cloud": out.append(t); continue
         ok, why, est = res.admit(t, snap, running, admitted, rc, hist, lambda r: cur.get(r["id"], 0))
+        if frozen: ok, why = False, f"等内存：{'、'.join(frozen)} 因为内存紧冻着，解冻前不开新单元"
         if ok:
             admitted.append(est); out.append(t)
             update(t["id"], _touch=False, mem_admit=est, wait_why="")
@@ -807,15 +809,77 @@ def sandbox(t):
     except Exception: return None
     if not bw: return None
     reads = [os.path.realpath(X(p)) for p in sc.get("read") or []]
-    a = [bw, "--bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"]
-    for p in (CFG.get("private") or {}).get("paths") or []:
-        rp = os.path.realpath(X(p))
-        if os.path.isdir(rp) and not any(r == rp or r.startswith(rp + os.sep) for r in reads): a += ["--tmpfs", rp]
+    a = [bw, "--bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"] + _hide(reads)
     st = os.path.join(ROOT, "state")
     keep = [tdir(t["id"]), os.path.join(st, "deliveries"), os.path.join(st, "devices"), os.path.dirname(t["scope"])]
     for d in keep: os.makedirs(d, exist_ok=True)
     open(DECISIONS, "a").close()
     return a + ["--ro-bind", ROOT, ROOT, "--tmpfs", st] + sum((["--bind", d, d] for d in keep), []) + ["--bind", DECISIONS, DECISIONS]
+
+def _hide(reads, extra=()):
+    """bwrap 参数：范围外的私密目录盖成空目录（列了父目录不算放开里面的私密子目录）。"""
+    out = []
+    for p in list((CFG.get("private") or {}).get("paths") or []) + list(extra):
+        rp = os.path.realpath(X(p))
+        if os.path.isdir(rp) and rp not in out and not any(r == rp or r.startswith(rp + os.sep) for r in reads):
+            out += ["--tmpfs", rp]
+    return out
+
+CRED_DIRS = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube")
+
+def probe_box(scope_path, repo=None):
+    """探针的沙箱（方案 6.6“探针也在范围里”）：跟定时运行同一套读范围，另外整机只读、/tmp 换成空的（范围和仓库在 /tmp 下的照样看得到）、
+    凭据目录和整个实例目录（配置、状态）都盖掉。读不到范围文件或没有 bwrap 返回 None。"""
+    bw = shutil.which("bwrap")
+    try:
+        with open(scope_path) as f: sc = json.load(f)
+    except Exception: return None
+    if not bw: return None
+    reads = [os.path.realpath(X(p)) for p in sc.get("read") or []]
+    tmp = os.path.realpath("/tmp")
+    back = [p for p in reads + [os.path.realpath(repo)] * bool(repo) if (p == tmp or p.startswith(tmp + os.sep)) and os.path.exists(p)]
+    return ([bw, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", tmp] + sum((["--ro-bind", p, p] for p in back), [])
+            + ["--die-with-parent", "--unshare-pid", "--new-session"] + _hide(reads, CRED_DIRS) + ["--tmpfs", ROOT])
+
+def _freezer(t, on):
+    if t.get("unit"):
+        r = subprocess.run(["systemctl", "--user", "freeze" if on else "thaw", t["unit"]], capture_output=True, text=True)
+        return r.returncode == 0, (r.stderr or r.stdout).strip()[-200:]
+    try: os.killpg(t["pid"], signal.SIGSTOP if on else signal.SIGCONT); return True, ""
+    except (OSError, TypeError) as e: return False, str(e)
+
+def freeze_tick(now=None):
+    """紧急冻结（方案 5.4）：可用内存低于冻结线或内存压力过冻结线，冻结优先级最低的单元（先定时运行，再最晚开的任务）；
+    回到底线以上、压力回到压力线以下，按后冻先解解冻。一拍最多动一个，冻结和解冻都记理由。返回 [(冻结|解冻, 任务, 理由)]。"""
+    now, rc, snap = now or time.time(), res.conf(T), res.snapshot()
+    ts = all_tasks()
+    for x in ts:   # 冻着的时候被取消、结束了，不再算冻着
+        if x.get("frozen") and x["status"] != "running": update(x["id"], _touch=False, frozen=None, frozen_why="")
+    run_ = [x for x in ts if x["status"] == "running" and x.get("exec") != "cloud" and (x.get("unit") or x.get("pid"))]
+    hot, why = res.hot(snap, rc)
+    if hot:
+        cand = [x for x in run_ if not x.get("frozen")]
+        if not cand: return []
+        t = min(cand, key=lambda x: (0 if x.get("schedule") else 1, -(x.get("launched") or 0)))
+        why += "；冻结" + ("定时运行" if t.get("schedule") else "最晚开的任务") + "，保住服务"
+        ok, err = _freezer(t, True)
+        if not ok:
+            decide("冻结失败", task=ref(t), why=f"{why}；{err}"); return []
+        update(t["id"], _touch=False, frozen=now, frozen_why=why)
+        decide("冻结", task=ref(t), why=why)
+        return [("冻结", t, why)]
+    frozen = sorted([x for x in run_ if x.get("frozen")], key=lambda x: x["frozen"])
+    if not frozen: return []
+    cool, why = res.cool(snap, rc)
+    t = frozen[-1]
+    if not cool or now - t["frozen"] < rc["thaw_after_s"]: return []
+    ok, err = _freezer(t, False)
+    if not ok:
+        decide("解冻失败", task=ref(t), why=f"{why}；{err}"); return []
+    why += f"，冻了 {max(1, int((now - t['frozen']) // 60))} 分钟"
+    update(t["id"], _touch=False, frozen=None, frozen_why="", thawed=now)
+    decide("解冻", task=ref(t), why=why)
+    return [("解冻", t, why)]
 
 def unit_journal(t):
     if not t.get("unit"): return ""
@@ -856,7 +920,7 @@ def stop(t):
     if t.get("unit"):
         subprocess.run(["systemctl", "--user", "stop", t["unit"]], capture_output=True)
     elif t.get("pid"):
-        try: os.killpg(t["pid"], signal.SIGTERM)
+        try: os.killpg(t["pid"], signal.SIGTERM); os.killpg(t["pid"], signal.SIGCONT)   # 冻着的进程组收到 SIGCONT 才处理 SIGTERM
         except OSError: pass
 
 def git(repo, *a): return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
@@ -1097,7 +1161,7 @@ def run(tid):
             inbox_acks(tid, text)
             text, marks = dl.parse_marks(text)
             for to, kind, body, need in marks:
-                try: dl.submit(_me(), dl.task_sender(_me(), load(tid)), to, kind, body, 0, need)
+                try: dl.submit(_me(), dl.task_sender(_me(), load(tid)), to, kind, body, None, need)
                 except ValueError as e: event(tid, "progress", f"投递没送出：{e}")
             pk = own_peak(load(tid).get("unit"))
             if pk > (load(tid).get("mem_peak") or 0): update(tid, mem_peak=pk)
@@ -1439,8 +1503,9 @@ def sender_from_env():
     tid = os.environ.get("FCB_TASK_ID")
     if tid: return dl.task_sender(_me(), load(int(tid)))
     owner, key = os.environ.get("FCB_OWNER") == "1", os.environ.get("FCB_SESSION_KEY", "")
-    if os.environ.get("FCB_LAYER") == "pm": return dl.pm_sender(os.environ.get("FCB_PROJECT", ""), key, owner)
-    return {"type": "ctrl", "ref": "主控", "label": "主控", "key": key, "owner": owner}
+    hop = int(os.environ.get("FCB_HOP") or 0)   # 这一轮是被第几跳的投递叫起来的，服务填
+    if os.environ.get("FCB_LAYER") == "pm": return dict(dl.pm_sender(os.environ.get("FCB_PROJECT", ""), key, owner), hop=hop)
+    return {"type": "ctrl", "ref": "主控", "label": "主控", "key": key, "owner": owner, "hop": hop}
 
 def cli(cmd, argv):
     if cmd == "inbox":
@@ -1461,7 +1526,7 @@ def cli(cmd, argv):
         for k in ("--to", "--kind", "--text"): ap.add_argument(k, required=True)
         ap.add_argument("--reply", choices=("是", "否"))
         a = ap.parse_args(argv)
-        try: print(dl.submit(_me(), sender_from_env(), a.to, a.kind, a.text, int(os.environ.get("FCB_HOP") or 0),
+        try: print(dl.submit(_me(), sender_from_env(), a.to, a.kind, a.text, None,
                              None if a.reply is None else a.reply == "是"))
         except ValueError as e: sys.exit(str(e))
     elif cmd == "res":
