@@ -786,14 +786,15 @@ class TaskTest(unittest.TestCase):
                    'open("prompts.log", "a").write(prompt + "\\n=====\\n")\n'
                    'if "[验证失败]" in prompt: os.system("git checkout -q -- tests/test_acc.sh")\n'
                    'else: open("tests/test_acc.sh", "w").write("true\\n")   # 第一轮偷偷把验收测试改成永远通过\n'
-                   'open("feature.txt", "w").write("ok")\n'
+                   'if not os.environ.get("NOFEATURE"): open("feature.txt", "w").write("ok")\n'
                    'print(json.dumps({"type": "result", "result": "做完了", "is_error": False, "total_cost_usd": 1}))\n')
 
     def test_independent_acceptance_locks_tests(self):
         bindir = self.fake_bin(self.FAKE_ACCEPT)
         _, d = self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n验收: 独立\n任务书:\n做')
         self.assertTrue(d['accept'])
-        self.assertFalse(self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n验收: <独立 / 不写>\n任务书:\n做')[1]['accept'])
+        for v in ('<独立 / 不写>', '不要', '不是', '要独立验收就写 独立，不要就不写这行'):
+            self.assertFalse(self.t.parse_directive(f'好\n[派活]\n仓库: ~/x\n标题: t\n验收: {v}\n任务书:\n做')[1]['accept'], v)
         n = self.new_task(accept=True)
         self.run_with(bindir, n)
         t = self.t.load(n)
@@ -807,6 +808,22 @@ class TaskTest(unittest.TestCase):
         # 放开以后负责人可以改
         self.t.inbox_add(n, '同事甲', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'))
         self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertTrue(self.t.load(n).get('accept_unlocked'))
+        # 派活定的验证命令跑不到验收测试：闸门单独再跑验收命令
+        m = self.new_task(accept=True, verify='true')
+        os.environ['NOFEATURE'] = '1'
+        try: self.run_with(bindir, m)
+        finally: os.environ.pop('NOFEATURE')
+        tm = self.t.load(m)
+        self.assertEqual(tm['status'], 'failed'); self.assertIn('验收命令没通过', self.t.events(m)[-1]['text'])
+        self.assertEqual(tm['verify'], 'true'); self.assertEqual(tm['accept_cmd'], 'sh tests/test_acc.sh')
+        # 验收没写出测试：分支退回原样，照常开工
+        empty = self.fake_bin('prompt = sys.stdin.read()\nif not prompt.startswith("[验收"): open("feature.txt", "w").write("ok")\n'
+                              'print(json.dumps({"type": "result", "result": "好", "is_error": False, "total_cost_usd": 0.1}))\n')
+        k = self.new_task(accept=True)
+        self.run_with(empty, k)
+        tk = self.t.load(k)
+        self.assertEqual(tk['status'], 'done'); self.assertIn('没有独立验收', self.t.events(k)[-1]['text'])
+        self.assertEqual(tk['accept_commit'], tk['accept_from'])
 
     def test_verify_gate_retries_then_passes(self):
         bindir = self.fake_bin(self.FAKE_FIX)

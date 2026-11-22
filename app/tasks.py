@@ -549,7 +549,7 @@ def parse_directive(text):
     hit = [n for n in roles() if n in rv]
     role = hit[0] if len(hit) == 1 else ""   # 照抄“产品 / 开发 / …”这种就当没写
     av = field("验收")
-    accept = bool(av) and not av.startswith("<") and any(w in av for w in ("独立", "是", "要"))   # 照抄模板、写“否”都算没写
+    accept = av.strip() == "独立"   # 只认正好写“独立”；照抄模板、“不要”“不是”都算没写
     bv = field("预算")
     bm2 = re.match(r"\s*(\d+(?:\.\d+)?)\s*[（(,，:：]?\s*(.*?)[）)]?\s*$", bv)
     budget = float(bm2.group(1)) if bm2 and float(bm2.group(1)) > 0 else 0
@@ -629,11 +629,6 @@ def make_worktree(t):
 # ---------- 独立验收：负责人开工前，先由验收角色按任务书写测试；负责人不许改，验证闸门会查 ----------
 ACCEPT_ROLE = "验收"
 
-def accept_files(t):
-    """验收提交里动过的文件（相对仓库根）。"""
-    out = git(t["worktree"], "diff", "--name-only", t["accept_from"], t["accept_commit"]).stdout
-    return [l for l in out.splitlines() if l.strip()]
-
 def accept_tampered(t):
     """负责人改了、删了验收测试就返回这些文件（含没提交的改动）；放开过或没有验收测试返回空。"""
     if not t.get("accept_files") or t.get("accept_unlocked"): return []
@@ -641,23 +636,31 @@ def accept_tampered(t):
     return [l for l in out.splitlines() if l.strip()]
 
 def run_accept(tid):
-    """开一个新会话写验收测试，提交到任务分支。花费记进任务；会话不当这件事的负责人会话。
-    写不成就照常开工，在结果里写明没有独立验收。返回给负责人看的说明。"""
+    """开一个新会话写验收测试，提交到任务分支。花费记进任务（accept_cost）；会话不当这件事的负责人会话。
+    结果记在任务上（accept_notice 是给负责人看的说明），负责人那段没起来、重跑时不再重做验收。写不成就照常开工。"""
     t = load(tid)
-    r = roles().get(ACCEPT_ROLE) or {}
+    r = roles().get(ACCEPT_ROLE)
+    wt = t["worktree"]
+    def give_up(why):
+        update(tid, accept_failed=True, accept_commit=git(wt, "rev-parse", "HEAD").stdout.strip(),
+               accept_notice=f"\n（独立验收没做成：{why}。这次按普通任务做，结果里会写明。）\n")
+    if not r: return give_up(f"实例里没有 roles/{ACCEPT_ROLE}.md")
+    if "Edit" in (roles().get(t.get("role") or "", {}).get("deny") or []): return give_up(f"{t['role']}是只读角色，不配独立验收")
+    if not t.get("accept_from"):   # 只记一次：没有远端时 base 是“HEAD”，要记下验收开工时的提交
+        update(tid, accept_from=git(wt, "rev-parse", "HEAD").stdout.strip())
+    t = load(tid)
     a = dict(t, role=ACCEPT_ROLE, model=r.get("model") or t.get("model"), effort=r.get("effort") or t.get("effort"))
     sid = str(uuid.uuid4())
-    update(tid, accept_from=git(t["worktree"], "rev-parse", "HEAD").stdout.strip())   # 没有远端时 base 是“HEAD”，要记下验收开工时的提交
-    prompt = (f"[验收 #{t['id']}] {t['title']}\n仓库：{t['repo']}。你在它的工作树 {t['worktree']} 里，分支 {t['branch']}（基于 {t.get('base')}）。\n"
-              + (f"派活时定的验证命令：{t['verify']}。负责人做完后服务会跑它，你的测试要能被它跑到；跑不到就在说明里写清。\n" if t.get("verify") else "")
-              + (f"\n你的角色：{r['name']}。\n{r['body']}\n" if r else "") + f"\n任务书：\n{t['brief']}")
+    prompt = (f"[验收 #{t['id']}] {t['title']}\n仓库：{t['repo']}。你在它的工作树 {wt} 里，分支 {t['branch']}（基于 {t.get('base')}）。\n"
+              + (f"派活时定的验证命令：{t['verify']}。\n" if t.get("verify") else "")
+              + f"\n你的角色：{r['name']}。\n{r['body']}\n\n任务书：\n{t['brief']}")
     cmd = session_cmd(a) + ["--output-format", "stream-json", "--verbose", "--session-id", sid,
                             "--max-budget-usd", f"{max(0.5, (t.get('budget') or T['budget_default']) * 0.3):.2f}"]
     o = t["origin"]
     env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid)
     final = None
     with open(os.path.join(tdir(tid), "stream.log"), "a") as raw:
-        p = subprocess.Popen(cmd, cwd=t["worktree"], env=env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
+        p = subprocess.Popen(cmd, cwd=wt, env=env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
         p.stdin.write(prompt); p.stdin.close()
         for line in p.stdout:
             raw.write(line)
@@ -668,32 +671,43 @@ def run_accept(tid):
         p.wait(); p.stdout.close()
     usd = round((final or {}).get("total_cost_usd") or 0, 3)
     if usd: spend_add(tid, usd)
-    update(tid, cost=round((load(tid).get("cost") or 0) + usd, 3), cost_base=(load(tid).get("cost_base") or 0) - usd, accept_session=sid)
-    if load(tid).get("status") != "running": return ""
-    wt = t["worktree"]
+    update(tid, cost=round((load(tid).get("cost") or 0) + usd, 3), accept_cost=round((load(tid).get("accept_cost") or 0) + usd, 3), accept_session=sid)
+    if load(tid).get("status") != "running": return
     if git(wt, "status", "--porcelain").stdout.strip():   # 写了没提交：服务替它提交
         git(wt, "add", "-A"); git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-q", "-m", f"验收测试（#{tid}）")
     head = git(wt, "rev-parse", "HEAD").stdout.strip()
-    update(tid, accept_commit=head)
-    files = accept_files(load(tid)) if final and not final.get("is_error") else []
+    t = dict(load(tid), accept_commit=head)
+    rng = (t["accept_from"], head)
+    added = [l for l in git(wt, "diff", "--name-only", "--diff-filter=A", *rng).stdout.splitlines() if l.strip()]   # 只锁新增的测试文件
+    other = [l for l in git(wt, "diff", "--name-only", "--diff-filter=a", *rng).stdout.splitlines() if l.strip()]
     text = (final or {}).get("result") or ""
     m = re.search(r"^\s*\[验收命令\]\s*(.+)$", text, re.M)
-    kv = {"accept_files": files}
-    if files and m and not t.get("verify"): kv["verify"] = m.group(1).strip()[:300]   # 派活没定验证命令：用验收给的
+    acmd = m.group(1).strip()[:300] if m else ""
+    if not added or not final or final.get("is_error"):
+        git(wt, "reset", "--hard", "-q", t["accept_from"]); git(wt, "clean", "-fdq")   # 半截的验收不留在分支上
+        return give_up("验收没写出新的测试文件" if final else "验收会话异常退出")
+    pre = ""
+    if acmd:   # 还没实现就先跑一次：这时就通过，说明测试没测到东西
+        ok, _ = run_verify(t, acmd)
+        pre = "；没实现时就通过了，可能没测到东西" if ok else ""
+    kv = {"accept_commit": head, "accept_files": added, "accept_cmd": acmd, "accept_precheck": pre}
+    if acmd and not t.get("verify"): kv["verify"] = acmd   # 派活没定验证命令：用验收给的
+    kv["accept_notice"] = (f"\n独立验收已经按任务书写好了测试，提交在 {head[:10]}：{'、'.join(added[:12])}\n"
+                           + (f"（验收还动了这些已有文件，没锁，你看着办：{'、'.join(other[:8])}）\n" if other else "")
+                           + f"这些测试文件不许改、不许删；验证时服务会查，改了就退回"
+                           + (f"，还会单独跑验收命令 {acmd}" if acmd else "") + "。"
+                           f"觉得测试本身写错了，用 [提问] 说明哪条、为什么，等{OWNER_NAME}或主控回“放开验收测试”。\n"
+                           f"验收的说明：\n{text.strip()[-1500:]}\n")
     update(tid, **kv)
-    if not files:
-        update(tid, accept_failed=True)
-        return "\n（独立验收没写成测试，这次按普通任务做，结果里会写明。）\n"
-    return (f"\n独立验收已经按任务书写好了测试，提交在 {head[:10]}：{'、'.join(files[:12])}\n"
-            f"这些文件不许改、不许删；验证时服务会查，改了就退回。觉得测试本身写错了，用 [提问] 说明哪条、为什么，等{OWNER_NAME}或主控回“放开验收测试”。\n"
-            f"验收的说明：\n{text.strip()[-1500:]}\n")
 
 def accept_note(t):
     if not t.get("accept"): return ""
-    if t.get("accept_failed"): return "；没有独立验收（验收没写成测试）"
+    if t.get("accept_failed"): return "；没有独立验收"
     bad = accept_tampered(t)
     if bad: return f"；负责人改了独立验收测试：{'、'.join(bad)}"   # 没定验证命令时闸门不拦，至少写出来
-    return f"；独立验收测试 {len(t.get('accept_files') or [])} 个文件" + ("，中途放开过" if t.get("accept_unlocked") else "，负责人没改")
+    ran = (f"，验收命令也跑过了" if t.get("accept_cmd") and t.get("verify") else "，验收没给命令，只查了没被改")
+    return (f"；独立验收测试 {len(t.get('accept_files') or [])} 个文件" + ("，中途放开过" if t.get("accept_unlocked") else "，负责人没改")
+            + ran + (t.get("accept_precheck") or ""))
 
 def verify_line(t):
     if not t.get("verify"): return "- 派活时没定验证命令：按仓库自己的测试验，结果写进总结。"
@@ -757,13 +771,15 @@ def run(tid):
         fork = ""
         if not t.get("session_started"):
             base = make_worktree(t)
-            fork = sibling_fork(t)
-            update(tid, base=base, forked_from=fork, cost_base=sibling_head(t).get("total", 0) if fork else 0)
-            if t["turn"] == 1: event(tid, "start", "")
-            acc = ""
-            if t.get("accept") and not t.get("accept_commit"): acc = run_accept(tid)
+            update(tid, base=base)
+            if t["turn"] == 1 and not t.get("accept_commit"): event(tid, "start", "")
+            if t.get("accept") and not t.get("accept_commit"): run_accept(tid)   # 验收做完才定分叉：验收跑得久，缓存可能已经凉了
             if load(tid).get("status") != "running": return
-            prompt, resume = first_prompt(load(tid), base, bool(fork)) + acc, False
+            t = load(tid)
+            fork = sibling_fork(t)
+            # 任务花费 = 会话累计 − 底数；验收的花费已记进任务，底数减掉它，负责人会话的累计才接得上
+            update(tid, forked_from=fork, cost_base=(sibling_head(t).get("total", 0) if fork else 0) - (t.get("accept_cost") or 0))
+            prompt, resume = first_prompt(load(tid), base, bool(fork)) + (t.get("accept_notice") or ""), False
             early = inbox_take(tid)   # 批之前、开工之前就补充的话
             if early: prompt += "\n\n" + format_inbox(early)
         else:
@@ -853,6 +869,10 @@ def run(tid):
                     bad = accept_tampered(t)
                     ok, out = (False, f"验收测试被改了：{'、'.join(bad)}。用 git checkout {t['accept_commit'][:10]} -- 这些文件 改回去；"
                                       "觉得测试写错了就用 [提问] 说明") if bad else run_verify(t)
+                    ac = t.get("accept_cmd") if t.get("accept_files") and not t.get("accept_unlocked") else ""
+                    if ok and ac and ac != t["verify"]:   # 验证命令不一定跑得到验收测试：单独再跑一遍
+                        ok, out = run_verify(t, ac)
+                        if not ok: out = f"验收命令没通过：{ac}\n{out}"
                     rnd = t.get("verify_round", 0)
                     if not ok and rnd < T["verify_retries"]:
                         update(tid, verify_round=rnd + 1)
@@ -896,14 +916,15 @@ def guard_check(cmd, t):
             if r.returncode == 2: return (r.stderr or "被护栏拦下").strip()[-300:]
     return None
 
-def run_verify(t):
-    """在工作树里跑验证命令。返回 (通过?, 输出末尾)。"""
-    why = guard_check(t["verify"], t)
+def run_verify(t, cmd=None):
+    """在工作树里跑验证命令（默认派活定的那条）。返回 (通过?, 输出末尾)。"""
+    cmd = cmd or t["verify"]
+    why = guard_check(cmd, t)
     if why: return False, "验证命令被护栏拦下：" + why
     o = t["origin"]
     env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), t["id"])
     try:
-        r = subprocess.run(["bash", "-c", t["verify"]], cwd=t["worktree"], env=env, capture_output=True, text=True,
+        r = subprocess.run(["bash", "-c", cmd], cwd=t["worktree"], env=env, capture_output=True, text=True,
                            timeout=T["verify_timeout_min"] * 60)
         return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:] or f"（没有输出，退出码 {r.returncode}）"
     except subprocess.TimeoutExpired:

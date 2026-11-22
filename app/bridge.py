@@ -611,7 +611,7 @@ def task_directive(ev, result):
     snap = (f"#{n} {d['title']}\n仓库：{BT}{repo}{BT}（{tasks.model_label(t)}）\n" + (f"验证：{BT}{t['verify']}{BT}\n" if t.get("verify") else "")
             + f"检查点：{t['budget']} 美元当量（{t.get('budget_why', '')}）\n"
             + ("独立验收：先由验收角色写测试，负责人不能改\n" if t.get("accept") else "")
-            + f"归到：“{t.get('thing') or tasks.MAIN_THING}”" + ("（新开的事）" if t.get("thing_new") else "（已有的事，会读它的档案，不接负责人的会话）")
+            + f"归到：“{t.get('thing') or tasks.MAIN_THING}”" + ("（新开的事）" if t.get("thing_new") else "（已有的事，接着它的负责人干）")
             + f"\n任务书：\n{brief}")
     if ev["chat_type"] != "p2p":
         return (head + f"\n\n{owner_ref(ev['channel'])} {name} 想派个长任务，等你批：\n{snap}\n\n"
