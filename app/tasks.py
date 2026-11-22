@@ -263,8 +263,8 @@ def roles():
     return out
 
 def by_owner(t):
-    """派活人是不是主人本人（服务按 IM 身份填的）。负责人不分聊天，权限按这个分：
-    只有主人派的任务能接着负责人的会话、成为新的会话头、写已定的决定和项目约定。"""
+    """派活人是不是主人本人（服务按 IM 身份填的）。负责人不分聊天、不分派活人，会话照样接着用；
+    什么话能对谁说由各聊天的主控把关。这里只管档案的分量：同事任务定的决定标“没确认”，提的约定不进项目约定。"""
     return bool((t.get("requester") or {}).get("owner"))
 
 MAIN_THING = "主线"
@@ -324,7 +324,7 @@ def _conv_path(t):
 def sibling_save(t, ctx, notes, total=0):
     """一轮做完后更新这件事的档案。只有服务写档案：现状和待办整栏替换，决定追加，约定记到项目级，通知记到别的事。
     评审这类每次新开的帮手只往档案里写，不把自己的会话当成负责人的会话。
-    同事派的任务：会话不当会话头；决定标上“同事派的、主人没确认”；约定不进项目约定，记进笔记。"""
+    同事派的任务：决定标上“同事派的、主人没确认”；约定不进项目约定，记进笔记。"""
     p = _sib_path(t, ".json"); os.makedirs(os.path.dirname(p), exist_ok=True)
     h = parse_handoff(notes)
     with _Lock(os.path.join(os.path.dirname(p), ".lock")):
@@ -332,7 +332,7 @@ def sibling_save(t, ctx, notes, total=0):
         done = [x for x in (s.get("tasks") or []) if x != t["id"]][-19:] + [t["id"]]
         s.update(project=proj, thing=t.get("thing") or MAIN_THING, tasks=done,
                  goal=s.get("goal") or t.get("title", ""), updated=time.time())
-        if by_owner(t) and roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
+        if roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
             heads = s.get("heads") or {}
             heads[t.get("model") or ""] = {"head": t["session_id"], "ctx": ctx, "last_used": time.time(), "total": total, "task": t["id"]}
             s.update(heads=heads, head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time())
@@ -416,10 +416,9 @@ def all_siblings():
     return out
 
 def sibling_fork(t):
-    """新任务能接着哪个会话分叉：主人派的，同一件事，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
-    上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。
-    同事派的任务一律新开、只读档案：负责人的会话里可能有主人在别的聊天里交代的事，不给同事的任务接着用、接着问。"""
-    if not by_owner(t) or not roles().get(t.get("role") or "", {}).get("resume", True): return ""
+    """新任务能接着哪个会话分叉：同一件事，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
+    上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。不管派活人是谁、从哪个聊天来。"""
+    if not roles().get(t.get("role") or "", {}).get("resume", True): return ""
     h = sibling_head(t)
     if not h.get("head"): return ""
     if time.time() - h.get("last_used", 0) > T["sibling_warm_min"] * 60: return ""
@@ -652,7 +651,8 @@ def first_prompt(t, base, forked=False):
 
 这是后台任务，没人盯着，做完再说话：
 - 先用待办工具列计划。
-- 进展汇报：单独起一行写“[进展] 一句话”，会转发给派活人。什么时候报，按守则“长任务”一节的汇报规矩。
+- 进展汇报：单独起一行写“[进展] 一句话”，会转发到派活人所在的{src}。什么时候报，按守则“长任务”一节的汇报规矩。
+- 这件事以前的活可能是别人在别的聊天里派的。进展、提问和最后的总结可能原样发到{src}（主控没接上时），所以只说这次任务本身，不提以前从别处听来的事。
 - 必须由人拍板的事（方案二选一、需求说不清、要授权），把问题和你的建议写清楚，单独起一行“[提问] 一句话问题”，然后结束这一轮等回复。能自己定的不要问。
 - 做完：提交到 {t['branch']}；仓库有远端就推送这个分支，再建草稿合并请求：在工作树里跑 `{mr_cmd(t, base)}`（GitHub、Codeup 都走它，凭据它自己读；不要直接读令牌或调平台接口）。不合并、不推主干、不发版。
 - 最后一条回复是给派活人看的总结：做了什么、怎么验证的、分支和合并请求链接、还剩什么。按守则的说话风格，简短。

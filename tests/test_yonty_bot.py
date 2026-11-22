@@ -874,7 +874,7 @@ class TaskTest(unittest.TestCase):
         b = self.new_task(role='开发', model='sonnet')                 # 同项目同角色、缓存还热：分叉接着干
         self.assertEqual(self.t.sibling_fork(self.t.load(b)), ta['session_id'])
         c = self.new_task(role='开发', model='sonnet', requester={'channel': 'feishu', 'id': 'ou_x', 'name': '同事甲', 'owner': False})
-        self.assertEqual(self.t.sibling_fork(self.t.load(c)), '')      # 同事的任务不接主人的会话
+        self.assertEqual(self.t.sibling_fork(self.t.load(c)), ta['session_id'])   # 同事的任务也接着同一件事的会话，话由主控把关
         self.assertEqual(self.t.sibling_fork(self.t.load(self.new_task(role='开发', model='opus'))), '')   # 换模型缓存用不上
         self.t.update(self.new_task(role='评审', model='sonnet', status='done'), status='done')
         self.assertEqual(self.t.sibling_fork(self.t.load(self.new_task(role='评审', model='sonnet'))), '')   # 评审每次新开
@@ -919,14 +919,15 @@ class TaskTest(unittest.TestCase):
         # 不分聊天：主人在群里派同一件事，还是同一个负责人，接着它的会话
         grp = self.t.load(self.new_task(thing='登录', model='sonnet', origin={'channel': 'feishu', 'chat_id': 'oc_x', 'chat_type': 'group', 'message_id': 'om_g'}))
         self.assertEqual(self.t.sibling_key(grp), self.t.sibling_key(ta)); self.assertEqual(self.t.sibling_fork(grp), ta['session_id'])
-        # 同事派的：同一个档案，但不接负责人的会话、不当会话头；决定标上没确认，约定只进笔记
+        # 同事派的：同一个负责人，接着它的会话；决定标上没确认，约定只进笔记
         mate = {'channel': 'feishu', 'id': 'ou_mate', 'name': '小李', 'owner': False}
         gt = self.t.load(self.new_task(thing='登录', model='sonnet', requester=mate, status='done'))
-        self.assertEqual(self.t.sibling_key(gt), self.t.sibling_key(ta)); self.assertEqual(self.t.sibling_fork(gt), '')
-        self.assertIn('刷新令牌', self.t.first_prompt(gt, 'origin/main'))
+        self.assertEqual(self.t.sibling_key(gt), self.t.sibling_key(ta)); self.assertEqual(self.t.sibling_fork(gt), ta['session_id'])
+        self.assertIn('不提以前从别处听来的事', self.t.first_prompt(gt, 'origin/main'))
+        gt = dict(gt, session_id=ta['session_id'])   # 后面的断言还按负责人原来的会话头算
         self.t.sibling_save(gt, 1, '决定：日志用 JSON\n约定：分支名用英文')
         s = self.t.sibling(ta)
-        self.assertEqual(s['head'], ta['session_id']); self.assertEqual(s['decisions'][-1].get('guest'), '小李')
+        self.assertEqual(s['decisions'][-1].get('guest'), '小李')
         self.assertIn('没确认', self.t.record_text(ta)); self.assertIn('分支名用英文', self.t.sibling_notes(ta))
         self.assertNotIn('分支名用英文', (Path(self.t._conv_path(ta)).read_text(encoding='utf-8')))
         self.assertEqual(self.b.thing_line(dict(gt, thing_new=True)), '新开了一件事“登录”。')   # 同事那边不列别的事
