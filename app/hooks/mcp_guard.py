@@ -5,8 +5,7 @@ Input:  Claude Code 的 PreToolUse JSON（stdin）；环境变量 FCB_OWNER（1 
 Output: 违规时 exit 2，stderr 写原因（Claude 能看到）；否则 exit 0
 Pos:    飞书机器人实例的硬限制，由 claude-settings.json 引用（matcher: mcp__.*）
 配置（config.json）:
-  mcp_servers:   要挂的 MCP 服务器名，定义从 ~/.claude.json 取（tasks.mcp_args）
-  mcp_open_to:   这些服务器同事触发的会话也能用（默认空：全部只给主人）
+  mcp_open_to:   这些服务器同事触发的会话也能用（默认空：全部只给主人）。挂哪些 MCP 跟用户级配置走（tasks.mcp_args）
 为什么用钩子而不是只给主人的会话挂：所有会话挂同一套 MCP，工具列表一样，缓存前缀才能共用；能不能用由这里按人拦。
 """
 import json, os, sys

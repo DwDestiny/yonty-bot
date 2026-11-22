@@ -50,35 +50,16 @@ def claude_args():
     for d in CFG.get("add_dirs", []): cmd += ["--add-dir", X(d)]
     return cmd + mcp_args()
 
-# ---------- MCP：只挂 config.json 的 mcp_servers 点名的几个，定义从用户级 ~/.claude.json 取 ----------
-# 实测（2026-11-22，CLI 2.1.330）：只挂固定的几个 stdio 服务器时，新会话前缀每次一样，续接会话里服务器掉线、重连只多写几百 token。
-# 以前缓存乱，是把用户级的全部 MCP（含连不上的、异步连的云端连接器）都带上了，首个请求的工具列表时有时无。
-MCP_FILE = os.path.join(ROOT, "state", "mcp.json")   # 生成物，可能带服务器参数，放 state/（机器人读不到，不进 Git）
-
-def mcp_servers():
-    """(挂上的名字, 配置里点了名但 ~/.claude.json 里没有的名字)。"""
-    names = CFG.get("mcp_servers")
-    if not names: return [], []
-    try:
-        with open(os.path.expanduser("~/.claude.json")) as f: user = json.load(f).get("mcpServers") or {}
-    except Exception: user = {}
-    return [n for n in names if n in user], [n for n in names if n not in user]
-
+# ---------- MCP：照用户级配置挂，等连上再开工 ----------
+# 实测（2026-11-22，CLI 2.1.330）：-p 不等 MCP 连上就发第一个请求，慢一点的服务器那一刻还是 pending，工具列表少几个，
+# 前缀就变了，约 18k token 要重写（5 个会话里 2 个）。MCP_CONNECTION_NONBLOCKING=0 让 CLI 先等连接（5/5 命中，多等 0–3 秒）。
+# 连不上的服务器每次都是 failed，前缀照样稳定，只是每轮多等到它超时；这类服务器别挂成 MCP，改用命令行（如 mcporter）按需调。
 def mcp_args():
-    names = CFG.get("mcp_servers")
-    if names is None and not CFG.get("disable_mcp", True): return []   # 旧配置写了 disable_mcp: false：照旧加载全部
-    found, _ = mcp_servers()
-    if not found: return ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
-    with open(os.path.expanduser("~/.claude.json")) as f: user = json.load(f).get("mcpServers") or {}
-    body = json.dumps({"mcpServers": {n: user[n] for n in found}}, ensure_ascii=False, sort_keys=True)
-    try: same = open(MCP_FILE).read() == body
-    except OSError: same = False
-    if not same:   # 内容不变就不重写，免得并发启动时读到半个文件
-        os.makedirs(os.path.dirname(MCP_FILE), exist_ok=True)
-        tmp = MCP_FILE + f".{os.getpid()}.tmp"
-        with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f: f.write(body)
-        os.replace(tmp, MCP_FILE)
-    return ["--strict-mcp-config", "--mcp-config", MCP_FILE]
+    return ["--strict-mcp-config"] if CFG.get("disable_mcp") else []   # disable_mcp: true 一个都不挂
+
+def mcp_status(init):
+    """init 事件里的 MCP 服务器状态：{名字: connected/pending/failed...}。"""
+    return {s.get("name"): s.get("status") for s in (init.get("mcp_servers") or [])}
 
 def hook_env(owner, private, chat_id, channel="feishu", task_id=None):
     env = dict(os.environ, FCB="1", FCB_CONFIG=CFG_PATH, FCB_OWNER="1" if owner else "0",
@@ -90,6 +71,7 @@ def hook_env(owner, private, chat_id, channel="feishu", task_id=None):
         env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=GIT_HOOKS)
     if task_id is not None:
         env["FCB_TASK_ID"] = str(task_id)
+    env["MCP_CONNECTION_NONBLOCKING"] = "0"   # 等 MCP 连上再发第一个请求，工具列表才稳定（见上面 MCP 一节）
     return env
 
 # ---------- 存储 ----------
@@ -1271,6 +1253,11 @@ def create_mr(argv):
 # ---------- 诊断：主人问额度、任务为什么断了时用。运行态和日志机器人不能直接读（防它改写自己的监督记录），这里只读、只给主人 ----------
 def diag(s=""):
     if os.environ.get("FCB_OWNER") != "1": sys.exit(f"诊断只给{OWNER_NAME}本人触发的会话用。")
+    try: print(diag_text(s))
+    except LookupError as e: sys.exit(str(e))
+
+def diag_text(s=""):
+    """诊断文字：额度快照、在跑的任务（或单个任务的细节）、最近的报错。服务的 /status 命令和上面的 diag 共用。"""
     out = []
     try:
         q = json.load(open(QUOTA))
@@ -1282,7 +1269,7 @@ def diag(s=""):
         out.append("订阅额度：还没有快照（任务跑起来后才有）。")
     if s:
         t, cands = resolve(s)
-        if not t: sys.exit("没有这个任务。" if len(cands) < 2 else "有好几个：" + "、".join(ref(x) for x in cands))
+        if not t: raise LookupError("没有这个任务。" if len(cands) < 2 else "有好几个：" + "、".join(ref(x) for x in cands))
         res, peak = unit_result(t)
         out.append(f"{ref(t)} {t['title']}：{LABEL.get(t['status'], t['status'])}，第 {t.get('turn', 0)} 轮，"
                    f"单元 {t.get('unit') or '无'}" + (f"，结束原因 {res}" if res else "") + (f"，内存峰值 {peak}" if peak else "")
@@ -1297,7 +1284,7 @@ def diag(s=""):
         bad = [l[:200] for l in lines if " ERROR " in l or " WARNING " in l][-8:]
         out.append("服务日志里最近的报错：" + ("\n  " + "\n  ".join(bad) if bad else "没有"))
     except OSError: pass
-    print("\n".join(out))
+    return "\n".join(out)
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "run":

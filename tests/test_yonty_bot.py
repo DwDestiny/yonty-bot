@@ -188,6 +188,41 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --as user --text "see --help for usage"').returncode, 2)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --text --help').returncode, 2)
 
+    def test_scaffold_writes_upgrade_meta(self):
+        meta = json.loads((self.inst / 'yonty-bot.json').read_text())   # /upgrade 靠它找源码仓库、用同样的参数重新生成
+        self.assertEqual((meta['source'], meta['version']), (str(ROOT), (ROOT / 'VERSION').read_text().strip()))
+        self.assertNotIn('--rules', meta['flags'])
+        self.assertTrue((self.inst / 'upgrade.py').exists())
+        st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
+        self.assertIn(f"Edit(/{self.inst}/upgrade.py)", st['permissions']['deny'])
+
+    def test_command_guard(self):
+        cfg = Path(self.inst) / '_cg.json'
+        cfg.write_text(json.dumps({'command_guard': [   # 和实例里的写法一样：mcporter 默认只给主人，用户的 Mac 再收窄到主人私聊
+            {'match': r'\bmcporter\b', 'allow': ['owner', 'owner_task']},
+            {'match': r'\bmcporter\b.*\b(lcu|macfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
+        def run(cmd, **env):
+            e = dict(self.env, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})
+            return subprocess.run([sys.executable, str(self.inst / 'hooks' / 'command_guard.py')], capture_output=True, text=True,
+                                  input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}), env=e)
+        mac, mini = "mcporter call lcu.js code='1'", "mcporter call lcu-mini.js code='1'"
+        try:
+            self.assertEqual(run(mac, FCB_OWNER='1', FCB_PRIVATE='1').returncode, 0)
+            r = run(mac, FCB_OWNER='1', FCB_PRIVATE='0')                           # 主人在群里也不行
+            self.assertEqual(r.returncode, 2); self.assertIn('只给主人私聊用', r.stderr); self.assertIn('不要再试', r.stderr)
+            self.assertEqual(run(mac, FCB_OWNER='1', FCB_PRIVATE='1', FCB_TASK_ID='3').returncode, 2)   # 任务不碰用户的 Mac
+            self.assertEqual(run(mini, FCB_OWNER='1', FCB_PRIVATE='0').returncode, 0)
+            self.assertEqual(run(mini, FCB_OWNER='1', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 0)
+            self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
+            self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 2)
+            self.assertEqual(run('ls lcu.txt', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 0)
+            self.assertEqual(run('mcporter config list', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)   # 会打印 ssh 参数
+            self.assertEqual(run('npx mcporter daemon stop', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
+            self.assertEqual(run('mcporter call macfront.frontmost_app', FCB_OWNER='1', FCB_PRIVATE='0').returncode, 2)
+        finally: cfg.unlink()
+        st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
+        self.assertTrue(any(m['matcher'] == 'Bash' and 'command_guard.py' in m['hooks'][0]['command'] for m in st['hooks']['PreToolUse']))
+
     def test_mcp_guard(self):
         mcp = lambda env: self.hook('mcp_guard.py', env, 'mcp__mini__run', {}).returncode
         self.assertEqual(mcp({'FCB_OWNER': '0'}), 2)
@@ -270,10 +305,11 @@ class AmbientTest(unittest.TestCase):
         b = self.b
         b.lark = lambda args, **k: self.types.SimpleNamespace(stdout=json.dumps({'data': {'messages': []}}), returncode=0)
         self.assertEqual(b.ambient_chats(), {})
-        self.assertIn('开始旁听', b.ambient_cmd('oc_a', '/旁听'))
+        self.assertIn('没开旁听', b.ambient_cmd('oc_a', '/listen'))        # 只写命令：看状态，不切换
+        self.assertIn('开始旁听', b.ambient_cmd('oc_a', '/listen on'))
         self.assertIn('oc_a', b.ambient_chats())
-        self.assertIn('在旁听', b.ambient_cmd('oc_a', '/旁听 状态'))
-        self.assertIn('不旁听', b.ambient_cmd('oc_a', '/旁听'))
+        self.assertIn('在旁听', b.ambient_cmd('oc_a', '/listen status'))
+        self.assertIn('不旁听', b.ambient_cmd('oc_a', '/listen off'))
         self.assertEqual(b.ambient_chats(), {})
 
     def test_poll_filters_and_cooldown(self):
@@ -284,7 +320,7 @@ class AmbientTest(unittest.TestCase):
         cur = {'i': 0}
         b.lark = lambda args, **k: self.types.SimpleNamespace(
             stdout=json.dumps({'data': {'messages': batches[cur['i']]}}), returncode=0)
-        b.ambient_cmd('oc_p', '/旁听')                 # 开启时群里已有 om_p1、om_p2
+        b.ambient_cmd('oc_p', '/listen on')            # 开启时群里已有 om_p1、om_p2
         batches[0].append(self.msg(9))                 # 开启后、第一轮拉取前到的消息不能被吞
         flushed = []
         orig_flush, orig_quiet = b.ambient_flush, b.AMB['quiet_seconds']
@@ -304,12 +340,12 @@ class AmbientTest(unittest.TestCase):
             self.assertEqual([m['message_id'] for m in b.amb_buf['oc_p']['msgs']], ['om_p8'])
         finally:
             b.ambient_flush, b.AMB['quiet_seconds'] = orig_flush, orig_quiet
-            b.ambient_cmd('oc_p', '/旁听 关')
+            b.ambient_cmd('oc_p', '/listen off')
 
     def flush_with(self, output):
         b = self.b
         seen = {}
-        def fake(key, s, prompt, owner, private, chat_id, quiet=False):
+        def fake(key, s, prompt, owner, private, chat_id, quiet=False, **k):
             seen.update(owner=owner, private=private, quiet=quiet)
             return output
         orig = b.run_claude
@@ -484,7 +520,7 @@ class TaskTest(unittest.TestCase):
         cfg['channels']['wecom'].update(enabled=True, owner_userid='boss')
         cfg['ambient']['enabled'] = False
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py'):
+        for f in ('bridge.py', 'tasks.py', 'upgrade.py'):
             (cls.inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         shutil.copytree(TEMPLATES / 'roles', cls.inst / 'roles')
         gh = cls.inst / 'hooks' / 'git'; gh.mkdir(parents=True)
@@ -572,13 +608,13 @@ class TaskTest(unittest.TestCase):
     def test_group_colleague_needs_approval_in_group(self):
         ev = self.ev('x', sender='ou_mate')
         out = self.b.task_directive(ev, self.directive())
-        ref = re.search(r'批 ([\w.-]+#\d+)', out).group(1)
+        ref = re.search(r'/approve ([\w.-]+#\d+)', out).group(1)
         n = self.t.resolve(ref)[0]['id']
         self.assertIn(f'<at user_id="{OWNER}">', out)      # 在原群里 @ 主人
         self.assertEqual(self.t.load(n)['status'], 'pending')
-        self.assertIn('只有小王能批', self.b.task_command(self.ev(f'@_user_1 批 {ref}', sender='ou_mate')))
+        self.assertIn('只有小王能批', self.b.task_command(self.ev(f'@_user_1 /approve {ref}', sender='ou_mate')))
         self.assertEqual(self.t.load(n)['status'], 'pending')
-        self.assertIn('排上了', self.b.task_command(self.ev(f'@_user_1 批 {ref}')))
+        self.assertIn('排上了', self.b.task_command(self.ev(f'@_user_1 /approve {ref}')))
         self.assertEqual(self.t.load(n)['status'], 'approved')
 
     def test_p2p_colleague_asks_owner_by_dm(self):
@@ -586,16 +622,16 @@ class TaskTest(unittest.TestCase):
         out = self.b.task_directive(ev, self.directive())
         n = re.search(r'任务 ([\w.-]+#\d+)', out).group(1)
         self.assertEqual(self.wx[-1]['chatid'], 'boss')    # 私聊主人
-        self.assertIn(f'批 {n}', self.wx[-1]['content'])
+        self.assertIn(f'/approve {n}', self.wx[-1]['content'])
         self.wx.clear()
-        self.assertIn('排上了', self.b.task_command(self.ev(f'批 {n}', sender='boss', chat='boss', chat_type='p2p', channel='wecom')))
+        self.assertIn('排上了', self.b.task_command(self.ev(f'/approve {n}', sender='boss', chat='boss', chat_type='p2p', channel='wecom')))
         self.assertEqual(self.wx[-1]['chatid'], 'mate')    # 回原会话说一声
 
     def test_wecom_group_mention_stripped(self):
         n = self.t.create(title='x', repo=str(self.repo), brief='b', status='pending',
                           requester={'channel': 'wecom', 'id': 'mate', 'name': '同事甲', 'owner': False},
                           origin={'channel': 'wecom', 'chat_id': 'wrg', 'chat_type': 'group', 'message_id': 'm'})['id']
-        out = self.b.task_command(self.ev(f'@测试助理 批 {n}', sender='boss', chat='wrg', channel='wecom'))
+        out = self.b.task_command(self.ev(f'@测试助理 /approve {n}', sender='boss', chat='wrg', channel='wecom'))
         self.assertIn('排上了', out)
 
     def test_follow_up_authorization(self):
@@ -614,8 +650,8 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([i['text'] for i in items], ['改成红色', '再加个测试'])
         self.assertTrue(items[0]['who'].startswith('主控（替'))
         self.assertEqual(self.t.inbox_take(n), [])          # 每条只交一次
-        self.assertIn('没有这个任务', self.b.task_command(self.ev(f'/任务 {n}', sender='ou_x', chat='oc_other')))
-        self.assertIn('不是你派的', self.b.task_command(self.ev(f'/任务 取消 {n}', sender='ou_other')))
+        self.assertIn('没有这个任务', self.b.task_command(self.ev(f'/task {n}', sender='ou_x', chat='oc_other')))
+        self.assertIn('不是你派的', self.b.task_command(self.ev(f'/task cancel {n}', sender='ou_other')))
 
     def test_tick_posts_once_and_expires(self):
         launched = []
@@ -664,7 +700,7 @@ class TaskTest(unittest.TestCase):
         queued, prompts = [], []
         oq, orc, ol = self.b.enqueue, self.b.run_claude, self.t.launch
         self.b.enqueue = lambda key, ev: queued.append((key, ev))
-        self.b.run_claude = lambda key, s, prompt, owner, private, chat_id, quiet=False: prompts.append((key, prompt, owner, private)) or claude_out
+        self.b.run_claude = lambda key, s, prompt, owner, private, chat_id, quiet=False, **k: prompts.append((key, prompt, owner, private)) or claude_out
         self.t.launch = lambda tid: None
         try:
             self.b.task_tick(); self.b.task_tick()
@@ -704,10 +740,65 @@ class TaskTest(unittest.TestCase):
         self.run_relay(k, None)                            # 主控没跑成：原话照发
         self.assertIn('测试挂了', self.sent[-1][1]); self.assertEqual(self.t.load(k)['posted'], 1)
 
-    def test_chat_runs_disable_background(self):
-        # 聊天、回报这类 -p 会话关掉后台命令：后台命令会让一轮出好几个结果，服务只拿到最后一个，中间的回报丢了
-        self.assertEqual(self.b.hook_env(True, True, 'oc_x')['CLAUDE_CODE_DISABLE_BACKGROUND_TASKS'], '1')
-        self.assertNotIn('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', self.t.hook_env(True, True, 'oc_x'))   # 任务会话照常能用
+    def fake_stream(self, events, delay=0):
+        """假 claude：按顺序吐出流式事件。"""
+        p = Path(self.tmp.name) / f'stream_{uuid.uuid4().hex[:6]}.py'
+        p.write_text('import json, sys, time\nsys.stdin.read()\n'
+                     f'for e in {events!r}:\n    time.sleep({delay}) if e == "SLEEP" else print(json.dumps(e), flush=True)\n')
+        return [sys.executable, str(p)]
+
+    def test_stream_delivers_every_result(self):
+        # 一轮里起了后台任务会出好几个结果：每一个都要送到，中途的不等这一轮结束（2026-11-22 丢过三条回报）
+        bg = lambda n: {'type': 'system', 'subtype': 'background_tasks_changed', 'tasks': [{}] * n}
+        res = lambda x: {'type': 'result', 'subtype': 'success', 'result': x, 'session_id': 's'}
+        got = []
+        out, text, rc, _ = self.b.stream_claude(self.fake_stream([bg(1), res('先说一句'), bg(0), res('跑完了')]), 'p', dict(os.environ), got.append)
+        self.assertEqual((got, text, out['result'], rc), (['先说一句'], '跑完了', '跑完了', 0))
+        got.clear()   # 没有后台任务也出了两个结果（又开了一轮）：前一个也送到
+        out, text, _, _ = self.b.stream_claude(self.fake_stream([res('一'), {'type': 'assistant'}, res('二')]), 'p', dict(os.environ), got.append)
+        self.assertEqual((got, text), (['一'], '二'))
+        got.clear()
+        out, text, _, _ = self.b.stream_claude(self.fake_stream([res('只有一个')]), 'p', dict(os.environ), got.append)
+        self.assertEqual((got, text), ([], '只有一个'))
+        old = self.b.CLAUDE_TIMEOUT; self.b.CLAUDE_TIMEOUT = 1
+        try:   # 超时：已经出的结果照样送到，再抛超时
+            got.clear()
+            with self.assertRaises(subprocess.TimeoutExpired):
+                self.b.stream_claude(self.fake_stream([bg(1), res('中途'), 'SLEEP', {'type': 'system'}], delay=3), 'p', dict(os.environ), got.append)
+            self.assertEqual(got, ['中途'])
+        finally: self.b.CLAUDE_TIMEOUT = old
+
+    def test_chat_extra_results_are_replied(self):
+        def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+            on_extra('等 CI 中，先报一声'); return '好了'
+        orig, self.b.run_claude = self.b.run_claude, fake
+        try: self.b.handle(self.ev('干个活', chat='oc_x1', chat_type='p2p'))
+        finally: self.b.run_claude = orig
+        self.assertEqual([s[1] for s in self.sent][-2:], ['等 CI 中，先报一声', '好了'])
+        keys = [s[2] for s in self.sent][-2:]
+        self.assertNotEqual(keys[0], keys[1])                               # 同一条消息回两次：幂等键不同，飞书才不会丢第二条
+        def fake2(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+            on_extra('全说完了'); return ''                                  # 最后一句中途就发了
+        self.sent.clear(); self.b.run_claude = fake2
+        try: self.b.handle(self.ev('再干个活', chat='oc_x1', chat_type='p2p'))
+        finally: self.b.run_claude = orig
+        self.assertEqual([s[1] for s in self.sent if s[0] != 'lark'], ['全说完了'])   # 不补一条“空回复”
+
+    def test_early_result_keeps_session(self):
+        bg = {'type': 'system', 'subtype': 'background_tasks_changed', 'tasks': [{}]}
+        res = {'type': 'result', 'subtype': 'success', 'result': '先报一声', 'session_id': 'sid-keep', 'usage': {}}
+        fake = self.fake_stream([bg, res])                                  # 发完这句进程就没了，没有第二个结果
+        ob, op = self.b.base_cmd, self.b.prime
+        self.b.base_cmd = lambda stream=False: list(fake)
+        self.b.prime = lambda sid: subprocess.CompletedProcess([], 0, '', '')
+        got = []
+        try:
+            s = self.b.get_session('p2p:oc_keep')
+            out = self.b.run_claude('p2p:oc_keep', s, 'x', True, True, 'oc_keep', on_extra=got.append)
+        finally: self.b.base_cmd, self.b.prime = ob, op
+        self.assertEqual((got, out), (['先报一声'], ''))
+        self.assertEqual(self.b.sessions['p2p:oc_keep']['id'], 'sid-keep')   # 会话还在，没当成“卡壳”丢掉
+        self.assertNotIn('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS', self.b.hook_env(True, True, 'oc_x'))   # 后台命令照常能用
 
     def test_relay_brief_only_once(self):
         n = self.relay_task('done', '做完了')
@@ -718,20 +809,128 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn('写接口', self.b.relay_prompt(t, {'kind': 'done', 'text': 'x'}, True))
         self.assertIn('写接口', self.b.relay_prompt(t, {'kind': 'done', 'text': 'x'}, False))
 
-    def test_task_command_without_space(self):
+    def test_english_commands(self):
         n = self.relay_task('done', 'x')
         r = self.t.ref(self.t.load(n))
-        for text in (f'/任务{r}', f'/任务 {r}'):
-            self.assertIsNotNone(self.b.task_command(self.ev(text, chat_type='p2p', chat='oc_r')), text)
-        self.assertIsNotNone(self.b.task_command(self.ev(f'/任务全文{r}', chat_type='p2p', chat='oc_r')))
-        self.assertIsNone(self.b.task_command(self.ev('/任务管理怎么做', chat_type='p2p', chat='oc_r')))
+        cmd = lambda text: self.b.task_command(self.ev(text, chat_type='p2p', chat='oc_r'))
+        self.assertIn(r, cmd(f'/task {r}'))
+        self.assertIn('任务书', cmd(f'/task brief {r}'))
+        self.assertIn(r, cmd('/tasks'))
+        self.assertIn('用法', cmd('/task'))
+        self.assertIn('用法', cmd(f'/task stop {r}'))
+        self.assertIn('用法', cmd('/approve'))
+        for old in (f'/任务 {r}', f'/任务{r}', '/团队', f'批 {r}', '/taskmanager', '/tasks please'):   # 中文写法去掉了，交给聊天
+            self.assertIsNone(cmd(old), old)
 
-    def test_chat_compacts_when_context_too_big(self):
-        now = 10000.0
-        due = self.b.chat_compact_due
-        self.assertTrue(due({'ctx': 170000, 'last': now - 10, 'compacted': 0}, now))    # 一直有人说话，也到了水位
-        self.assertFalse(due({'ctx': 100000, 'last': now - 10, 'compacted': 0}, now))
-        self.assertFalse(due({'ctx': 170000, 'last': now - 10, 'compacted': now - 5}, now))   # 上一轮后压过了
+    def test_service_commands(self):
+        sc = lambda text, **k: self.b.service_command(self.ev(text, **k))
+        self.assertIn('/tasks', sc('/help', sender='ou_x'))
+        self.assertNotIn('/upgrade', sc('/help', sender='ou_x'))           # 同事看不到主人的命令
+        self.assertIn('/upgrade', sc('/help', chat_type='p2p'))
+        self.assertIn('只有', sc('/status', sender='ou_x', chat_type='p2p'))
+        self.assertIn('私聊', sc('/status'))                               # 主人在群里：不带出日志
+        self.assertIn('在跑的任务', sc('/status', chat_type='p2p'))
+        self.assertIn('只有', sc('/upgrade', sender='ou_x', chat_type='p2p'))
+        self.assertIn('私聊', sc('/upgrade'))
+        self.assertIsNone(sc('/statusx'))
+        self.assertIsNone(sc('随便聊聊'))
+
+    def test_upgrade_reports_progress_once(self):
+        f = Path(self.b.UPGRADE_FILE)
+        o = {'channel': 'feishu', 'chat_id': 'oc_u', 'message_id': 'om_up'}
+        try:
+            f.write_text(json.dumps({'status': 'announce', 'origin': o, 'from': '1.2.1', 'to': '1.3.0'}))
+            self.b.upgrade_tick(); self.b.upgrade_tick()
+            self.assertEqual([s[1] for s in self.sent if s[0] == 'om_up'].__len__(), 1)
+            self.assertIn('马上重启', self.sent[-1][1])
+            st = json.loads(f.read_text()); st.update(status='done', commit='abc', rules_changed=True); f.write_text(json.dumps(st))
+            self.b.upgrade_tick(); self.b.upgrade_tick()
+            done = [s[1] for s in self.sent if s[0] == 'om_up']
+            self.assertEqual(len(done), 2); self.assertIn('1.2.1 → 1.3.0', done[-1]); self.assertIn('守则模板有改动', done[-1])
+            self.assertNotIn('token', json.loads(f.read_text()))
+            f.write_text(json.dumps({'status': 'running', 'origin': o, 'updated': time.time()}))
+            self.assertIn('已经在升级', self.b.service_command(self.ev('/upgrade', chat_type='p2p')))
+        finally: f.unlink(missing_ok=True)
+
+    def test_upgrade_script_branches(self):
+        import importlib.util
+        base = Path(self.tmp.name) / f'up_{uuid.uuid4().hex[:6]}'
+        src, origin = base / 'src', base / 'origin.git'
+        g = lambda *a, cwd=src: subprocess.run(['git', *a], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
+        (src / 'tests').mkdir(parents=True); (src / 'scripts').mkdir()
+        (src / 'VERSION').write_text('1.0.0\n'); (src / '.gitignore').write_text('__pycache__/\n')
+        (src / 'tests' / 'test_x.py').write_text('import unittest\nclass T(unittest.TestCase):\n    def test_x(self): self.assertTrue(True)\n')
+        (src / 'scripts' / 'scaffold.py').write_text(
+            'import os, sys\nsrc = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))\n'
+            'if os.path.exists(os.path.join(src, "BREAK")): sys.exit("坏了")\n'
+            'open(os.path.join(sys.argv[1], "gen.txt"), "w").write(open(os.path.join(src, "VERSION")).read())\n')
+        g('init', '-q', '-b', 'main'); g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qam', 'a', '--allow-empty')
+        g('add', '-A'); g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'a')
+        g('clone', '-q', '--bare', str(src), str(origin), cwd=base); g('remote', 'add', 'origin', str(origin)); g('fetch', '-q', 'origin')
+        g('branch', '-q', '--set-upstream-to=origin/main')
+        pub = base / 'pub'; g('clone', '-q', str(origin), str(pub), cwd=base)
+        def push(files, msg):
+            for k, v in files.items():
+                p = pub / k
+                if v is None: p.unlink()
+                else: p.write_text(v)
+            g('add', '-A', cwd=pub); g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', msg, cwd=pub); g('push', '-q', cwd=pub)
+        meta_f, f = self.inst / 'yonty-bot.json', Path(self.b.UPGRADE_FILE)
+        (self.inst / 'gen.txt').write_text('1.0.0\n')
+        spec = importlib.util.spec_from_file_location('up_test', self.inst / 'upgrade.py')
+        up = importlib.util.module_from_spec(spec); spec.loader.exec_module(up)
+        restarts, health = [], []
+        up.restart = lambda slug: restarts.append(slug)
+        up.healthy = lambda slug, ver, since, wait=90: health.pop(0) if health else True
+        up.task_units = lambda slug: []
+        def run():
+            meta_f.write_text(json.dumps({'source': str(src), 'version': (src / 'VERSION').read_text().strip(),
+                                          'commit': g('rev-parse', 'HEAD'), 'service': 'svc', 'flags': []}))
+            f.write_text(json.dumps({'status': 'queued', 'token': 'tk', 'announced': True}))
+            os.environ['FCB_UPGRADE_TOKEN'] = 'tk'
+            try: up.main()
+            finally: os.environ.pop('FCB_UPGRADE_TOKEN')
+            return json.loads(f.read_text())
+        try:
+            self.assertEqual(run()['status'], 'uptodate')
+            (src / 'junk').write_text('x')
+            self.assertIn('没提交的改动', run()['detail']); (src / 'junk').unlink()
+            a = g('rev-parse', 'HEAD')
+            push({'VERSION': '1.1.0\n', 'tests/test_x.py': 'import unittest\nclass T(unittest.TestCase):\n    def test_x(self): self.fail("坏")\n'}, 'b')
+            s = run()
+            self.assertEqual(s['status'], 'failed'); self.assertIn('测试没过', s['detail'])
+            self.assertEqual(g('rev-parse', 'HEAD'), a)                                  # 源码退回原来的提交
+            self.assertEqual((self.inst / 'gen.txt').read_text(), '1.0.0\n'); self.assertEqual(restarts, [])   # 实例没动
+            push({'tests/test_x.py': 'import unittest\nclass T(unittest.TestCase):\n    def test_x(self): pass\n'}, 'c')
+            s = run()
+            self.assertEqual((s['status'], s.get('to')), ('done', '1.1.0'), s)
+            self.assertEqual((self.inst / 'gen.txt').read_text(), '1.1.0\n'); self.assertEqual(restarts, ['svc'])
+            restarts.clear(); good = g('rev-parse', 'HEAD')
+            push({'VERSION': '1.2.0\n'}, 'd'); health[:] = [False, True]   # 新版本起不来
+            s = run()
+            self.assertEqual(s['status'], 'rolled_back'); self.assertIn('回到原来的版本', s['detail'])
+            self.assertEqual((self.inst / 'gen.txt').read_text(), '1.1.0\n')           # 用备份恢复
+            self.assertEqual(g('rev-parse', 'HEAD'), good); self.assertEqual(restarts, ['svc', 'svc'])
+            restarts.clear()
+            push({'BREAK': '1'}, 'e')
+            s = run()
+            self.assertEqual(s['status'], 'rolled_back'); self.assertIn('重新生成失败', s['detail'])
+            self.assertEqual((self.inst / 'gen.txt').read_text(), '1.1.0\n')
+            push({'BREAK': None}, 'f'); g('reset', '-q', '--hard', good)
+            (src / 'local').write_text('x'); g('add', '-A'); g('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'local')
+            self.assertIn('分叉', run()['detail'])
+        finally:
+            f.unlink(missing_ok=True); meta_f.unlink(missing_ok=True); (self.inst / 'gen.txt').unlink(missing_ok=True)
+            Path(up.BACKUP).unlink(missing_ok=True)
+
+    def test_upgrade_script_needs_token(self):
+        f = Path(self.b.UPGRADE_FILE)
+        try:
+            f.write_text(json.dumps({'status': 'queued', 'token': 'right'}))
+            r = subprocess.run([sys.executable, str(self.inst / 'upgrade.py')], capture_output=True, text=True,
+                               env=dict(os.environ, FCB_UPGRADE_TOKEN='wrong'))
+            self.assertNotEqual(r.returncode, 0); self.assertEqual(json.loads(f.read_text())['status'], 'queued')   # 什么都没动
+        finally: f.unlink(missing_ok=True)
 
     def test_lost_reason_from_journal(self):
         fake = subprocess.CompletedProcess([], 0, stdout="Started x.\nx: A process of this unit has been killed by the OOM killer.\n"
@@ -753,26 +952,17 @@ class TaskTest(unittest.TestCase):
         if run:   # 没有 systemd 的机器走直接起进程，不检查
             self.assertIn('MemoryMax=6G', run[0]); self.assertIn('OOMPolicy=continue', run[0])
 
-    def test_mcp_whitelist(self):
-        home = Path(self.tmp.name) / 'home'; home.mkdir(exist_ok=True)
-        (home / '.claude.json').write_text(json.dumps({'mcpServers': {
-            'mini': {'command': 'ssh', 'args': ['h', 'run']}, 'other': {'type': 'http', 'url': 'https://x'}}}))
-        cfg, old_home = dict(self.t.CFG), os.environ['HOME']
-        os.environ['HOME'] = str(home)
+    def test_mcp_follows_user_config(self):
+        cfg = dict(self.t.CFG)
         try:
-            self.t.CFG.pop('mcp_servers', None); self.t.CFG['disable_mcp'] = True
-            self.assertEqual(self.t.mcp_args()[-1], '{"mcpServers":{}}')               # 旧配置：不挂
-            self.t.CFG['disable_mcp'] = False
-            self.assertEqual(self.t.mcp_args(), [])                                     # 旧配置写了 false：照旧全加载
-            self.t.CFG['mcp_servers'] = ['mini', 'gone']
-            a = self.t.mcp_args()
-            self.assertEqual(a[:2], ['--strict-mcp-config', '--mcp-config'])
-            self.assertEqual(json.loads(Path(a[2]).read_text())['mcpServers'], {'mini': {'command': 'ssh', 'args': ['h', 'run']}})
-            self.assertEqual(oct(os.stat(a[2]).st_mode & 0o777), '0o600')
-            self.assertEqual(self.t.mcp_servers(), (['mini'], ['gone']))
-            self.assertEqual(self.t.mcp_args(), a)                                      # 再来一次：同一个文件，内容不变
+            self.t.CFG.pop('disable_mcp', None)
+            self.assertEqual(self.t.mcp_args(), [])                                  # 默认照用户级配置挂
+            self.t.CFG['disable_mcp'] = True
+            self.assertEqual(self.t.mcp_args(), ['--strict-mcp-config'])             # 一个都不挂
         finally:
-            self.t.CFG.clear(); self.t.CFG.update(cfg); os.environ['HOME'] = old_home
+            self.t.CFG.clear(); self.t.CFG.update(cfg)
+        self.assertEqual(self.t.hook_env(False, False, 'x')['MCP_CONNECTION_NONBLOCKING'], '0')   # 等连上再开工，工具列表才稳定
+        self.assertEqual(self.t.mcp_status({'mcp_servers': [{'name': 'a', 'status': 'pending'}]}), {'a': 'pending'})
 
     def test_diag_owner_only(self):
         env = dict(os.environ, FCB_OWNER='0')
