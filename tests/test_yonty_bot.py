@@ -779,6 +779,35 @@ class TaskTest(unittest.TestCase):
                 'if "[验证失败]" in prompt and os.environ.get("FIXABLE") == "1": open("ok.txt", "w").write("ok")\n'
                 'print(json.dumps({"type": "result", "result": "做完了", "is_error": False, "total_cost_usd": 0.2 * n}), flush=True)\n')
 
+    FAKE_ACCEPT = ('prompt = sys.stdin.read()\n'
+                   'if prompt.startswith("[验收"):\n'
+                   '    os.makedirs("tests", exist_ok=True); open("tests/test_acc.sh", "w").write("test -f feature.txt\\n")\n'
+                   '    print(json.dumps({"type": "result", "result": "测了 feature\\n[验收命令] sh tests/test_acc.sh", "is_error": False, "total_cost_usd": 0.5})); sys.exit(0)\n'
+                   'open("prompts.log", "a").write(prompt + "\\n=====\\n")\n'
+                   'if "[验证失败]" in prompt: os.system("git checkout -q -- tests/test_acc.sh")\n'
+                   'else: open("tests/test_acc.sh", "w").write("true\\n")   # 第一轮偷偷把验收测试改成永远通过\n'
+                   'open("feature.txt", "w").write("ok")\n'
+                   'print(json.dumps({"type": "result", "result": "做完了", "is_error": False, "total_cost_usd": 1}))\n')
+
+    def test_independent_acceptance_locks_tests(self):
+        bindir = self.fake_bin(self.FAKE_ACCEPT)
+        _, d = self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n验收: 独立\n任务书:\n做')
+        self.assertTrue(d['accept'])
+        self.assertFalse(self.t.parse_directive('好\n[派活]\n仓库: ~/x\n标题: t\n验收: <独立 / 不写>\n任务书:\n做')[1]['accept'])
+        n = self.new_task(accept=True)
+        self.run_with(bindir, n)
+        t = self.t.load(n)
+        self.assertEqual(t['status'], 'done', self.t.events(n))
+        self.assertEqual(t['accept_files'], ['tests/test_acc.sh']); self.assertEqual(t['verify'], 'sh tests/test_acc.sh')   # 没定验证命令：用验收给的
+        prompts = (Path(t['worktree']) / 'prompts.log').read_text()
+        self.assertIn('不许改、不许删', prompts); self.assertIn('验收测试被改了：tests/test_acc.sh', prompts)   # 改了就退回
+        self.assertIn('负责人没改', self.t.events(n)[-1]['text'])
+        self.assertEqual(t['cost'], 1.5)   # 验收的花费记进任务
+        self.assertNotEqual(self.t.sibling(t).get('head'), t['accept_session'])   # 验收的会话不当负责人的会话
+        # 放开以后负责人可以改
+        self.t.inbox_add(n, '同事甲', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'))
+        self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertTrue(self.t.load(n).get('accept_unlocked'))
+
     def test_verify_gate_retries_then_passes(self):
         bindir = self.fake_bin(self.FAKE_FIX)
         n = self.new_task(verify='test -f ok.txt')
@@ -846,7 +875,7 @@ class TaskTest(unittest.TestCase):
 
     def test_roles_and_directive_fields(self):
         rs = self.t.roles()
-        self.assertTrue({'产品', '需求', '开发', '排查', '评审', '杂活'} <= set(rs))
+        self.assertTrue({'产品', '需求', '开发', '排查', '评审', '杂活', '验收'} <= set(rs))
         self.assertIn('Edit', rs['评审']['deny']); self.assertFalse(rs['评审']['resume'])
         d = self.t.parse_directive("x\n[派活]\n仓库: ~/w\n标题: t\n角色: 产品\n预算: 12（同类方案活一般 8 左右）\n任务书:\nb\n")[1]
         self.assertEqual((d['role'], d['budget']), ('产品', 12.0)); self.assertIn('8 左右', d['budget_why'])

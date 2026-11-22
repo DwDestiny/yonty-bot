@@ -156,6 +156,8 @@ def inbox_add(tid, who, owner, text):
     elif not t.get("checkpoint") and budget - cost < max(5, budget * 0.25):   # 做完或超了估计后又来新要求：续一段，别一开工就被截停
         nb = round(cost + max(5, budget * 0.5), 1)
         update(tid, budget=nb, budget_why=f"{who}追加了要求，续到 {nb}")
+    if "放开验收" in text and (owner or who.startswith("主控")) and t.get("accept_files"):   # 验收测试确实写错了：主人或主控放开，负责人可以改
+        update(tid, accept_unlocked=True)
     _append(tid, "inbox.jsonl", {"who": who, "owner": owner, "text": text, "ts": time.time()})
 
 def inbox_take(tid):
@@ -252,7 +254,7 @@ def roles():
     out = {}
     for f in (sorted(os.listdir(ROLES_DIR)) if os.path.isdir(ROLES_DIR) else []):
         if not f.endswith(".md"): continue
-        txt = open(os.path.join(ROLES_DIR, f), encoding="utf-8").read()
+        with open(os.path.join(ROLES_DIR, f), encoding="utf-8") as fh: txt = fh.read()
         m = re.match(r"---\n(.*?)\n---\n?(.*)", txt, re.S)
         meta = dict((k, v.strip()) for k, v in re.findall(r"^(\S+?)\s*[:：]\s*(.*)$", m.group(1), re.M)) if m else {}
         name = meta.get("名称") or f[:-3]
@@ -546,12 +548,14 @@ def parse_directive(text):
     rv = field("角色")
     hit = [n for n in roles() if n in rv]
     role = hit[0] if len(hit) == 1 else ""   # 照抄“产品 / 开发 / …”这种就当没写
+    av = field("验收")
+    accept = bool(av) and not av.startswith("<") and any(w in av for w in ("独立", "是", "要"))   # 照抄模板、写“否”都算没写
     bv = field("预算")
     bm2 = re.match(r"\s*(\d+(?:\.\d+)?)\s*[（(,，:：]?\s*(.*?)[）)]?\s*$", bv)
     budget = float(bm2.group(1)) if bm2 and float(bm2.group(1)) > 0 else 0
     return head, {"repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "model": pick(field("模型"), MODELS), "effort": pick(field("思考"), EFFORTS), "target": target,
-                  "verify": verify, "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")),
+                  "verify": verify, "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
@@ -622,6 +626,75 @@ def make_worktree(t):
     if r.returncode != 0: raise RuntimeError("建工作树失败：" + r.stderr.strip()[-300:])
     return base
 
+# ---------- 独立验收：负责人开工前，先由验收角色按任务书写测试；负责人不许改，验证闸门会查 ----------
+ACCEPT_ROLE = "验收"
+
+def accept_files(t):
+    """验收提交里动过的文件（相对仓库根）。"""
+    out = git(t["worktree"], "diff", "--name-only", t["accept_from"], t["accept_commit"]).stdout
+    return [l for l in out.splitlines() if l.strip()]
+
+def accept_tampered(t):
+    """负责人改了、删了验收测试就返回这些文件（含没提交的改动）；放开过或没有验收测试返回空。"""
+    if not t.get("accept_files") or t.get("accept_unlocked"): return []
+    out = git(t["worktree"], "diff", "--name-only", t["accept_commit"], "--", *t["accept_files"]).stdout
+    return [l for l in out.splitlines() if l.strip()]
+
+def run_accept(tid):
+    """开一个新会话写验收测试，提交到任务分支。花费记进任务；会话不当这件事的负责人会话。
+    写不成就照常开工，在结果里写明没有独立验收。返回给负责人看的说明。"""
+    t = load(tid)
+    r = roles().get(ACCEPT_ROLE) or {}
+    a = dict(t, role=ACCEPT_ROLE, model=r.get("model") or t.get("model"), effort=r.get("effort") or t.get("effort"))
+    sid = str(uuid.uuid4())
+    update(tid, accept_from=git(t["worktree"], "rev-parse", "HEAD").stdout.strip())   # 没有远端时 base 是“HEAD”，要记下验收开工时的提交
+    prompt = (f"[验收 #{t['id']}] {t['title']}\n仓库：{t['repo']}。你在它的工作树 {t['worktree']} 里，分支 {t['branch']}（基于 {t.get('base')}）。\n"
+              + (f"派活时定的验证命令：{t['verify']}。负责人做完后服务会跑它，你的测试要能被它跑到；跑不到就在说明里写清。\n" if t.get("verify") else "")
+              + (f"\n你的角色：{r['name']}。\n{r['body']}\n" if r else "") + f"\n任务书：\n{t['brief']}")
+    cmd = session_cmd(a) + ["--output-format", "stream-json", "--verbose", "--session-id", sid,
+                            "--max-budget-usd", f"{max(0.5, (t.get('budget') or T['budget_default']) * 0.3):.2f}"]
+    o = t["origin"]
+    env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid)
+    final = None
+    with open(os.path.join(tdir(tid), "stream.log"), "a") as raw:
+        p = subprocess.Popen(cmd, cwd=t["worktree"], env=env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
+        p.stdin.write(prompt); p.stdin.close()
+        for line in p.stdout:
+            raw.write(line)
+            try: obj = json.loads(line)
+            except Exception: continue
+            if obj.get("type") == "assistant": update(tid, last_tool_at=time.time())
+            elif obj.get("type") == "result": final = obj
+        p.wait(); p.stdout.close()
+    usd = round((final or {}).get("total_cost_usd") or 0, 3)
+    if usd: spend_add(tid, usd)
+    update(tid, cost=round((load(tid).get("cost") or 0) + usd, 3), cost_base=(load(tid).get("cost_base") or 0) - usd, accept_session=sid)
+    if load(tid).get("status") != "running": return ""
+    wt = t["worktree"]
+    if git(wt, "status", "--porcelain").stdout.strip():   # 写了没提交：服务替它提交
+        git(wt, "add", "-A"); git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-q", "-m", f"验收测试（#{tid}）")
+    head = git(wt, "rev-parse", "HEAD").stdout.strip()
+    update(tid, accept_commit=head)
+    files = accept_files(load(tid)) if final and not final.get("is_error") else []
+    text = (final or {}).get("result") or ""
+    m = re.search(r"^\s*\[验收命令\]\s*(.+)$", text, re.M)
+    kv = {"accept_files": files}
+    if files and m and not t.get("verify"): kv["verify"] = m.group(1).strip()[:300]   # 派活没定验证命令：用验收给的
+    update(tid, **kv)
+    if not files:
+        update(tid, accept_failed=True)
+        return "\n（独立验收没写成测试，这次按普通任务做，结果里会写明。）\n"
+    return (f"\n独立验收已经按任务书写好了测试，提交在 {head[:10]}：{'、'.join(files[:12])}\n"
+            f"这些文件不许改、不许删；验证时服务会查，改了就退回。觉得测试本身写错了，用 [提问] 说明哪条、为什么，等{OWNER_NAME}或主控回“放开验收测试”。\n"
+            f"验收的说明：\n{text.strip()[-1500:]}\n")
+
+def accept_note(t):
+    if not t.get("accept"): return ""
+    if t.get("accept_failed"): return "；没有独立验收（验收没写成测试）"
+    bad = accept_tampered(t)
+    if bad: return f"；负责人改了独立验收测试：{'、'.join(bad)}"   # 没定验证命令时闸门不拦，至少写出来
+    return f"；独立验收测试 {len(t.get('accept_files') or [])} 个文件" + ("，中途放开过" if t.get("accept_unlocked") else "，负责人没改")
+
 def verify_line(t):
     if not t.get("verify"): return "- 派活时没定验证命令：按仓库自己的测试验，结果写进总结。"
     return (f"- 验证命令：{t['verify']}。结束前自己先跑通。你说做完后，服务会在工作树里再跑一遍，"
@@ -687,7 +760,10 @@ def run(tid):
             fork = sibling_fork(t)
             update(tid, base=base, forked_from=fork, cost_base=sibling_head(t).get("total", 0) if fork else 0)
             if t["turn"] == 1: event(tid, "start", "")
-            prompt, resume = first_prompt(load(tid), base, bool(fork)), False
+            acc = ""
+            if t.get("accept") and not t.get("accept_commit"): acc = run_accept(tid)
+            if load(tid).get("status") != "running": return
+            prompt, resume = first_prompt(load(tid), base, bool(fork)) + acc, False
             early = inbox_take(tid)   # 批之前、开工之前就补充的话
             if early: prompt += "\n\n" + format_inbox(early)
         else:
@@ -774,7 +850,9 @@ def run(tid):
             else:
                 t = load(tid)
                 if t.get("verify"):   # 验证闸门：服务自己跑派活时定的命令，任务说“做完了”不算数
-                    ok, out = run_verify(t)
+                    bad = accept_tampered(t)
+                    ok, out = (False, f"验收测试被改了：{'、'.join(bad)}。用 git checkout {t['accept_commit'][:10]} -- 这些文件 改回去；"
+                                      "觉得测试写错了就用 [提问] 说明") if bad else run_verify(t)
                     rnd = t.get("verify_round", 0)
                     if not ok and rnd < T["verify_retries"]:
                         update(tid, verify_round=rnd + 1)
@@ -786,9 +864,9 @@ def run(tid):
                         event(tid, "failed", f"结论：BLOCKED（返工 {rnd} 次后验证仍没过）\n验证命令：{t['verify']}\n"
                                              f"输出末尾：\n{out[-800:]}\n\n任务最后的总结：\n{text}{note}")
                         return
-                    text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）\n\n{text}"
+                    text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）" + accept_note(t) + f"\n\n{text}"
                 else:
-                    text = "结论：没定验证命令，服务没复核\n\n" + text
+                    text = "结论：没定验证命令，服务没复核" + accept_note(t) + "\n\n" + text
                 update(tid, status="done", finished=time.time(), verify_round=0); event(tid, "done", text + note)
             return
     except Exception as e:

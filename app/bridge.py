@@ -591,10 +591,10 @@ def task_directive(ev, result):
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
     ex, cloud_note = d.get("exec", ""), ""
     if ex == "cloud":
-        why = tasks.cloud_ok(repo, owner)
+        why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], model=d["model"], effort=d["effort"],
-                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=d.get("thing", ""),
+                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=d.get("thing", ""), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""),
                      status="approved" if owner else "pending",
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
@@ -610,6 +610,7 @@ def task_directive(ev, result):
     brief = d["brief"] if len(d["brief"]) <= 3000 else d["brief"][:3000] + f"\n……（后面还有 {len(d['brief']) - 3000} 字，{BT}/任务 {n} 全文{BT} 看完整任务书）"
     snap = (f"#{n} {d['title']}\n仓库：{BT}{repo}{BT}（{tasks.model_label(t)}）\n" + (f"验证：{BT}{t['verify']}{BT}\n" if t.get("verify") else "")
             + f"检查点：{t['budget']} 美元当量（{t.get('budget_why', '')}）\n"
+            + ("独立验收：先由验收角色写测试，负责人不能改\n" if t.get("accept") else "")
             + f"归到：“{t.get('thing') or tasks.MAIN_THING}”" + ("（新开的事）" if t.get("thing_new") else "（已有的事，会读它的档案，不接负责人的会话）")
             + f"\n任务书：\n{brief}")
     if ev["chat_type"] != "p2p":
