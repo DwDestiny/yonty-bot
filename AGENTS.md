@@ -1,6 +1,6 @@
 # Yonty Bot · Agent Guide（L1）
 
-> 0.1.0 · 2026-11-21 · 维护：Yonty Bot contributors
+> 1.0.0 · 2026-11-22 · 维护：Yonty Bot contributors
 
 ## 目的
 
@@ -10,7 +10,7 @@
 
 | 路径 | 放什么 | 进 Git |
 | --- | --- | --- |
-| `AGENTS.md` / `CLAUDE.md` / `README.md` | L1：目的、目录地图、规则；接手入口；对外介绍 | 是 |
+| `AGENTS.md` / `CLAUDE.md` / `README.md` / `README.en.md` | L1：目的、目录地图、规则；接手入口；对外介绍（中文、英文） | 是 |
 | `VERSION` / `LICENSE` | 版本号（唯一来源）；MIT | 是 |
 | `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`hooks/`、`roles/`、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID | 是 |

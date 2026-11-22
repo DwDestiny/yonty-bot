@@ -24,7 +24,7 @@ BOT = 'ou_' + '1' * 32
 
 class RepoDocsTest(unittest.TestCase):
     def test_linked_files_exist(self):
-        for doc in [ROOT / 'README.md', ROOT / 'AGENTS.md', *sorted((ROOT / 'docs').glob('*.md'))]:
+        for doc in [ROOT / 'README.md', ROOT / 'README.en.md', ROOT / 'AGENTS.md', *sorted((ROOT / 'docs').glob('*.md'))]:
             text = doc.read_text(encoding='utf-8')
             for rel in re.findall(r'\]\(([^)#:]+)\)', text):
                 self.assertTrue((doc.parent / rel).exists(), f'{doc.name} 链接失效：{rel}')
