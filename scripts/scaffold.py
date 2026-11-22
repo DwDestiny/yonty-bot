@@ -48,7 +48,7 @@ if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
 for f in ("bridge.py", "tasks.py"):
     shutil.copy(os.path.join(T, f), os.path.join(INST, f))
 os.makedirs(os.path.join(INST, "hooks", "git"), exist_ok=True)
-for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py"):
+for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py"):
     shutil.copy(os.path.join(T, "hooks", f), os.path.join(INST, "hooks", f))
 # git 钩子分发器：非主人触发的会话把 core.hooksPath 指到 hooks/git，pre-push 只放行 bot/ 分支
 gh = os.path.join(INST, "hooks", "git")
@@ -97,7 +97,7 @@ if not os.path.exists(rules) or "--rules" in sys.argv:
     body = "\n".join(l.replace("{{FEISHU_ONLY}}", "") for l in body.split("\n") if FEISHU_ON or "{{FEISHU_ONLY}}" not in l)
     body = body.replace("{{PERSONA_LABEL}}", {"work": "工作分身", "personal": "私人助理"}[CFG.get("persona", "work")])
     body = body.replace("{{STYLE_LABEL}}", label).replace("{{DATE}}", datetime.date.today().isoformat()).replace("{{VERSION}}", VERSION)
-    body = body.replace("{{NAME}}", CFG["name"]).replace("{{OWNER}}", CFG["owner_name"]).replace("{{OWNER_OPEN_ID}}", CFG.get("owner_open_id", ""))
+    body = body.replace("{{NAME}}", CFG["name"]).replace("{{OWNER}}", CFG["owner_name"]).replace("{{OWNER_OPEN_ID}}", CFG.get("owner_open_id", "")).replace("{{INSTANCE}}", INST)
     open(rules, "w").write(body)
     print("写了", rules)
 else:
@@ -127,7 +127,8 @@ hook = lambda f: {"type": "command", "command": f"python3 {os.path.join(INST, 'h
 settings = {"permissions": {"deny": list(dict.fromkeys(deny))},
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook("lark_identity.py"), hook("wecom_guard.py"),
                                                                   hook("git_guard.py")]},
-                                     {"matcher": "Read|Grep|Glob|Bash|Edit|Write|NotebookEdit", "hooks": [hook("private_guard.py")]}],
+                                     {"matcher": "Read|Grep|Glob|Bash|Edit|Write|NotebookEdit", "hooks": [hook("private_guard.py")]},
+                                     {"matcher": "mcp__.*", "hooks": [hook("mcp_guard.py")]}],
                       # 长任务运行中把聊天里的补充指令塞进去；聊天会话里这个钩子直接退出
                       "PostToolUse": [{"matcher": "*", "hooks": [hook("task_inbox.py")]}]}}
 json.dump(settings, open(os.path.join(INST, "claude-settings.json"), "w"), ensure_ascii=False, indent=2)
