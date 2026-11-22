@@ -590,11 +590,17 @@ class TaskTest(unittest.TestCase):
         n = self.t.create(title='x', repo=str(self.repo), brief='b', status='running',
                           requester={'channel': 'feishu', 'id': 'ou_mate', 'name': '同事甲', 'owner': False},
                           origin={'channel': 'feishu', 'chat_id': 'oc_g', 'chat_type': 'group', 'message_id': 'm'})['id']
-        self.assertIn('不是你派的', self.b.task_command(self.ev(f'#{n} 改成红色', sender='ou_other')))
-        self.assertIn('转给', self.b.task_command(self.ev(f'#{n} 改成红色', sender='ou_mate')))
-        self.assertIn('转给', self.b.task_command(self.ev(f'#{n} 再加个测试')))
+        # 不是主人的 #N 补充：服务不直接转，交给主控；主控写 [任务指令] 才转，权限跟本人一样
+        self.assertIsNone(self.b.task_command(self.ev(f'#{n} 改成红色', sender='ou_mate')))
+        self.assertIsNone(self.b.task_command(self.ev(f'#{n} 改成红色', sender='ou_other')))
+        out = self.b.chat_followups(self.ev(f'#{n} 改成红色', sender='ou_other'), f'不行哦\n[任务指令] #{n} 改成红色')
+        self.assertIn('不归这边管', out); self.assertEqual(self.t.inbox_take(n), [])
+        out = self.b.chat_followups(self.ev(f'#{n} 改成红色', sender='ou_mate'), f'好，转了\n[任务指令] #{n} 改成红色')
+        self.assertEqual(out, '好，转了')
+        self.assertIn('转给', self.b.task_command(self.ev(f'#{n} 再加个测试')))   # 主人的直接转
         items = self.t.inbox_take(n)
         self.assertEqual([i['text'] for i in items], ['改成红色', '再加个测试'])
+        self.assertTrue(items[0]['who'].startswith('主控（替'))
         self.assertEqual(self.t.inbox_take(n), [])          # 每条只交一次
         self.assertIn('没有这个任务', self.b.task_command(self.ev(f'/任务 {n}', sender='ou_x', chat='oc_other')))
         self.assertIn('不是你派的', self.b.task_command(self.ev(f'/任务 取消 {n}', sender='ou_other')))

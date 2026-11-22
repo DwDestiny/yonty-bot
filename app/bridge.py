@@ -371,6 +371,9 @@ def handle(ev):
         try: result = task_directive(ev, result)
         except Exception:
             log.exception("task directive failed"); result += "\n\n（派活没成，请看日志。）"
+        try: result = chat_followups(ev, result)
+        except Exception:
+            log.exception("chat followups failed")
     out_id = reply(ev, result, in_thread)
     with lock: cur_s = sessions.get(key)
     if cur_s is not None: mark_seen(cur_s, [out_id])
@@ -530,8 +533,8 @@ def task_command(ev):
     m = APPROVE_RE.match(text)
     if m: return task_approve(ev, m.group(1) == "批", int(m.group(2)))
     m = FOLLOW_RE.match(text)
-    if m: return task_follow(ev, int(m.group(1)), m.group(2).strip())
-    return None
+    if m and owner: return task_follow(ev, int(m.group(1)), m.group(2).strip())   # 主人的话直接转给任务
+    return None   # 别人的 #N 补充也交给主控：它决定转不转、怎么转（[任务指令]），见 chat_followups
 
 TEAM_CMD = "/团队"
 
@@ -579,6 +582,17 @@ def task_follow(ev, n, text):
     if st == "approved": return f"收到，#{n} 开工时一起带上。"
     tasks.update(n, status="approved")   # 等回复、完成、失败、中断：排队接着跑同一个会话和工作树
     return f"收到，#{n} 接着干。"
+
+def chat_followups(ev, result):
+    """聊天回复里的 [任务指令] #N 内容：主控替发消息的人转给任务。权限跟这个人自己发 #N 一样（只能管他能管的任务）。"""
+    name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
+    def apply(m):
+        n, body = int(m.group(1)), m.group(2)
+        t = tasks.load(n)
+        if not t or not can_see(t, ev) or not can_steer(t, ev): return f"（#{n} 不归这边管，没转。）"
+        r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), n, body)
+        return "" if r.startswith("收到") else f"（{r}）"
+    return TASKCMD_RE.sub(apply, result).strip()
 
 def task_directive(ev, result):
     """回复里有 [派活] 块就建任务，把块换成排期或审批的说明。"""
