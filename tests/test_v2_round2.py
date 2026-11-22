@@ -424,6 +424,15 @@ class ProbeTest(Base):
 
 # ================= 评审后补的：几条容易漏的路 =================
 class ReviewFixTest(Base):
+    def test_controller_turn_identity_from_record_not_session(self):
+        """群里主人刚说过话，同事派的任务的投递轮照样按同事的身份跑（FCB_OWNER=0）。"""
+        s = self.e.b.get_session('grp:oc_g'); s['env'] = [True, False, 'oc_g', 'feishu']
+        t = self.task(owner=False, chat='oc_g', chat_type='group')
+        self.send(t, '主控', '节点', 'ID-节点')
+        self.e.tick()
+        turn = [x for x in self.e.streams if 'ID-节点' in x['prompt']]
+        self.assertEqual(turn[-1]['env'].get('FCB_OWNER'), '0')
+
     def send(self, t, to, kind, text, **env):
         r = self.e.cli('send', '--to', to, '--kind', kind, '--text', text, FCB_TASK_ID=t['id'], **env)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)

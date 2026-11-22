@@ -275,7 +275,10 @@ def progress_due(tk, now=None):
     with lock(tk):
         st = limits(tk)
         for k, p in st["progress"].items():
-            if p.get("held") and now - p["last"] >= c["progress_gap_min"] * 60:
+            t = tk.load(p["held"]["task"]) if p.get("held") else None
+            if p.get("held") and (not t or t["status"] not in tk.ACTIVE):   # 任务已经结束：完成回报之后不再补发进展
+                tk.decide("进展作废", task=p["held"]["task"], why="任务已经结束，留着的进展不发了"); p["held"] = None
+            elif p.get("held") and now - p["last"] >= c["progress_gap_min"] * 60:
                 if p["n"] < c["progress_max"]:
                     out.append((p["held"]["task"], p["held"]["text"])); p.update(n=p["n"] + 1, last=now)
                 p["held"] = None

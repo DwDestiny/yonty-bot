@@ -1093,17 +1093,20 @@ def delivery_turn(ev):
     batch = ev.get("batch") or [rec]   # 同一发送方 2 分钟内发给同一目标的，合成一轮（7.5 第 1 条）
     pm = key.split(":")[1] if key.startswith("proj:") else None
     s = get_session(key)
-    o_owner, o_priv, chat_id, _ = s.get("env") or [rec["from"].get("owner"), key.split(":")[-2] == "p2p", key.rsplit(":", 1)[-1], ""]
     fr = rec["from"]
+    tid = fr.get("task") or rec.get("about")
+    t = tasks.load(tid) if tid else None
+    # 身份按投递记录定，不按这个会话上一个说话的人：群里同事的任务回报不能带着主人的权限跑
+    o_owner, bk = all(bool(r["from"].get("owner")) for r in batch), base_key(key)
+    o_priv, chat_id = o_owner and bk.startswith("p2p:"), (t["origin"].get("chat_id", "") if t else bk.split(":", 1)[-1])
     hop = max(r.get("hop") or 0 for r in batch)
     prompt = (pm_intro(pm) if pm and not s["started"] else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
-        for r in batch) + f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
+        for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
+        + f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop) or ""
-    tid = fr.get("task") or rec.get("about")
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid)
-    t = tasks.load(tid) if tid else None
     if t and result.strip() and result.strip() != AMB_SILENT:
         try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控")
         except Exception: log.exception("delivery turn directives failed")
@@ -1412,7 +1415,7 @@ def pm_relay(ev):
             concl = next((l.strip() for l in e["text"].splitlines() if l.strip()), "")[:160]
             link = (MR_RE.search(e["text"]) or [None])[0]
             kind = "问题" if e["kind"] == "question" else "完成"
-            body = f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "") + f"\n全文 /task {ref}"
+            body = (f"{ref} 有提问：{e['text']}" if kind == "问题" else f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "")) + f"\n全文 /task {ref}"
             if kind == "问题": body += f"\n回答写 [任务指令] {ref} 你的回答"
             tasks.decide("替项目经理投递", task=ref, category=kind, why="项目经理这一轮既没上交主控也没写 [处理掉] 理由（7.4 防沉默）")
             try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, t.get("hop") or 0, None, {"about": n, "auto": True})
