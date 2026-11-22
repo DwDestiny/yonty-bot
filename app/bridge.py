@@ -260,7 +260,8 @@ def mark_seen(s, ids, ts=None):
         save(SESS_FILE, sessions)
 
 def base_cmd():
-    return tasks.claude_args() + ["--output-format", "json"]   # 参数和后台任务共用一份，缓存前缀一致
+    # 参数和后台任务共用一份。聊天这类会话另外禁掉天生在后台跑的工具（Workflow、Monitor），理由同 hook_env 关后台命令
+    return tasks.claude_args() + ["--disallowedTools=Workflow,Monitor", "--output-format", "json"]
 
 # 聊天一轮最多走多少步（工具调用来回）。超了不硬停在半路：再给它几步，把剩下的活儿写成 [派活] 交给后台任务。
 CHAT_MAX_TURNS = int(CFG.get("chat_max_turns", 60) or 0)
@@ -882,7 +883,8 @@ def relay_prompt(t, e, briefed=False):
 def note_briefed(key, tid):
     with lock:
         s = sessions.get(key)
-        if s is not None: s["briefed"] = ((s.get("briefed") or []) + [tid])[-50:]
+        if s is not None:
+            s["briefed"] = ((s.get("briefed") or []) + [tid])[-50:]; save(SESS_FILE, sessions)
 
 def relay_ev(t):
     """主控这一轮按派活人的身份跑：派活人、会话都按原来的。"""
