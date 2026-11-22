@@ -14,7 +14,7 @@
 | `VERSION` / `LICENSE` | 版本号（唯一来源）；MIT | 是 |
 | `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`hooks/`、`roles/`、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID | 是 |
-| `docs/` | 架构、搭建指南、配置、任务、缓存、边界、企微 | 是 |
+| `docs/` | 架构、搭建指南、配置、任务、缓存、边界、企微；下一版方案（`plan-2.0.md`）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
 | `tests/` | 行为测试，不连 IM、不调真 Claude | 是 |
 | `_tmp/` | 临时产物，任务结束即删 | 否 |
 | 实例目录 | 配置、守则、聊天和任务状态。在仓库外，不进 Git | 否 |
