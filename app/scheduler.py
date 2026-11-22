@@ -174,18 +174,28 @@ def fire(tk, sc, extra=""):
     return tk.create(**{k: v for k, v in kw.items() if v != "" or k in ("brief",)})
 
 
-def probe_sig(cmd, repo):
-    """探针的内容哈希：命令本身，加上命令里提到的、存在的文件的内容（脚本改了就对不上）。"""
-    if not cmd: return ""
-    h = hashlib.sha256(cmd.encode())
-    try: toks = shlex.split(cmd)
-    except ValueError: toks = cmd.split()
+def probe_files(cmd, repo):
+    """探针命令里提到的、存在的文件（脚本）：算哈希用，也只读放进沙箱。"""
+    try: toks = shlex.split(cmd or "")
+    except ValueError: toks = (cmd or "").split()
+    out = []
     for tok in toks:
         p = os.path.expanduser(tok)
         p = p if os.path.isabs(p) else os.path.join(repo or "/", p)
         try:
-            if os.path.isfile(p) and os.path.getsize(p) < 1 << 20:
-                with open(p, "rb") as f: h.update(b"\0" + p.encode() + b"\0" + f.read())
+            if os.path.isfile(p) and os.path.getsize(p) < 1 << 20: out.append(p)
+        except OSError:
+            pass
+    return out
+
+
+def probe_sig(cmd, repo):
+    """探针的内容哈希：命令本身，加上命令里提到的文件的内容（脚本改了就对不上）。"""
+    if not cmd: return ""
+    h = hashlib.sha256(cmd.encode())
+    for p in probe_files(cmd, repo):
+        try:
+            with open(p, "rb") as f: h.update(b"\0" + p.encode() + b"\0" + f.read())
         except OSError:
             pass
     return h.hexdigest()
@@ -210,7 +220,7 @@ def probe(tk, sc, alerts, now):
         alerts.append(f"定时任务 {sc['ref']} 的探针内容变了（命令或脚本跟建的时候对不上），视为没批过，先暂停了。"
                       f"确认改动没问题后主人发 /schedule approve {sc['ref']}，按现在的内容重新记哈希。")
         return None
-    box = tk.probe_box(os.path.join(DIR, str(sc["id"]), "scope.json"), sc["repo"])
+    box = tk.probe_box(os.path.join(DIR, str(sc["id"]), "scope.json"), sc["repo"], probe_files(sc["probe"], sc["repo"]))
     env = {k: os.environ[k] for k in ("PATH", "LANG", "HOME") if k in os.environ}
     env.update(TZ=tk.CFG.get("timezone") or "Asia/Shanghai", FCB_SCHEDULE=sc["ref"])
     mem = int(c.get("probe_mem_mb", 1024)) * 1024 * 1024

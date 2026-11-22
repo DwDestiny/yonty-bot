@@ -1037,6 +1037,7 @@ def answer(ev, rid):
     if fr.get("task"):
         t = tasks.load(fr["task"])
         n = tasks.inbox_add(t["id"], who, is_owner(ev), f"回复 {tasks.dl.head(rec)}：{text}")
+        tasks.update(t["id"], _touch=False, hop=0)   # 人回话了，这条链重新数
         if t["status"] == "waiting": tasks.update(t["id"], status="approved")
         reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
     else:
@@ -1097,18 +1098,37 @@ def delivery_turn(ev):
     hop = max(r.get("hop") or 0 for r in batch)
     prompt = (pm_intro(pm) if pm and not s["started"] else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
-        for r in batch) + f"\n（要回它就用 tasks.py send --to {fr.get('ref')} …；不用回就只输出 [不回]）"
+        for r in batch) + f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop) or ""
     tid = fr.get("task") or rec.get("about")
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid)
     t = tasks.load(tid) if tid else None
     if t and result.strip() and result.strip() != AMB_SILENT:
-        fake = {"channel": t["origin"].get("channel", "feishu"), "chat_id": t["origin"].get("chat_id", ""), "message_id": t["origin"].get("message_id"),
-                "chat_type": t["origin"].get("chat_type", ""), "sender_id": OWNER_OPEN_ID if o_owner else "", "hop": hop}
-        try: result = task_directive(fake, chat_followups(fake, result))
+        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控")
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dl{rec['id']}")
+
+def reply_target(fr):
+    return {"pm": f"项目经理 {fr.get('project')}", "ctrl": "主控"}.get(fr.get("type"), fr.get("ref"))
+
+def turn_directives(t, result, hop, who):
+    """投递轮回复里的 [任务指令]、[派活]：按任务回报的规矩转（派活人的权限、每个任务最多自动追加 RELAY_MAX 次）。
+    这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。"""
+    mx = tasks.dl.conf(CFG)["max_hops"]
+    if hop >= mx:
+        if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
+            tasks.decide("超跳不转", task=tasks.ref(t), why=f"这一轮是第 {hop} 跳，到了上限 {mx}，里面的任务指令和派活不转")
+            result = "\n".join(b for s, b in split_taskcmds(tasks.parse_directive(result)[0]) if s is None)
+        return result
+    text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop)
+    if TASKS_ON and tasks.parse_directive(text)[1]:
+        if tasks.load(t["id"]).get("auto_follow", 0) >= RELAY_MAX:
+            text = tasks.parse_directive(text)[0] + f"\n\n（{tasks.ref(t)} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
+        else:
+            tasks.update(t["id"], auto_follow=tasks.load(t["id"]).get("auto_follow", 0) + 1)
+            text = task_directive(relay_ev(t), text)
+    return text
 
 def delivery_tick():
     """把新投递送出去（方案 7.5 防刷屏）：主人、派活人、聊天发到来源聊天（带编号），主控、项目经理排进会话队列。
@@ -1131,7 +1151,7 @@ def delivery_tick():
                 v = dl.progress_gate(tk, t, r["text"], now)
                 if v != "send": dl.update(tk, r["id"], status="held" if v == "hold" else "dropped"); continue
             dest = dl.origin_key(t) if t else "p2p:" + OWNER_OPEN_ID
-            if r.get("need") and to == "主人": groups[("one", r["id"])] = [r]; continue
+            if r.get("need"): groups[("one", r["id"])] = [r]; continue   # 要回复的不合并：每条有自己的编号和引用回复
             groups.setdefault(("chat", fr["ref"], to, dest), []).append(r)
         elif to == "主控":
             k = base_key(fr.get("key")) or ("p2p:" + OWNER_OPEN_ID)
@@ -1383,7 +1403,8 @@ def pm_relay(ev):
                 tasks.update(n, auto_follow=tasks.load(n).get("auto_follow", 0) + 1)
                 text = task_directive(relay_ev(t), text)
         text = pm_marks(pm, key, owner, text, t.get("hop") or 0, n).strip()
-        mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("project") == pm]
+        mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("key") == key
+                and (r["to"]["to"] == "主控" or (e["kind"] == "question" and r["to"]["to"] == "主人"))]
         answered_q = len(tasks.inbox_items(n)) > inbox0
         if absorbed:
             tasks.decide("项目经理处理掉", task=ref, why=absorbed.group(1).strip() or "没写理由")
@@ -1432,7 +1453,7 @@ def relay_post(t, idx, text):
     if not ok: log.error("task #%s relay %s dropped after 20 tries", n, idx)
     tasks.update(n, posted=idx + 1, last_post=time.time(), post_fail=0, relay_pending=None)
 
-def relay_followups(t, text, who=None):
+def relay_followups(t, text, who=None, hop=None):
     """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。"""
     pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or t["requester"].get("owner")]
     def apply(s, body):
@@ -1448,6 +1469,7 @@ def relay_followups(t, text, who=None):
         if x["status"] in ("pending", "cancelled", "rejected", "expired"):
             return f"（{n} {tasks.LABEL.get(x['status'])}，没转。）"
         tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body)
+        if hop is not None: tasks.update(tid, _touch=False, hop=max(x.get("hop") or 0, hop + 1))   # 投递轮里转的指令也是一跳
         tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
         log.info("task %s auto follow-up from relay", n)

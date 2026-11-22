@@ -825,21 +825,35 @@ def _hide(reads, extra=()):
             out += ["--tmpfs", rp]
     return out
 
-CRED_DIRS = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube")
+CRED = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube", "~/.lark-cli",
+        "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc")
 
-def probe_box(scope_path, repo=None):
-    """探针的沙箱（方案 6.6“探针也在范围里”）：跟定时运行同一套读范围，另外整机只读、/tmp 换成空的（范围和仓库在 /tmp 下的照样看得到）、
-    凭据目录和整个实例目录（配置、状态）都盖掉。读不到范围文件或没有 bwrap 返回 None。"""
+def probe_box(scope_path, repo=None, files=()):
+    """探针的沙箱（方案 6.6“探针也在范围里”）：探针不经过钩子，所以默认什么都看不到，只放回该看的。
+    整机只读；家目录、/tmp、/run/user（用户级 systemd 和 D-Bus 的套接字，能借它在沙箱外跑命令，实测）、docker.sock 盖掉；
+    再只读放回范围里的目录、仓库、探针命令提到的文件和 PATH 里的目录；放回的目录里的私密目录、凭据和实例目录照样盖掉。
+    读不到范围文件或没有 bwrap 返回 None。"""
     bw = shutil.which("bwrap")
     try:
         with open(scope_path) as f: sc = json.load(f)
     except Exception: return None
     if not bw: return None
-    reads = [os.path.realpath(X(p)) for p in sc.get("read") or []]
-    tmp = os.path.realpath("/tmp")
-    back = [p for p in reads + [os.path.realpath(repo)] * bool(repo) if (p == tmp or p.startswith(tmp + os.sep)) and os.path.exists(p)]
-    return ([bw, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", tmp] + sum((["--ro-bind", p, p] for p in back), [])
-            + ["--die-with-parent", "--unshare-pid", "--new-session"] + _hide(reads, CRED_DIRS) + ["--tmpfs", ROOT])
+    rp = lambda p: os.path.realpath(X(p))
+    reads, home, tmp = [rp(p) for p in sc.get("read") or []], rp("~"), rp("/tmp")
+    under = lambda p, ds: any(p == d or p.startswith(d + os.sep) for d in ds)
+    hidden = [d for d in (home, tmp, "/run/user") if os.path.isdir(d)]
+    path = [rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    back = [p for p in dict.fromkeys(reads + [rp(repo)] * bool(repo) + [rp(f) for f in files] + path)
+            if os.path.exists(p) and under(p, hidden)]
+    a = [bw, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] + sum((["--tmpfs", d] for d in hidden), [])
+    a += sum((["--ro-bind", "/dev/null", s] for s in sorted({os.path.realpath(x) for x in ("/run/docker.sock", "/var/run/docker.sock")})
+              if os.path.exists(s)), [])
+    a += sum((["--ro-bind", p, p] for p in back), []) + ["--die-with-parent", "--unshare-pid", "--new-session"] + _hide(reads)
+    for c in CRED:   # 放回的目录（比如范围写了整个家目录）里的凭据
+        p = rp(c)
+        if os.path.exists(p) and under(p, back) and not any(r == p or r.startswith(p + os.sep) for r in reads):
+            a += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
+    return a + ["--tmpfs", ROOT]
 
 def _freezer(t, on):
     if t.get("unit"):

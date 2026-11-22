@@ -131,7 +131,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None):
     if tg["to"] == "项目经理" and not tg.get("project"):
         reroute("主控", "没有项目")
     nh, now = hop + 1, time.time()   # 服务给每次投递的跳数自动加一：人发的消息触发的那一轮是 0
-    if nh > c["max_hops"]:
+    if nh > c["max_hops"] and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
         why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {c['max_hops']} 跳（delivery.max_hops）"
         if sender["type"] == "ctrl": reroute("记录", why + "，主控发的只进运行记录")
         elif tg["to"] != "主控": reroute("主控", why + "，停下交给主控")
@@ -153,7 +153,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None):
     need = (kind in NEED_REPLY) if need_reply is None else bool(need_reply)
     with lock(tk):
         recs = load(tk)
-        if not need:
+        if not need and not (extra or {}).get("auto"):   # 服务替项目经理补投的完成不去重：同一句结论可能是两次不同的失败
             if [r for r in recs if r["from"]["ref"] == sender["ref"] and r.get("full") == full and now - r["ts"] < c["dedup_min"] * 60]:
                 tk.decide("去重", sender=sender["ref"], category=kind, why=f"{c['dedup_min']} 分钟内送过一样的话")
                 return "".join(n + "；" for n in notes) + f"去重：{c['dedup_min']} 分钟内已经送过一样的话，这条不再送。"

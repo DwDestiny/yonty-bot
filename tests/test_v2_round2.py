@@ -317,15 +317,22 @@ class FreezeTest(Base):
 
 
 # ================= 5. 探针在沙箱里跑（方案 6.3、6.6）=================
-PROBE = r'''import json, os, sys
+PROBE = r'''import json, os, subprocess, sys
 def rd(p):
     try: return open(p).read().strip()
     except OSError: return "HIDDEN"
 w = os.environ["W"] if "W" in os.environ else sys.argv[1]
 print("noise")
+try:   # 借用户级 systemd 到沙箱外读范围外的文件（实测：不盖 /run/user 时读得到）
+    bus = subprocess.run(["/usr/bin/systemd-run", "--user", "--pipe", "--wait", "-q", "cat", w + "/secret2/k"], capture_output=True,
+                         text=True, timeout=10, env=dict(os.environ, XDG_RUNTIME_DIR="/run/user/%d" % os.getuid())).stdout.strip()
+except Exception:
+    bus = ""
+try: home = sorted(os.listdir(os.path.expanduser("~")))
+except OSError: home = []
 print(json.dumps({"wake": WAKE, "level": "info", "summary": "probe ok\x07",
                   "data": {"a": rd(w + "/secret/k"), "b": rd(w + "/secret2/k"), "env": os.environ.get("YB_TEST_TOKEN", "none"),
-                           "inst": os.path.exists(sys.argv[2] + "/config.json")}}))
+                           "inst": os.path.exists(sys.argv[2] + "/config.json"), "bus": bus or "BUS-BLOCKED", "home": home}}))
 '''
 
 
@@ -361,6 +368,9 @@ class ProbeTest(Base):
         self.assertIn('SEEN-A', brief); self.assertNotIn('SEEN-B', brief); self.assertIn('HIDDEN', brief)
         self.assertNotIn('TOKEN-LEAK', brief); self.assertIn('"inst": false', brief)
         self.assertNotIn('\x07', brief)
+        self.assertIn('BUS-BLOCKED', brief, '借用户级 systemd 跑到了沙箱外')
+        home = json.loads(re.search(r'"home": (\[[^\]]*\])', brief).group(1))
+        self.assertFalse({'.claude', '.ssh', '.config', '.lark-cli'} & set(home), home)
         self.assertEqual(sc['status'], 'active')
 
     def test_wake_false_skips_without_task(self):
@@ -410,6 +420,67 @@ class ProbeTest(Base):
         self.e.deliver(self.e.ev('建'), text.replace('每 30 分钟\n', f'一次 {later}\n', 1))
         self.e.tick()
         self.assertEqual(len(self.runs()), 1)
+
+
+# ================= 评审后补的：几条容易漏的路 =================
+class ReviewFixTest(Base):
+    def send(self, t, to, kind, text, **env):
+        r = self.e.cli('send', '--to', to, '--kind', kind, '--text', text, FCB_TASK_ID=t['id'], **env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r.stdout
+
+    def inbox(self, t):
+        p = self.e.inst / 'state' / 'tasks' / str(t['id']) / 'inbox.jsonl'
+        return p.read_text(encoding='utf-8') if p.exists() else ''
+
+    def test_controller_turn_at_hop_limit_does_not_forward(self):
+        """投递轮到了跳数上限：主控回复里的 [任务指令] 不再转给任务（不然任务、项目经理、主控能一直绕圈）。"""
+        t = self.task(hop=2)
+        ref = self.e.t.ref(t)
+        self.e.respond = lambda p, env, c: f'[任务指令] {ref} 再改一版'
+        self.send(t, '主控', '节点', 'LOOP-节点')
+        self.e.tick()
+        self.assertIn('超跳不转', self.kinds())
+        self.assertNotIn('再改一版', self.inbox(t))
+
+    def test_controller_turn_forward_counts_auto_follow_and_hop(self):
+        """跳数没到上限：主控转的指令进任务收件箱，占一次自动追加，任务的跳数接着数。"""
+        t = self.task()
+        ref = self.e.t.ref(t)
+        self.e.respond = lambda p, env, c: f'[任务指令] {ref} 补个测试'
+        self.send(t, '主控', '节点', 'FWD-节点')
+        self.e.tick()
+        x = self.e.t.load(t['id'])
+        self.assertIn('补个测试', self.inbox(t))
+        self.assertEqual(x['auto_follow'], 1); self.assertEqual(x['hop'], 2)
+
+    def test_auto_completion_not_deduped(self):
+        """同一句结论的两次失败，防沉默补投两次都送到主控，不被 30 分钟去重吞掉。"""
+        self.e.respond = pm_or_ctrl('看过了。')
+        t = self.task(status='failed')
+        self.e.t.event(t['id'], 'failed', '结论：BLOCKED（测试挂了）')
+        self.e.tick()
+        self.e.t.event(t['id'], 'failed', '结论：BLOCKED（测试挂了）')
+        self.e.tick()
+        self.assertEqual(len([r for r in self.recs() if r['to']['to'] == '主控' and r.get('auto')]), 2)
+
+    def test_over_hop_to_people_not_rerouted(self):
+        """超过跳数上限只拦往智能体去的；找主人要授权照送主人。"""
+        t = self.task(hop=3)
+        out = self.send(t, '主人', '授权', 'AUTH-超跳也要送')
+        self.assertNotIn('拦下', out)
+        self.assertEqual(self.recs()[-1]['to']['to'], '主人')
+
+    def test_need_reply_not_merged_and_answer_resets_hop(self):
+        """要回复的每条单独发，各自能被引用回复；人回复后发送方任务的跳数归零。"""
+        t = self.task(hop=2)
+        self.send(t, '派活人', '动作', 'ACT-一'); self.send(t, '派活人', '动作', 'ACT-二')
+        self.e.tick()
+        msgs = [c for a, b, c in self.e.sent if 'ACT-' in c]
+        self.assertEqual(len(msgs), 2, msgs)
+        ev = self.e.ev('好，做吧'); ev['parent_id'] = self.e.out_ids[msgs[1]]
+        self.e.b.dispatch(ev); self.e.drain()
+        self.assertEqual(self.e.t.load(t['id'])['hop'], 0)
 
 
 if __name__ == '__main__':
