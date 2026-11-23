@@ -142,6 +142,40 @@ class FreezeFixTest(Base):
         self.assertTrue([e for e in self.t.events(f['id']) if e['kind'] == 'lost' and '冻了' in e['text']])
 
 
+class AnswerAuthTest(Base):
+    """第 5 项：批准和回答审批只认主人本人；编号回复、快速通道同样查身份。"""
+
+    def post(self, t, kind, text):
+        self.t.dl.submit(self.t._me(), self.t.dl.task_sender(self.t._me(), t), '主人', kind, text, trusted=True)
+        self.e.tick()
+        return [i for x, i in self.e.out_ids.items() if text in x][0]
+
+    def rec(self, text):
+        return [r for r in self.t.dl.load(self.t._me()) if r['text'] == text][-1]
+
+    def test_coworker_quote_reply_does_not_answer(self):
+        t = self.task(chat='oc_g', chat_type='group')
+        mid = self.post(t, '花钱', 'SPEND-买机器')
+        ev = self.e.ev('批了', sender=MATE, chat='oc_g', chat_type='group'); ev['parent_id'] = mid
+        self.assertIsNone(self.e.b.route(ev))
+        self.e.b.answer(ev, self.rec('SPEND-买机器')['id'])
+        self.assertEqual(self.rec('SPEND-买机器')['status'], 'open')
+        self.assertFalse([x for x in self.inbox(t) if '批了' in x['text']])
+        ev = self.e.ev('批了', chat='oc_g', chat_type='group'); ev['parent_id'] = mid
+        self.assertEqual(self.e.b.route(ev), ('answer', self.rec('SPEND-买机器')['id']))
+
+    def test_coworker_numbered_reply_and_fast_path(self):
+        t = self.task(chat='oc_g', chat_type='group')
+        self.post(t, '授权', 'AUTH-占前台')
+        q = self.t.dl.qid(self.rec('AUTH-占前台')['from'], self.rec('AUTH-占前台')['q'])
+        self.assertIsNone(self.e.b.route(self.e.ev(f'{q} 可以', sender=MATE, chat='oc_g', chat_type='group')))
+        a = self.task(chat='oc_h', chat_type='group')
+        self.t.dl.submit(self.t._me(), self.t.dl.task_sender(self.t._me(), a), '派活人', '动作', 'ACT-重启', trusted=True)
+        self.e.tick()
+        self.assertIsNone(self.e.b.route(self.e.ev('好', sender=MATE, chat='oc_h', chat_type='group')), '快速通道不吞别人的短消息')
+        self.assertEqual(self.e.b.route(self.e.ev('好', chat='oc_h', chat_type='group'))[0], 'answer', '主人照样走快速通道')
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'

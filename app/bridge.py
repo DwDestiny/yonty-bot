@@ -1014,10 +1014,11 @@ def route(ev):
     text, key, now = plain(ev), session_key(ev), time.time()
     if text.startswith("/") or FOLLOW_RE.match(text): return None
     rid = posted.get(ev.get("parent_id") or "")
-    if rid: return ("answer", rid)
+    rec = tasks.dl.find(tasks._me(), rid) if rid else None
+    if rec and can_answer(ev, rec): return ("answer", rid)   # 别人引用回复审批请求：不算回答，按普通消息交给主控
     m = re.match(r"^(\S+\.q\d+)\s+\S", text)
     rec = tasks.dl.by_qid(tasks._me(), m.group(1)) if m else None
-    if rec and rec["status"] == "open": return ("answer", rec["id"])
+    if rec and rec["status"] == "open" and can_answer(ev, rec): return ("answer", rec["id"])
     b = bindings.get(ev.get("chat_id", ""))
     if b and ev.get("chat_type") != "p2p": return ("pm", b, pm_key(b, key))
     m = re.match(r"^\s*([\w.-]+)\s*[:：]", text)
@@ -1029,13 +1030,22 @@ def route(ev):
     if st and now - st[1] < ROUTING["sticky_min"] * 60 and is_owner(ev):
         sticky[key] = (st[0], now); return ("pm", st[0], pm_key(st[0], key))
     acts_ = tasks.dl.open_in_chat(tasks._me(), key, ("动作",))
-    if len(acts_) == 1 and len(text) <= ROUTING["fast_path"]["max_chars"] and not tasks.dl.open_in_chat(tasks._me(), key, ("授权", "花钱", "方向", "问题")):
+    if len(acts_) == 1 and can_answer(ev, acts_[0]) and len(text) <= ROUTING["fast_path"]["max_chars"] and not tasks.dl.open_in_chat(tasks._me(), key, ("授权", "花钱", "方向", "问题")):
         return ("answer", acts_[0]["id"])
     return None
+
+def can_answer(ev, rec):
+    """谁能回某条要回复的投递：授权、花钱、方向、动作只认主人本人；别的（问题之类）主人或派这个任务的人。"""
+    if is_owner(ev): return True
+    if rec.get("kind") in tasks.dl.OWNER_CATS + ("动作",): return False
+    t = tasks.load(rec["from"]["task"]) if rec.get("from", {}).get("task") else None
+    return bool(t and t["requester"].get("id") and t["requester"].get("id") == ev.get("sender_id"))
 
 def answer(ev, rid):
     """人对某条投递的回复：原样进发送方任务的收件箱（不经主控，不花 token）；发送方是会话的，排进那个会话。"""
     tk = tasks._me()
+    cur = tasks.dl.find(tk, rid)
+    if not cur or not can_answer(ev, cur): return
     rec = tasks.dl.answered(tk, rid)
     if not rec: return
     who, text, fr = sender_name(ev.get("sender_id", "")), plain(ev), rec["from"]
