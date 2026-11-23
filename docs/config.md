@@ -17,6 +17,8 @@
 | `tasks.approval_hours` | `24` | 同事派的活多久没人批就作废 |
 | `tasks.wait_block_min` | `60` | 等回复的任务最多挡同一件事的排队多少分钟；过了让排队的先跑，提醒主控一次 |
 | `tasks.identity_fallback` | `"auto"` | 命令行认不出调用方时按环境变量兜底（兜底的不带主人身份）。`auto`：没有 systemd 的机器才开。测试实例写 `true`。见 boundary.md |
+| `tasks.walk_max` | `200000` | 沙箱放回的每个目录最多看多少个文件和目录找私密路径，看不全就不放回或按失败交回。见 boundary.md |
+| `tasks.outbox_wait_s` | `60` | 沙箱里的命令等服务回执多少秒，等不到不算办成 |
 | `tasks.sandbox_read` / `tasks.sandbox_write` | `[]` | 定时运行的沙箱里额外只读放回、可写挂载的目录（家目录里的 MCP 服务器、构建缓存之类）。见 boundary.md |
 | `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活时主控能挑的模型别名；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
 | `tasks.relay` | `true` | 任务的完成、提问、失败先交给派活的那个会话（主控）处理，再由主控对人汇报；`false` 就原话直发 |
@@ -71,7 +73,7 @@
 | `processing_emoji` | `OnIt` | 处理中表情 |
 | `new_session_commands` | `["/new"]` | 私聊里发这些词开新会话 |
 | `timezone` | `Asia/Shanghai` | 定时任务和时间显示用的时区 |
-| `devices` | `[]` | 设备列表。每项 `name`、`match`（调用命令的正则，锚定命令开头）、`reset`、`release`、`idle_max_min`、`mcp`（这台设备的 MCP 服务器名，按它查参数）。模板为空，设备名是实例配置，见 boundary.md 4.1 |
+| `devices` | `[]` | 设备列表。每项 `name`、`match`（调用命令的正则，开头写 `^`；命令里任何一个词的位置都会试着匹配，套着、拆开的写法见 boundary.md）、`reset`、`release`、`idle_max_min`、`mcp`（这台设备的 MCP 服务器名，按它查参数）。模板为空，设备名是实例配置，见 boundary.md 4.1 |
 | `irreversible` | 见 app/config.example.json | 不可逆命令的正则。有没取的追加指令时 `irreversible_gate` 拦它们 |
 | `schedules` | 见说明 | `max_run_min` 120（一次运行从开工算起最长分钟数，续跑的轮次合起来算）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）、`tick_wait_s` 3（到点处理在单独线程，任务线程最多等它这么久）。见 schedules.md |
 | `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |

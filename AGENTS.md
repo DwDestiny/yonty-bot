@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `AGENTS.md` / `CLAUDE.md` / `README.md` / `README.en.md` | L1：目的、目录地图、规则；接手入口；对外介绍（中文、英文） | 是 |
 | `VERSION` / `LICENSE` | 版本号（唯一来源）；MIT | 是 |
-| `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`delivery.py`（投递）、`scheduler.py`（定时任务）、`resources.py`（按资源放行）、`devices.py`（设备租约）、`actions.py`（动作）、`hooks/`（含 `device_guard.py`、`irreversible_gate.py`、`scope_guard.py`）、`roles/`（含 `项目经理.md`）、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
+| `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`delivery.py`（投递）、`scheduler.py`（定时任务）、`resources.py`（按资源放行）、`devices.py`（设备租约）、`actions.py`（动作）、`fsio.py`（写文件不跟软链接）、`outbox.py`（沙箱的发件箱）、`hooks/`（含 `device_guard.py`、`irreversible_gate.py`、`scope_guard.py`）、`roles/`（含 `项目经理.md`）、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID；`device-wrapper.sh` 装在设备上的命令入口，拒绝运行 claude | 是 |
 | `docs/` | 架构、搭建指南、配置、任务、定时任务（`schedules.md`）、缓存、边界、企微；2.0 方案（`plan-2.0.md`，已实现）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
 | `tests/` | 行为测试，不连 IM、不调真 Claude | 是 |

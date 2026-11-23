@@ -98,17 +98,20 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 
 ### 设备（hooks/device_guard.py）
 
-- 调用设备的命令用正则匹配（`devices[].match`），锚定命令开头。复合命令按 `&&`、`;`、`|` 和 `env` 前缀拆段，逐段查。
-- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量，再去掉引号和反斜杠查：带 `claude`、`anthropic` 字样的（含 `claude-code`、`@anthropic-ai/…`）一律拦；变量和命令替换只在算不出结果时才拦：同一条命令里用字面值赋过的变量、`for` 的字面列表会代进去再查（每个可能的值和空值都查一遍）；`$HOME`、`$USER`、`$LOGNAME`、`$HOSTNAME`、`$?`、`$$`、`$#`、`$!`、算术，以及 `date`、`whoami`、`hostname`、`id -u`、`uname`、`uuidgen`、`nproc`、`mktemp`、`seq` 这几个的替换放行。
-- 设备命令还会误拦的：没在同一条命令里赋值的变量（`$CMD`）、`$1`/`$@`（含 `awk '{print $2}'`）、`${x:-…}` 这类展开、别的命令替换（`$(cat f)`、`$(git …)`）、`$'…'`、`<(…)`、`read`/`+=`/`printf -v` 赋的变量、通配符的 `for`、同一条命令里又 `source`、`eval`、定义函数、改 `PATH` 的，以及参数里有 claude、anthropic 字样的（比如同名文件）。改成把值直接写出来。通配符和花括号拼出的程序名（`cla?de`）钩子不查，靠包装脚本。
+- 调用设备的命令用正则匹配（`devices[].match`）。文字里哪个词的开头匹配得上，就看这一段是不是能确定的普通用途；确定不了就按设备命令处理，红线、租约、身份三样用同一套识别，宁可误拦。
+  - 认得到的写法：`timeout`、`nice`、`stdbuf`、`setsid`、`xargs`、`ssh`、`env -u`、`sudo -u`、`watch`、`find -exec` 这类套在前面的；`$(…)`、反引号、`<(…)` 里的；`sh -c`、`eval`、管道给 shell 的文字；函数体、`case`、`alias`、`trap`；绝对路径；引号、反斜杠、`$'…'`、空替换、`$(printf 字面)` 拆开的设备名；本命令里赋值的变量。
+  - 普通用途：注释；`echo`、`printf`、`grep`、`rg`（不带 `--pre`）、`cat`、`ls`、`cd`、`which`、`find`（不带 `-exec`、`-delete`）、`sed -n 行号`、git 的常用子命令（不带 `-c`、`-x`、`--exec`、`-O`）、gh、lark-cli、wecom-cli 等；给普通变量赋值；路径中间的一级目录（`/x/devcli/tool.py`）。同一条命令里还有把文字当命令跑的（shell、`xargs`、`ssh`、`eval`、`source`、拿变量当命令、`alias`、函数定义），普通用途也不算。
+  - 会误当成设备命令的例（同事触发的会话拦下，主人的和任务的要占租约）：`cp devcli x`、`vim devcli.conf`、`bash build.sh && grep devcli notes`。参数从 `xargs` 来的设备命令算不出，谁都拦。
+- 任何设备上都不运行 `claude`，不打开 claude.ai。设备命令去掉引号和反斜杠后带 `claude`、`anthropic` 字样的（含 `claude-code`、`@anthropic-ai/…`）一律拦；不是直接写在命令开头的、有管道或 heredoc 的，查整条命令。变量和命令替换只在算不出结果时才拦：同一条命令里用字面值赋过的变量、`for` 的字面列表会代进去再查（每个可能的值和空值都查一遍）；`$HOME`、`$USER`、`$LOGNAME`、`$HOSTNAME`、`$?`、`$$`、`$#`、`$!`、算术，以及 `date`、`whoami`、`hostname`、`id -u`、`uname`、`uuidgen`、`nproc`、`mktemp`、`seq` 这几个的替换放行。
+- 设备命令里算不出、会拦的：没在同一条命令里赋值的变量（`$CMD`）、`$1`/`$@`（含 `awk '{print $2}'`）、`${x:-…}` 这类展开、别的命令替换（`$(cat f)`、`$(git …)`）、`$'…'`、`<(…)`、`read`/`+=`/`printf -v` 赋的变量、通配符的 `for`、同一条命令里又 `source`、`eval`、定义函数、改 `PATH` 的。改成把值直接写出来。
 - 设备的 MCP 工具按 `devices[].mcp`（MCP 服务器名）认，参数里带 `claude` 或 claude.ai 的拦。
-- 钩子只看得到命令文字，挡不住写脚本再执行。设备上要装 `scripts/device-wrapper.sh` 做主防线：设成 SSH 的 `command=` 或设备上远程命令的入口，它拒绝以 `claude` 名义运行、拒绝命令或参数里带 `claude`、claude.ai 的（退出码 126），其余照常执行。
+- 钩子只看得到命令文字，挡不住写脚本再执行、`python -c` 拼出来的命令、通配符拼的命令名（`devc?i`）。设备上要装 `scripts/device-wrapper.sh` 做主防线：设成 SSH 的 `command=` 或设备上远程命令的入口，它拒绝以 `claude` 名义运行、拒绝命令或参数里带 `claude`、claude.ai 的（退出码 126），其余照常执行。
 - 身份：主人私聊会话短时可用（一轮 10 次、3 分钟）；主人派的任务独占租约；同事来源一律拦；项目经理不用设备。
-- 租约在 `state/devices/<名字>.json`。重置命令只给占用者；任务离开“进行中”就释放。
+- 租约在 `state/devices/<名字>.json`。重置命令只给占用者；任务离开“进行中”就释放。定时运行的沙箱里看不到租约：钩子把请求写进发件箱，服务按任务的范围在箱外取，等到回执才放行。
 
 ### 动作
 
-`tasks.py act` 办修补、授权、花钱、方向、禁止这几类事，定义在 `actions/<名字>.json`。授权类要主人 `/approve 短名#N.aK` 批。
+`tasks.py act` 办修补、授权、花钱、方向、禁止这几类事，定义在 `actions/<名字>.json`。命令行提交的不带主人权限：只有登记了 `coworker_ok` 的修补类直接跑，其余写审批单。主人私聊里主控写 `[服务命令] act <名字> --参数 值`，由服务执行，修补类直接跑。授权类要主人 `/approve 短名#N.aK` 批。
 
 ### 权限范围
 
@@ -116,7 +119,7 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 
 ### 不可逆闸门（hooks/irreversible_gate.py）
 
-命令不可逆、而任务还有没取的追加指令时，闸门拦下，先取指令再动手。内置的判断按参数解析（拆 `;`、`&&`、管道、`sh -c`、`eval`，跳过 `env`、`sudo`、`git -C` 这类前缀和全局选项；前面套着 `timeout`、`ssh` 之类的也认；`echo`、`grep` 这类只是打印、搜索的不算）：`git push` 推标签、`--mirror`、`--all`、推到版本号或发布分支（stable、release、release/*、production、prod）；`gh release` 的改动类子命令；`gh api` 对 `releases`、`git/refs`、`git/tags` 发非 GET 请求（方法不分大小写）；npm、pnpm、yarn、bun、cargo、poetry、flit、hatch、twine、gem 发包。命令拆不开时按文字扫。`config.json` 的 `irreversible` 里的正则照样合并进来。
+命令不可逆、而任务还有没取的追加指令时，闸门拦下，先取指令再动手。内置的判断按参数解析（拆 `;`、`&&`、管道、`sh -c`、`eval`，跳过 `env`、`sudo`、`git -C` 这类前缀和全局选项；前面套着 `timeout`、`ssh` 之类的也认；`$(…)`、反引号、`<<<`、`alias`、`git config alias.x`、函数体里的也拆开；引号外的 `#` 注释和反斜杠续行先去掉；`echo`、`grep` 这类只是打印、搜索的不算，除非同一条命令里有 shell、`xargs`、`ssh` 在跑文字；`python -c`、`node -e` 的代码按文字扫）：`git push` 推标签、`--mirror`、`--all`、推到版本号或发布分支（stable、release、release/*、production、prod），`--repo=` 写远端的也认；推的目标有变量、命令替换、花括号，或者从 `xargs` 来，算不出就按命中；`gh -R o/r` 写在哪儿都认；`gh release` 的改动类子命令；`gh api` 对 `releases`、`git/refs`、`git/tags` 发非 GET 请求（方法不分大小写）；npm、pnpm、yarn、bun、cargo、poetry、flit、hatch、twine、gem 发包。命令拆不开时按文字扫。`config.json` 的 `irreversible` 里的正则照样合并进来。
 
 ### 沙箱实测（2026-11-22）
 
@@ -133,20 +136,27 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - 整机只读（`--ro-bind / /`）。家目录、`/tmp`、`/run/user` 盖成空目录，`docker.sock` 盖掉。
 - 只读放回：仓库（连同它的 `.git`）、范围-读、`~/.claude`、git 配置、PATH 里的目录、每个 `claude` 的真实目录、Python 前缀、`tasks.sandbox_read`。
 - 实例目录盖成空目录，按白名单只读放回（`tasks.py` 的 `INST_KEEP`）：`*.py`、`hooks/`、`roles/`、`actions/`、守则、`config.json`、`claude-settings.json`、`yonty-bot.json`。`inbox/`（主人私聊的附件）、`logs/`、旁听名单、`_tmp/` 和以后新加的文件都看不到。`state` 只放回本任务目录和范围目录。盖上的目录最后变只读，放不进假模块。写在实例目录下的范围-读不放。
-- 可写：工作树；本任务的收件箱回执、发件箱、锁；决策日志；设备租约；`tasks.sandbox_write`。`~/.claude.json` 换成本任务的副本。投递写进本任务的 `outbox.jsonl`，服务在沙箱外按任务记录的身份送出。
+- 可写：工作树；本任务的发件箱 `outbox.jsonl`；自己的会话记录目录；`tasks.sandbox_write`。`~/.claude.json` 换成本任务的副本。`state` 整个只读，锁文件盖成 `/dev/null`（只读文件也能加锁，看得见就能占着锁卡住服务）。进程号命名空间是单独的（`--unshare-pid`）。
+- 投递、动作、设备租约、收件箱回执都写进发件箱（`outbox.py`），服务在箱外办：归属只看是谁的发件箱，不信行里的字段；投递只能给范围里的 `发给`（和只进记录的），动作要在 `范围-动作`、参数合规，设备要在 `范围-设备`；定时运行的命令行投递一律不带主人身份。办完写回执 `outbox.ack.jsonl`（箱里只读），箱里的命令等到回执才说成功，等不到（`tasks.outbox_wait_s`，默认 60 秒）就说“不算办成”、非零退出。一行坏 JSON、类型不对、太长只跳过它自己；同一个请求重放不办两次。
+- 服务写状态文件都走 `fsio.py`：随机临时名加 `O_EXCL|O_NOFOLLOW`，再改名换上；追加和加锁也不跟软链接。
+- 私密目录看不全就不放回：放回的每个目录最多看 `tasks.walk_max`（默认 20 万）个文件和目录，正则写的私密路径要在里面找。超过了，必须有的（仓库、工作树、范围-读、`~/.claude`）按失败交回并写明是哪个目录；可有可无的（PATH 里别的目录、`tasks.sandbox_read`）不放回，记决策日志。探针的沙箱同样处理，第一次就告诉主人。
 - 工作树是独立的 `git clone --shared`，主仓库整个只读，沙箱里改不了主仓库的分支、配置和对象。clone 的 `.git` 归任务写，里面能藏要执行的命令，也能把 `objects`、`refs` 换成指向别的仓库的软链接，所以沙箱外一条 git 都不对它跑：角色检查的 git 在沙箱里跑；每轮结束服务把 `bot/` 分支 fetch 回主仓库，对面的 `upload-pack` 也在沙箱里跑；在 clone 里跑 `tasks.py mr` 会先切到主仓库；清理直接删目录，分支没拉回来就不删。
 - 等人回话时的会话压缩也在沙箱里跑。定时运行不做独立验收。任务回报里写明看改动、推送都到主仓库做，也不给“终端接手”命令：别在 clone 里直接跑 git 或 Claude。
 - 私密路径最后盖：字面路径整机盖；正则在放回的目录树里找（解析软链接）。范围-读明确列的私密目录放开。范围-读的软链接被换过（真实路径和建的时候不一样）就不放。凭据目录（`~/.ssh`、`~/.config` 等）在放回的目录下也盖掉。
 - 会话记录：只把这次运行自己的会话目录挂成可写，同一个定时任务之前运行的会话目录只读（分叉、续接要读），别的项目的看不到。每个定时任务单独一件事。
 - 验证命令和运行在同一个沙箱里跑。
 
-### 身份（评审修复 1；第二轮复审 1、2，2026-11-23）
+### 身份（第三轮复审 1，2026-11-23）
 
-- `tasks.py send/act/inbox/diag/mr` 不信环境变量里的身份，也不信实例目录里的任何文件（会话自己写得进去）。
-- 命令行先问 bridge：bridge 开 unix 套接字 `state/ident.sock`（只给本用户），用 `SO_PEERCRED` 拿来访进程号。本实例的任务单元按来访进程的 cgroup 认（任务要在跑、轮次对得上）；聊天、项目经理那一轮的 claude 和 popen 起的任务 runner，由 bridge 起进程时登记在自己内存里（进程号加启动时间），沿父进程找。都对不上就不认。
-- bridge 不在时，命令行按自己的 cgroup 认任务单元。在服务单元里、或者 Linux 上有 systemd，认不出就拒绝，不按环境变量兜底。只有实例配置 `tasks.identity_fallback` 开着（默认 `auto`：没有 systemd 的机器才开，测试实例写 `true`）才兜底，兜底的一律不带主人身份，只认在跑的任务。
-- 投递记录由 bridge 写的才带签名（钥匙在 bridge 内存里，启动时生成）。主控、项目经理的投递轮只有签名对得上、发送方是主人，才按主人身份跑。命令行在 bridge 外写的、任务进程直接写的、手写进 `records.json` 的、改过字的、送完又改回 new 的、bridge 重启前写的，一律按非主人送。签名盖住编号、时间、发送方、目标、类别、正文、跳数、要不要回复和关联的任务。
-- `diag`、`mr` 的主人身份只认 bridge 或 cgroup 认出来的，`FCB_OWNER=1` 不算。
+- 命令行（`tasks.py send/act/inbox/mr/diag`）一律不带主人权限，不管认出是谁。主人权限只来自 bridge 收到的 IM 消息，和服务从自己启动的运行的输出里解析出的内容（身份取任务记录）。
+- 命令行要认是谁，只用来署名、找自己的收件箱。先问 bridge：bridge 开 unix 套接字 `state/ident.sock`（只给本用户），用 `SO_PEERCRED` 拿来访进程号。任务单元要过四关：cgroup 的完整路径等于 systemd 报的单元路径；任务在跑、轮次对得上；单元的 `InvocationID` 等于服务起它时记进任务记录的那个；进程是单元的 `MainPID` 或它的后代。写别的单元的 `cgroup.procs`、在自己 scope 下建同名子 cgroup、单元退出后起同名单元，都过不了（真 systemd 测过）。聊天、项目经理那一轮的 claude 和 popen 起的任务 runner，由 bridge 起进程时登记在自己内存里（进程号加启动时间），沿父进程找。都对不上就不认。
+- bridge 不在时，命令行按同样的四关认任务单元。在服务单元里、或者 Linux 上有 systemd，认不出就拒绝，不按环境变量兜底。只有实例配置 `tasks.identity_fallback` 开着（默认 `auto`：没有 systemd 的机器才开，测试实例写 `true`）才兜底，只认在跑的任务。
+- 主人专属的由服务执行：主控在主人私聊那一轮的回复里单独写一行 `[服务命令] diag [短名#N]`、`[服务命令] mr --repo <仓库> --branch <分支> --title <标题>`、`[服务命令] act <动作> --参数 值`，服务执行后把结果接着喂给同一个会话，最多两次，几段回复合在一起发。群里、同事那边、项目经理写的不执行。命令行 `tasks.py diag` 不给结果，只提示这个写法；`tasks.py mr` 只能从 `bot/` 分支建。主人自己发 `/status` 照旧。
+- 投递记录由 bridge 写的才带签名（钥匙在 bridge 内存里，启动时生成）。主控、项目经理的投递轮只有签名对得上、发送方是主人，才按主人身份跑。命令行来的（`via: cli`）、任务进程直接写的、手写进 `records.json` 的、改过字的、送完又改回 new 的、bridge 重启前写的，一律按非主人送。
+- 命令行投递叫起来的那一轮：`FCB_OWNER=0`；回复里的 `[派活]` 一律等主人批；`[任务指令]` 只能回给发来的那个任务，不改预算、不放开验收。
+- runner 从输出里解析出的 `[投递]` 写进任务的 `marks.jsonl`，由 bridge 按任务记录的身份投（跟进展、提问走 `events.jsonl` 一样）。定时运行的还要过 `发给`。
+- 主人答复会话发的请求：新建一条带签名的投递，落盘后才把原请求标成已回，出错照投递的规矩重送最多 3 次，主人身份来自这条 IM。服务在送到之前重启过，签名作废，那一轮按非主人跑。
+- `[任务指令]` 带幂等键：投递轮、任务回报轮重跑时，同一条不转两次；`[派活]`、项目经理的 `[投递]` 同样。
 - CLI 发给任务的一律算留言。指令只来自服务解析的 `[任务指令]`。主人派的任务，这一轮不是主人触发的，只收留言。加预算、放开验收只认指令。
 
 ### 已知的残余风险
@@ -154,11 +164,11 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - 沙箱没开网络命名空间，抽象 unix 套接字还连得上。
 - Claude 自己的登录凭据在沙箱里读得到（不然 Claude 跑不起来）。
 - 装在家目录里的 MCP 服务器要写进 `tasks.sandbox_read` 才看得到。
-- 没有 systemd 的机器（macOS）和测试实例按环境变量兜底认身份，主人身份一律不认。bridge 重启后，popen 起的任务 runner 的登记没了，这些任务的命令行只能走兜底。
+- 没有 systemd 的机器（macOS）和测试实例按环境变量兜底认身份，主人身份一律不认。任务单元的 `InvocationID` 记在任务记录里，同一用户改得了（见“不防”）；记下之前的一瞬间，任务的命令行认不出。bridge 重启后，popen 起的任务 runner 的登记没了，这些任务的命令行只能走兜底。
 - 沙箱里读得到 `config.json`（钩子要用）：里面没有密钥，但有主人和群的编号、私密路径的名字。
 - 定时运行的 clone 读得到主仓库 `.git` 里的全部历史。
 - 实例目录里的状态文件（任务记录、投递记录等）同一用户写得进去，`private_guard` 按文字拦，`cd 实例目录` 后用相对路径挡不住。身份和投递的主人身份不再信这些文件，任务记录本身（派活人是不是主人）仍是信任基础。
-- 设备红线：包装脚本只在 PATH 里放了 `claude`、`node`、`npx`、`npm`、`pnpm`、`yarn`、`bun`、`bunx`、`deno` 的同名链接。写绝对路径（`/usr/local/bin/claude`、`/opt/homebrew/bin/node …`）或用别的解释器（`python -c` 起子进程）能绕过“按最终程序查”这一遍，只剩命令文字那一遍。
+- 设备红线：包装脚本只在 PATH 里放了 `claude`、`node`、`npx`、`npm`、`pnpm`、`yarn`、`bun`、`bunx`、`deno` 的同名链接。写绝对路径（`/usr/local/bin/claude`、`/opt/homebrew/bin/node …`）或用别的解释器（`python -c` 起子进程）能绕过“按最终程序查”这一遍，只剩命令文字那一遍。在远程命令里先改 `PATH=…`（同名链接就找不到了），或者绝对路径加命令替换拼出程序名（`/usr/local/bin/$(printf cla)ude`），两遍都绕得过：命令文字里没有 claude 字样，也不经过同名链接。钩子那一道会把算不出的替换拦下，直接登录设备跑的拦不住。
 
 ## 5. 私密资料（config.json 的 private）
 
