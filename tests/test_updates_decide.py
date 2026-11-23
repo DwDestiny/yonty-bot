@@ -182,13 +182,21 @@ class DecideTest(Base):
         self.d.record('ambient', p=0.05, actual=True, sampled=True); self.d.record('ambient', p=0.05, actual=True, sampled=True)
         self.assertFalse(self.d.below('ambient', r, c)); self.assertIn('自动停用', self.d.report('ambient', c))
 
-    def test_task_scores_recorded_and_reported(self):
-        self.d._post = lambda u, b, k, t: {'answers': {q: {'noul': 0.4} for q in b['questions']}}
+    def test_task_scores_pick_model(self):
+        p = lambda r, c: (lambda x: (x['model'], x['effort'], x['auto_model']))(self.d.pick_task({'risk': r, 'cross': c, 'design': 0, 'mech': 0}))
+        self.assertEqual(p(.95, .95), ('opus', 'high', False)); self.assertEqual(p(.95, .5), ('sonnet', 'high', True)); self.assertEqual(p(.1, .95), ('sonnet', 'medium', True))
+        self.d._post = lambda u, b, k, t: {'answers': {q: {'noul': 0.95} for q in b['questions']}}
         self.d._key = lambda c: 'k'
-        self.assertEqual(self.d.score('x', {}), {k: 0.4 for k in self.d.TASK_Q})
-        for n in (1, 2): self.d.record('task', task=n, **self.d.score('x', {}))
-        ts = {1: {'id': 1, 'auto_model': True, 'status': 'done'}, 2: {'id': 2, 'auto_model': True, 'status': 'done', 'verify_fails': 2, 'escalated': True}}
-        r = self.d.report_task(ts, {}); self.assertIn('一次过 1 个，换 opus 1 个', r); self.assertIn('0.40/0.40', r)
+        pm = {'model': 'sonnet', 'effort': 'high', 'auto_model': True}; d = {'title': 'x', 'brief': 'y'}; pts = self.b.CFG['decide']['points']
+        self.b.CFG['decide']['backend'] = 'jev'
+        pts['task'] = 'off'; self.assertEqual(self.b.task_judge(d, pm), pm)
+        pts['task'] = 'shadow'; self.assertEqual(self.b.task_judge(d, pm)['model'], 'sonnet')
+        pts['task'] = 'on'; r = self.b.task_judge(d, pm); self.assertEqual((r['model'], r['jev']['risk']), ('opus', .95))
+        def boom(*a): raise TimeoutError()
+        self.d._post = boom; r = self.b.task_judge(d, pm); self.assertEqual((r['model'], r['auto_model'], r['jev']['error']), ('sonnet', True, 'TimeoutError'))
+        self.d.record('task', task=1, model='sonnet', effort='high', risk=.5)
+        out = self.d.report_task({1: {'id': 1, 'status': 'done', 'cost': 3, 'escalated': True, 'verify_fails': 2}}, {'mode': 'on'})
+        self.assertIn('验证一次过 0 个，换 opus 1 个，平均 3.0', out)
 
     def test_key_not_in_session_env(self):
         self.flush(); self.assertFalse([k for s in self.e.streams for k in s['env'] if 'JEV' in k or 'KEY' in k.upper() and 'SESSION' not in k])

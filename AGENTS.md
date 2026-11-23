@@ -1,6 +1,6 @@
 # Yonty Bot · Agent Guide（L1）
 
-> 3.3.0 · 2026-11-23 · 维护：Yonty Bot contributors
+> 3.4.0 · 2026-11-23 · 维护：Yonty Bot contributors
 
 ## 目的
 

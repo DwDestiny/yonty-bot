@@ -119,16 +119,25 @@ def score(facts, cfg):
               "questions": {k: {"type": "noul", "instructions": v} for k, v in TASK_Q.items()}}, _key(cfg), cfg.get("timeout", 5))
     return {k: float(r["answers"][k]["noul"]) for k in TASK_Q}
 
+def pick_task(s):
+    """按分数定模型和思考档。线来自 28 个历史开发任务的分数：“风险”最能分开；“跨模块”几乎都高，只和风险一起用。"""
+    if s["risk"] >= 0.9 and s["cross"] >= 0.9: return {"model": "opus", "effort": "high", "auto_model": False}
+    return {"model": "sonnet", "effort": "medium" if s["risk"] < 0.35 else "high", "auto_model": True}
+
 def report_task(ts, cfg):
-    """先用 sonnet 的任务：一次过、返工过、换 opus 的各多少；影子打分在“一次过”和“没一次过”之间差多少。"""
-    other = sum(t.get("role") in ("", "开发", "排查") and not t.get("auto_model") and t.get("model") == "opus" and t.get("created", 0) > time.time() - 7 * 86400 for t in ts.values())
-    end = [t for t in ts.values() if t.get("auto_model") and t.get("status") in ("done", "failed")]
-    if not end: return f"开发活先用 sonnet：还没有做完的。最近 7 天直接用 opus 的开发、排查活 {other} 个。"
-    bad = {t["id"] for t in end if t.get("verify_fails")}
-    out = [f"开发活先用 sonnet：做完 {len(end)} 个，一次过 {len(end) - len(bad)} 个，换 opus {sum(bool(t.get('escalated')) for t in end)} 个。最近 7 天直接用 opus 的开发、排查活 {other} 个。"]
-    rs = [r for r in rows("task") if r.get("task") in {t["id"] for t in end}]
-    a, b = [r for r in rs if r["task"] in bad], [r for r in rs if r["task"] not in bad]
-    if a and b: out.append("影子打分（没一次过 / 一次过）：" + "，".join(f"{k} {sum(r[k] for r in a) / len(a):.2f}/{sum(r[k] for r in b) / len(b):.2f}" for k in TASK_Q))
+    """按起步的模型和思考档分组：做完几个、一次过几个、换 opus 几个、平均花多少。"""
+    rs = [r for r in rows("task") if r.get("task") in ts]
+    old = [t for t in ts.values() if t.get("role") == "开发" and t.get("model") == "opus" and t.get("verify") and "jev" not in t and t.get("status") == "done" and t.get("cost")]
+    out = [f"开发活：现在是 {cfg['mode']}。判了 {len(rs)} 个，出错 {sum(bool(r.get('error')) for r in rs)} 个。"]
+    g = {}
+    for r in rs: g.setdefault((r["model"], r["effort"]), []).append(ts[r["task"]])
+    for (m, e), xs in sorted(g.items()):
+        end = [t for t in xs if t.get("status") in ("done", "failed")]
+        if not end: out.append(f"起步 {m}/{e}：{len(xs)} 个，还没有做完的。"); continue
+        out.append(f"起步 {m}/{e}：{len(xs)} 个，做完 {sum(t['status'] == 'done' for t in end)} 个、失败 {sum(t['status'] == 'failed' for t in end)} 个，"
+                   f"验证一次过 {sum(not t.get('verify_fails') and t['status'] == 'done' for t in end)} 个，换 opus {sum(bool(t.get('escalated')) for t in end)} 个，"
+                   f"平均 {sum(t.get('cost') or 0 for t in end) / len(end):.1f} 美元当量。")
+    if old: out.append(f"对照：以前有验证、用 opus 的开发活 {len(old)} 个，平均 {sum(t['cost'] for t in old) / len(old):.1f} 美元当量。")
     return "\n".join(out)
 
 def report(point, cfg):
