@@ -315,6 +315,39 @@ class DeliveryPersistTest(unittest.TestCase):
         self.assertEqual(dl.find(tk, rec['id'])['status'], 'sent')
 
 
+
+import test_v2_round2 as R2  # noqa: E402
+
+
+class ScheduleTickTest(R2.Base):
+    """第 10 项：tick 跑探针期间主人暂停、停掉，tick 收尾不能把状态写回去；定时任务的到点处理不挡任务线程。"""
+
+    def setUp(self):
+        super().setUp()
+        (self.e.work / 'secret' / 'k').write_text('SEEN-A')
+
+    def test_stop_during_probe_is_kept(self):
+        sc = R2.ProbeTest.make(self)
+        sch, orig = self.e.b.sch, self.e.b.sch.probe
+
+        def probe(tk, x, alerts, now):   # 探针跑的这段时间里，主人发了 /schedule stop
+            sch.command(tk, 'stop', x['ref'], True)
+            return orig(tk, x, alerts, now)
+        sch.probe = probe
+        self.e.tick()
+        cur = json.loads((self.e.inst / 'state' / 'schedules' / f"{sc['id']}.json").read_text())
+        self.assertEqual(cur['status'], 'stopped', '主人停掉的不能被 tick 写回“在跑”或“跑完了”')
+
+    def test_slow_tick_does_not_block(self):
+        b, calls = self.e.b, []
+        b.CFG.setdefault('schedules', {})['tick_wait_s'] = 0.2
+        b.sch.tick = lambda tk, upgrading=False: (calls.append(1), time.sleep(2), [])[-1]
+        t0 = time.time(); b.schedules_tick(); b.schedules_tick()
+        self.assertLess(time.time() - t0, 1.5, '慢的探针挡住了任务线程')
+        self.assertEqual(len(calls), 1, '上一拍没做完，这一拍跳过')
+        self.assertTrue(b.SCH_BUSY.acquire(timeout=5)); b.SCH_BUSY.release()
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'

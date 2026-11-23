@@ -1250,9 +1250,22 @@ def v2_tick():
     except OSError: pass
     for name, fn in (("freeze", freeze_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
-                     ("schedules", lambda: [owner_dm("feishu", a) for a in sch.tick(tasks._me(), upgrading=upgrading())])):
+                     ("schedules", schedules_tick)):
         try: fn()
         except Exception: log.exception("%s tick failed", name)
+
+SCH_BUSY = threading.Lock()
+
+def schedules_tick():
+    """定时任务的到点处理放在单独线程：探针、开运行慢的时候不挡任务线程。最多等 tick_wait_s 秒，快的当拍做完；
+    上一拍还没做完就跳过这一拍。"""
+    if not SCH_BUSY.acquire(blocking=False): return
+    def go():
+        try: [owner_dm("feishu", a) for a in sch.tick(tasks._me(), upgrading=upgrading())]
+        except Exception: log.exception("schedules tick failed")
+        finally: SCH_BUSY.release()
+    th = threading.Thread(target=go, daemon=True); th.start()
+    th.join(float((CFG.get("schedules") or {}).get("tick_wait_s", 3)))
 
 def freeze_tick():
     """内存紧时冻结任务单元、缓过来解冻（方案 5.4），都私聊告诉主人。这是服务告警，不占主人私聊的限额。"""

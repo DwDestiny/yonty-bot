@@ -7,7 +7,7 @@ Output: 定时任务的状态文件和范围文件；到点用 tk.create 建的�
 Pos:    bridge 解析 [定时]、每拍调 tick()、任务结束调 after_run()；用户级 systemd 定时器调 `scheduler.py watchdog`（不靠 bridge 活着）。
         探针用 tk.probe_box() 的 bwrap 沙箱跑，跟定时运行同一套读范围，环境里不带凭据
 """
-import hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import copy, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -110,6 +110,27 @@ def save(sc):
     tmp = _p(sc["id"]) + ".tmp"
     with open(tmp, "w") as f: json.dump(sc, f, ensure_ascii=False, indent=1)
     os.replace(tmp, _p(sc["id"]))
+
+
+def _lk(tk): return tk._Lock(os.path.join(DIR, ".lock"))
+
+def _load1(sid):
+    try:
+        with open(_p(sid)) as f: return json.load(f)
+    except (OSError, ValueError): return None
+
+def _merge_save(tk, before, sc):
+    """tick 跑探针、开运行要一阵子，这期间主人可能暂停、停掉，after_run 也可能改过：按最新的文件合并，只写 tick 自己改过的字段；
+    状态被别处改过的，以别处为准。"""
+    with _lk(tk):
+        cur = _load1(sc["id"]) or sc
+        for k, v in sc.items():
+            if before.get(k) == v: continue
+            if k == "status" and cur.get("status") != before.get("status"):
+                tk.decide("定时状态以新的为准", schedule=sc["ref"], to=cur.get("status"), why=f"tick 想改成 {v}，期间被改成了 {cur.get('status')}")
+                continue
+            cur[k] = v
+        save(cur)
 
 
 def by_ref(s):
@@ -302,7 +323,7 @@ def tick(tk, now=None, upgrading=False):
     gap_min = int((cfg.get("schedules") or {}).get("min_wake_min", 5)) * 60
     for sc in all_():
         if sc["status"] != "active": continue
-        changed = ran = False
+        before, changed, ran = copy.deepcopy(sc), False, False
         if sc.get("probe") and sc.get("probe_every") and (sc.get("probe_next") or 0) <= now:
             sc["probe_next"], changed = now + sc["probe_every"], True
             rd = probe(tk, sc, alerts, now)
@@ -324,11 +345,14 @@ def tick(tk, now=None, upgrading=False):
                 sc["next"] = next_time(sc["spec"], now, cfg)
                 if sc["spec"]["kind"] == "once": sc["status"] = "done"
             changed = True
-        if changed: save(sc)
+        if changed: _merge_save(tk, before, sc)
     return alerts
 
 
 def after_run(tk, t, text=""):
+    with _lk(tk): return _after_run(tk, t, text)
+
+def _after_run(tk, t, text=""):
     """一次运行结束：连续失败 3 次暂停；自定节奏按 [下次 …] 调，慢下来立刻生效，快起来每次最多快一倍，低于下限算提议。"""
     sc = by_ref(t.get("schedule") or "")
     if not sc: return None
@@ -364,6 +388,9 @@ def list_text(tk):
 
 
 def command(tk, verb, s, owner):
+    with _lk(tk): return _command(tk, verb, s, owner)
+
+def _command(tk, verb, s, owner):
     sc = by_ref(s)
     if not sc: return f"没有定时任务 {s}。/schedules 看全部。"
     if not owner: return "定时任务的开关只有主人能动。"
