@@ -788,7 +788,7 @@ class TaskTest(unittest.TestCase):
         finally: self.b.CLAUDE_TIMEOUT = old
 
     def test_chat_extra_results_are_replied(self):
-        def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+        def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, **k):
             on_extra('等 CI 中，先报一声'); return '好了'
         orig, self.b.run_claude = self.b.run_claude, fake
         try: self.b.handle(self.ev('干个活', chat='oc_x1', chat_type='p2p'))
@@ -796,7 +796,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([s[1] for s in self.sent][-2:], ['等 CI 中，先报一声', '好了'])
         keys = [s[2] for s in self.sent][-2:]
         self.assertNotEqual(keys[0], keys[1])                               # 同一条消息回两次：幂等键不同，飞书才不会丢第二条
-        def fake2(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+        def fake2(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, **k):
             on_extra('全说完了'); return ''                                  # 最后一句中途就发了
         self.sent.clear(); self.b.run_claude = fake2
         try: self.b.handle(self.ev('再干个活', chat='oc_x1', chat_type='p2p'))

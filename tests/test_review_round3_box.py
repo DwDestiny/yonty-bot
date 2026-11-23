@@ -205,9 +205,9 @@ class WalkLimitTest(Box):
         self.assertFalse(ok); self.assertIn('walk_max', out)
 
     def test_optional_dir_over_limit_is_not_put_back(self):
-        extra = self.run_dir = self.e.home / 'toolchain'; self.big(extra); self.patch_private()
+        extra = self.run_dir = self.e.home / 'toolchain'; self.big(extra, 400); self.patch_private()
         self.t.T['sandbox_read'] = [str(extra)]
-        self.t.WALK_MAX = 39
+        self.t.WALK_MAX = 300   # 仓库的 .git 也算在内，要比它大，只让 extra 超
         r = self.box(f'cat {extra}/zz-private/k; ls {extra} 2>&1 | head -2')
         self.assertNotIn('LEAK-4', r.stdout); self.assertIn('沙箱不放回', self.e.decisions() if isinstance(self.e.decisions(), str) else json.dumps(self.e.decisions(), ensure_ascii=False))
 
