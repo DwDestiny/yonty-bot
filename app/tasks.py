@@ -1149,8 +1149,9 @@ def make_worktree(t):
 
 # 定时运行的工作树是独立的 clone --shared，它的 .git 归沙箱里的人写：配置能藏要执行的命令（fsmonitor、filter、sshCommand），
 # objects、refs 能换成指向别的仓库的软链接。所以沙箱外一条 git 都不对它跑：看改动在沙箱里看；把分支拉回主仓库时，
-# 对面的 upload-pack 也在沙箱里跑，它读得到什么、执行什么都出不了沙箱。
-GIT_SAFE = ["-c", "core.fsmonitor=", "-c", "core.sshCommand=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always"]
+# 对面的 upload-pack 也在沙箱里跑，它读得到什么、执行什么都出不了沙箱。fetch 本身再关掉 fsmonitor、钩子和 file 以外的协议。
+GIT_SAFE = ["-c", "core.fsmonitor=", "-c", "core.hooksPath=/dev/null", "-c", "core.sshCommand=false",
+            "-c", "protocol.allow=never", "-c", "protocol.file.allow=always"]
 
 def clone_git(t, *a):
     """在定时运行的工作树里跑 git：在沙箱里跑（读到的可能被改过，只当参考）。没有沙箱返回空。"""

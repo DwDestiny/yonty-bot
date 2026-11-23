@@ -75,7 +75,8 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 ### 设备（hooks/device_guard.py）
 
 - 调用设备的命令用正则匹配（`devices[].match`），锚定命令开头。复合命令按 `&&`、`;`、`|` 和 `env` 前缀拆段，逐段查。
-- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量，再去掉引号和反斜杠查：带 `claude`、`anthropic` 字样的（含 `claude-code`、`@anthropic-ai/…`）一律拦；给设备的命令段里有 `$变量`、`$(…)`、反引号、`<(…)` 的，看不出最终跑什么，也一律拦。正常命令里碰巧带这些的会被误拦，改写成不带变量的。
+- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量，再去掉引号和反斜杠查：带 `claude`、`anthropic` 字样的（含 `claude-code`、`@anthropic-ai/…`）一律拦；变量和命令替换只在算不出结果时才拦：同一条命令里用字面值赋过的变量、`for` 的字面列表会代进去再查（每个可能的值和空值都查一遍）；`$HOME`、`$USER`、`$LOGNAME`、`$HOSTNAME`、`$?`、`$$`、`$#`、`$!`、算术，以及 `date`、`whoami`、`hostname`、`id -u`、`uname`、`uuidgen`、`nproc`、`mktemp`、`seq` 这几个的替换放行。
+- 设备命令还会误拦的：没在同一条命令里赋值的变量（`$CMD`）、`$1`/`$@`（含 `awk '{print $2}'`）、`${x:-…}` 这类展开、别的命令替换（`$(cat f)`、`$(git …)`）、`$'…'`、`<(…)`、`read`/`+=`/`printf -v` 赋的变量、通配符的 `for`、同一条命令里又 `source`、`eval`、定义函数、改 `PATH` 的，以及参数里有 claude、anthropic 字样的（比如同名文件）。改成把值直接写出来。通配符和花括号拼出的程序名（`cla?de`）钩子不查，靠包装脚本。
 - 设备的 MCP 工具按 `devices[].mcp`（MCP 服务器名）认，参数里带 `claude` 或 claude.ai 的拦。
 - 钩子只看得到命令文字，挡不住写脚本再执行。设备上要装 `scripts/device-wrapper.sh` 做主防线：设成 SSH 的 `command=` 或设备上远程命令的入口，它拒绝以 `claude` 名义运行、拒绝命令或参数里带 `claude`、claude.ai 的（退出码 126），其余照常执行。
 - 身份：主人私聊会话短时可用（一轮 10 次、3 分钟）；主人派的任务独占租约；同事来源一律拦；项目经理不用设备。

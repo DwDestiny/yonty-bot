@@ -63,6 +63,31 @@ class DeviceRedline2Test(unittest.TestCase):
             self.assertEqual(self.g(cmd), 2, cmd)
         self.assertEqual(self.g('devcli list'), 0)
 
+    def test_normal_dynamic_commands_pass(self):
+        e, out = self.e, []
+        for cmd in ('X=3; devcli click $X', 'X=3 Y="4 5"; devcli click --x ${X} --y "$Y"', 'for i in 1 2 3; do devcli click $i; done',
+                    'devcli shot "$HOME/a.png"', 'devcli shot shot-$(date +%Y%m%d-%H%M%S).png', 'T=$(date +%s); devcli shot $T.png',
+                    'devcli type `date +%F`', "devcli run 'echo $HOME'", 'devcli ls; echo $?', 'devcli wait $((2 * 30))', "devcli grep 'foo$' x.txt",
+                    'echo $(cat notes.txt) && devcli list', 'A=$(git rev-parse HEAD); echo $A; devcli list',
+                    'set -e; X=3; devcli click $X', 'APP=Notes; if true; then devcli open $APP; fi'):
+            e.t._me(); r = e.bash('device_guard.py', cmd, FCB_OWNER=1, FCB_PRIVATE=1, FCB_CHAT_ID='oc_p')
+            for f in (e.inst / 'state' / 'devices').glob('*.json'): f.unlink()   # 聊天一轮最多 10 次，别让次数影响
+            if r.returncode: out.append((cmd, r.stderr))
+        self.assertEqual(out, [])
+
+    def test_undeterminable_commands_still_blocked(self):
+        out = [c for c in (
+            'devcli $(printf cla)ude', 'devcli `printf cla`ude', 'X=cla; devcli ${X}ude', 'X=ude; devcli cla$X; X=ok', 'X=cla; X+=ude; devcli $X',
+            'A=cla B=ude; devcli $A$B', 'devcli cl${Z}aude', "X=zz; devcli 'cl${X}aude'", 'devcli cl${HOSTNAME}aude', 'devcli cl$(uuidgen)aude',
+            'devcli cl$@aude', 'devcli $1', 'devcli ${x:-cla}ude', "devcli $'\\x63laude'", 'devcli cla\\\nude', 'devcli run "$CMD"', 'devcli run "$(cat x.sh)"',
+            'devcli sh -c "$(printf x)"', 'read X < f; devcli $X', 'printf -v X %s%s cla ude; devcli $X', 'for X in *; do devcli run $X; done',
+            'for X in cla; do devcli run ${X}ude; done', 'whoami() { printf cla; }; devcli $(whoami)ude', 'TZ=cla; devcli $(date +%Z)ude',
+            'devcli $(date +cla)ude', 'source f; devcli $HOME', 'devcli run <(printf x)', 'D=devcli; $D run $(printf cla)ude; D=ls',
+            'if true; then devcli npx @anthropic-ai/x; fi', 'for i in 1; do devcli cl""aude; done', 'N=@anth; devcli npx ${N}ropic-ai/x',
+            'U=https://cla; devcli open ${U}ude.ai', 'X=ok; printf -v "X" cla; devcli ${X}ude', 'X=; : ${X:=cla}; devcli ${X}ude',
+            'X=ok; X[0]=cla; devcli ${X}ude', 'X=ok; r""ead X < f; devcli $X', 'X=ok; . ./f; devcli $X', 'bash -c \'devcli $1ude\' _ cla') if self.g(c) != 2]
+        self.assertEqual(out, [], '这些红线绕法必须仍然拦住')
+
     def wrapper(self, cmd, argv0=None, args=()):
         w = Path(__file__).resolve().parents[1] / 'scripts' / 'device-wrapper.sh'
         fake = self.e.base / 'devbin'; fake.mkdir(exist_ok=True)

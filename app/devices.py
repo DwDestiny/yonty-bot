@@ -6,15 +6,23 @@ Input:  实例 config.json 的 devices：[{"name", "match"（调用命令的正�
 Output: check() 给 hooks/device_guard.py 用；租约文件 state/devices/<名字>.json（存在即被占）；tick() 释放过期租约
 Pos:    钩子按文件路径 import 本模块；bridge 每拍调 tick()，聊天一轮结束调 release_holder()。设备侧包装脚本是红线的主防线，这里是第二道
 """
-import json, os, re, shlex, subprocess, time
+import itertools, json, os, re, shlex, subprocess, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "state", "devices")
 CHAT_MAX_CALLS, CHAT_MAX_S, IDLE_CAP_S = 10, 180, 7200
 # 运行 claude、npx @anthropic-ai/claude-code、node …/claude-code/cli.js、打开 claude.ai 都算：设备命令里出现 claude 或 anthropic 字样就拦
 REDLINE = re.compile(r"claude|anthropic", re.I)
-DYNAMIC = re.compile(r"\$\(|`|\$\{?[A-Za-z_]|<\(")   # 变量展开、命令替换：最终跑的是什么只有 shell 展开后才知道
-PREFIX = re.compile(r"^(?:(?:env|nohup|exec|time|command|sudo)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+|[({!]\s*)+")
+# 设备命令里的变量和命令替换：同一条命令里赋过的字面值、几个固定的环境变量、几个只会输出数字或固定文字的命令算得出来，放行；
+# 别的算不出最终在设备上跑的是什么，拦（剩下 DYNAMIC 匹配得到的就是算不出的）
+SAFE_VAR = re.compile(r"\$(?:\{(HOME|USER|LOGNAME|HOSTNAME)\}|(HOME|USER|LOGNAME|HOSTNAME)(?!\w)|[?$#!])")
+SAFE_SUB = re.compile(r"(?:\$\(|`)\s*(?:date(?: -u)?(?: [\"']?\+(?:%[-_0^#]?[A-Ya-z%]|[-:_./ T0-9])+[\"']?)?|whoami|hostname|id -u|uname(?: -[smr])?"
+                      r"|uuidgen|nproc|mktemp(?: -d)?|seq(?: \d+){1,3})\s*(?:\)|`)|\$\(\([\d\s+*/%-]+\)\)")
+SAFE_REDEF = re.compile(r"(?:^|[\s;&|({])(?:alias|source|function|eval|set(?!\s+[-+][a-z]+(?:\s+pipefail)?[ \t]*(?:[;&\n]|$))|enable|hash|trap|read|mapfile|readarray|getopts|typeset|declare|\.)\s|\(\s*\)|\bPATH=|\bprintf\s+-v")
+DYNAMIC = re.compile(r"\$[({A-Za-z_0-9@*-]|`|[<>]\(")
+FOR = re.compile(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*)")
+VARIANTS = 64
+PREFIX = re.compile(r"^(?:(?:do|then|else|elif|if|while|until)\s+|(?:env|nohup|exec|time|command|sudo)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+|[({!]\s*)+")
 
 
 def config():
@@ -46,15 +54,75 @@ def segments(cmd):
 
 
 WRAP = re.compile(r"^(?:(?:ba|z|da|k)?sh|env\s+(?:ba|z|da)?sh)\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s+(.+)$|^eval\s+(.+)$", re.S)
-ASSIGN = re.compile(r"(?:^|[;&|\s(])(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|[^\s;&|]*)")
+ASSIGN = re.compile(r"(?:^|[;&|\s({\"'])(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=((?:\$\([^()]*\)|`[^`]*`|\"[^\"]*\"|'[^']*'|[^\s;&|\"'`])*)")
 INDIRECT = re.compile(r"^(?:\$|`)")
 
 
 def expand(cmd, depth=0):
-    """把命令展开成要检查的几段：先代入同一条命令里赋过值的变量（D=devcli; $D …），再拆开 sh -c '…'、bash -c、eval 包的那一层。"""
-    vs = {k: v.strip("\"'") for k, v in ASSIGN.findall(cmd or "")}
-    for k, v in sorted(vs.items(), key=lambda kv: -len(kv[0])):
-        cmd = re.sub(r"\$\{" + k + r"\}|\$" + k + r"(?!\w)", lambda m: v, cmd)
+    """把命令展开成要检查的几段：先代入同一条命令里赋过值的变量（D=devcli; $D …），再拆开 sh -c '…'、bash -c、eval 包的那一层。
+    一个变量有几个可能的值（先后赋值、for 列表、在设备那头没这个变量所以是空），每种都展开一遍。"""
+    out = []
+    for c in variants((cmd or "").replace("\\\n", "")): out += _expand(c, depth)
+    return list(dict.fromkeys(out))
+
+
+def values(cmd):
+    """同一条命令里给得出字面值的变量：{名字: [可能的值]}。还用别的办法赋值（read、+=、printf -v、for 通配符）的不算，留着当算不出。"""
+    vs, n = {}, {}
+    for k, v in ASSIGN.findall(cmd): vs.setdefault(k, []).append(v.strip("\"'")); n[k] = n.get(k, 0) + 1
+    for k, ws in FOR.findall(cmd):
+        n[k] = n.get(k, 0) + 1
+        vs.setdefault(k, []).extend(["$_"] if re.search(r"[*?\[{]", ws) else [w.strip("\"'") for w in ws.split()])
+    redef = redefines(cmd)
+    for k in vs:   # 另有办法赋值：加一个“算不出”的值，用到它的设备命令就拦
+        if redef or re.search(r"\b" + k + r"(?:\+=|\[)|\{" + k + r":?=", cmd): vs[k].append("$_")
+    return vs
+
+
+def redefines(cmd):
+    """同一条命令里有没有能改掉变量、命令含义的写法（引号、反斜杠拆开的也算）。"""
+    return bool(SAFE_REDEF.search(re.sub(r"[\"'\\]", "", cmd)))
+
+
+def variants(cmd):
+    vs = values(cmd)
+    used = [k for k in vs if re.search(r"\$\{?" + k + r"(?!\w)", cmd)]
+    if not used: return [cmd]
+    opts = [list(dict.fromkeys(vs[k] + [""])) for k in used]
+    total = 1
+    for o in opts: total *= len(o)
+    if total > VARIANTS: opts = [["$_"] if len(o) > 2 else o for o in opts][:6]; used = used[:6]
+    out = []
+    for combo in itertools.product(*opts):
+        c = cmd
+        for _ in range(3):   # 值里可能还引用别的变量
+            for k, v in sorted(zip(used, combo), key=lambda kv: -len(kv[0])):
+                c = re.sub(r"\$\{" + k + r"\}|\$" + k + r"(?!\w)", lambda m: v, c)
+        out.append(c)
+    return out
+
+
+def unknown(s, cmd):
+    """设备命令段最终跑什么：返回 (去掉算得出的部分之后要查红线的几种文字, 还有没有算不出的)。"""
+    if not DYNAMIC.search(s) and not SAFE_VAR.search(s) and not ansi(s): return [s], False
+    if redefines(cmd): return [s], True   # 同一条命令里能改掉“固定值”的含义
+    texts = [SAFE_VAR.sub(x, SAFE_SUB.sub(x, s)) for x in ("", "0")]   # 空：设备那头可能没有这个变量或命令
+    return texts, bool(DYNAMIC.search(texts[0])) or ansi(s)
+
+
+def ansi(s):
+    """有没有 $'…'（能用转义拼出任何文字）。单引号里的 $ 后面跟收尾的引号不算（grep 'x$'）。"""
+    q, i = None, 0
+    while i < len(s):
+        if q != "'" and s[i] == "\\": i += 2; continue
+        if q != "'" and s.startswith("$'", i): return True
+        if q: q = None if s[i] == q else q
+        elif s[i] in "'\"": q = s[i]
+        i += 1
+    return False
+
+
+def _expand(cmd, depth):
     out = []
     for s in segments(cmd):
         m = WRAP.match(s)
@@ -159,12 +227,14 @@ def check(cmd, env=None, now=None):
                    "要用设备就直接写设备命令，被拦了不要绕路。")
     if not hits: return 0, ""
     for d, s in hits:
-        if REDLINE.search(re.sub(r"[\"'\\]", "", s)):   # 引号、反斜杠拆开的（'cl''aude'、cl\aude）拼回去再查
+        texts, dyn = unknown(s, cmd)
+        bare = [re.sub(r"[\"'\\]", "", x) for x in [s, *texts] + ([cmd] if len(texts) > 1 else [])]   # 引号、反斜杠拆开的（'cl''aude'、cl\aude）拼回去再查
+        if any(REDLINE.search(x) for x in bare):
             return 2, (f"红线：任何设备上都不运行 claude、不打开或登录 claude.ai（{d['name']}）。"
                        "Claude 的登录态只在运行机上，主人来源也一样，被拦了不要绕路。")
-        if DYNAMIC.search(s):
-            return 2, (f"红线：设备命令里不能有变量展开或命令替换（{d['name']}），分不清最终在设备上跑的是什么。"
-                       "把要传的值直接写出来，被拦了不要绕路。")
+        if dyn:
+            return 2, (f"红线：设备命令里有算不出结果的变量或命令替换（{d['name']}），分不清最终在设备上跑的是什么。"
+                       "把值直接写出来，或在同一条命令里用 X=值 赋好再用，被拦了不要绕路。")
     holder, label, chat, allow, err = who(env)
     if err: return 2, err
     now = now or time.time()
