@@ -371,7 +371,7 @@ class LegacyMigrationTest(NumberingBase):
             d = e.cmd(f'/task {ref}')
             self.assertIn(f'旧任务{old}', d, f'{ref} 应该是旧 #{old}')
             self.assertNoBare(d)
-        self.assertIn('bot/5-1120', e.cmd('/task a#3'), '旧分支名不改')
+        self.assertIn('bot/5-1120', e.cmd('/task info a#3'), '旧分支名不改')
         x = e.by_title('旧任务5')
         self.assertEqual(x['branch'], 'bot/5-1120')
         self.assertEqual(x['worktree'], str(e.base / 'tasks' / 'x' / '5'), '旧工作树路径不改')
