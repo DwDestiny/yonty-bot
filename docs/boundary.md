@@ -92,7 +92,7 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 
 ### 不可逆闸门（hooks/irreversible_gate.py）
 
-命令不可逆、而任务还有没取的追加指令时，闸门拦下，先取指令再动手。内置的判断按参数解析（拆 `;`、`&&`、管道、`sh -c`、`eval`，跳过 `env`、`sudo`、`git -C` 这类前缀和全局选项）：`git push` 推标签、`--mirror`、`--all`、推到版本号或发布分支（stable、release、release/*、production、prod）；`gh release` 的改动类子命令；`gh api` 对 `releases`、`git/refs`、`git/tags` 发非 GET 请求（方法不分大小写）；npm、pnpm、yarn、bun、cargo、poetry、flit、hatch、twine、gem 发包。命令拆不开时按文字扫。`config.json` 的 `irreversible` 里的正则照样合并进来。
+命令不可逆、而任务还有没取的追加指令时，闸门拦下，先取指令再动手。内置的判断按参数解析（拆 `;`、`&&`、管道、`sh -c`、`eval`，跳过 `env`、`sudo`、`git -C` 这类前缀和全局选项；前面套着 `timeout`、`ssh` 之类的也认；`echo`、`grep` 这类只是打印、搜索的不算）：`git push` 推标签、`--mirror`、`--all`、推到版本号或发布分支（stable、release、release/*、production、prod）；`gh release` 的改动类子命令；`gh api` 对 `releases`、`git/refs`、`git/tags` 发非 GET 请求（方法不分大小写）；npm、pnpm、yarn、bun、cargo、poetry、flit、hatch、twine、gem 发包。命令拆不开时按文字扫。`config.json` 的 `irreversible` 里的正则照样合并进来。
 
 ### 沙箱实测（2026-11-22）
 

@@ -117,7 +117,10 @@ class IrreversibleParseTest(unittest.TestCase):
                   'gh api -X post repos/o/r/releases', 'gh api --method=patch repos/o/r/releases/1', 'pnpm publish', 'pnpm -r publish',
                   'yarn npm publish', 'git -c user.name=x push origin v2.0.0', "sh -c 'git push origin --tags'", 'cd x && npm publish --tag beta',
                   'git push origin :refs/tags/v1', 'gh release delete v1', 'gh api repos/o/r/git/refs -f ref=refs/tags/v1 -f sha=abc',
-                  'git push "origin" --follow-tags', 'cargo publish', 'twine upload dist/*'):
+                  'git push "origin" --follow-tags', 'cargo publish', 'twine upload dist/*',
+                  # 前面套着别的：旧的按文字扫得到，按参数解析后也要认
+                  'timeout 60 git push --tags', 'if true; then git push origin v1.2.3; fi', 'ssh host npm publish', "ssh host 'npm publish'",
+                  "timeout 5 bash -c 'git push --tags'", 'x=$(gh release create v1)'):
             self.assertEqual(gate(c), 2, c)
         for c in ('git push origin main', 'git push -u origin HEAD:bot/yonty-bot-4-1122', 'gh api repos/o/r/releases',
                   'git push origin feat/v2-ui', 'gh pr create', 'gh api -X GET repos/o/r/releases -f per_page=1', 'git log --tags',

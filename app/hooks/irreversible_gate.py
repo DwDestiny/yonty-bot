@@ -16,6 +16,7 @@ RELEASE = re.compile(r"^(stable|release|production|prod)$|^release/")
 GIT_ARG = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env", "--attr-source"}
 PREFIX = {"env", "sudo", "doas", "command", "builtin", "nohup", "exec", "time", "nice", "xargs"}
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh"}
+TEXT_ONLY = {"echo", "printf", "grep", "rg", "egrep", "fgrep"}
 
 
 def commands(s, depth=0):
@@ -107,8 +108,15 @@ def is_irreversible(cmd, extra=()):
     if cs is None:
         hit = any(re.search(p, cmd) for p in RAW)
     else:
+        # 命令前面可能还套着别的（timeout 60 git push、then git push、ssh 主机 npm publish）：从每个词开始都看一遍；只是打印、搜索的不算
+        # 参数里带空格的（ssh 主机 '…'、timeout 5 bash -c '…'）当命令再拆一层；git、gh 自己的参数是说明文字，不拆
+        for c in list(cs):
+            if os.path.basename(c[0]) in TEXT_ONLY | {"git", "gh"}: continue
+            for a in c[1:]:
+                if re.search(r"\s", a): cs += commands(a, 1) or []
+        subs = [c[k:] for c in cs for k in range(1 if os.path.basename(c[0]) in TEXT_ONLY else len(c))]
         hit = any((os.path.basename(c[0]) == "git" and git_push(c)) or (os.path.basename(c[0]) == "gh" and gh_write(c)) or publish(c)
-                  for c in cs)
+                  for c in subs)
     for p in extra:
         try: hit = hit or bool(re.search(p, cmd))
         except re.error: pass
