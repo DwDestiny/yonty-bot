@@ -165,6 +165,9 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
 
     if tg["to"] == "主人" and kind not in OWNER_CATS:
         reroute({"动作": "派活人", "进展": "聊天"}.get(kind, "主控"), f"发给主人的只收授权、花钱、方向，{kind}不归主人")
+    if tg["to"] == "主人" and sender["type"] == "pm" and (extra or {}).get("voice"):
+        text, kind = f"（要主人定：{kind}）\n{text}", "问题"
+        reroute("主控", "项目经理的话由主控跟主人说")
     if tg["to"] == "聊天" and kind != "进展":
         reroute(upper(sender), f"聊天只收进展，{kind}交给上一级")
     if tg["to"] == "主控" and kind == "完成" and sender["type"] in ("task", "schedule") and sender.get("project"):
@@ -191,7 +194,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
             reroute("项目经理", f"{tk.ref(t2)} 已经结束，交给它那个项目的项目经理", to="项目经理", project=t2.get("project"))
     full = text
     lim = c["owner_max_chars"] if tg["to"] in ("主人", "聊天", "主控") else c["other_max_chars"]
-    if (extra or {}).get("im"): lim = len(text)   # 人的答复不截，全文送到
+    if (extra or {}).get("im") or (extra or {}).get("voice"): lim = len(text)   # 人的答复不截，全文送到
     asker = tk.load(sender["task"]) if sender.get("task") else None
     dm = tg["to"] == "主人" and asker and not asker["requester"].get("owner")   # 同事派的任务找主人：发到主人私聊，主人别处看不到全文，不按 300 字截
     if dm: lim = max(lim, REQ_MAX)

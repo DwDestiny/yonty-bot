@@ -75,6 +75,7 @@ class Env:
         self.base, self.inst, self.work = base, base / 'inst', base / 'work'
         self.inst.mkdir(); self.work.mkdir()
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
+        cfg['team'] = {'strict': False}
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT, workdir=str(self.work),
                    tasks={'enabled': True, 'root': str(base / 'tasks'), 'max_running': 1, 'approval_hours': 24,
                           'heartbeat_min': 30})

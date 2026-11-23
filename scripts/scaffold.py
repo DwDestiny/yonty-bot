@@ -45,7 +45,7 @@ if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
     sys.exit("workdir 不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
 
 # 1. 代码和钩子：总是用模板覆盖，保证和 skill 同版本
-for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py"):
+for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py"):
     shutil.copy(os.path.join(T, f), os.path.join(INST, f))
 os.makedirs(os.path.join(INST, "hooks", "git"), exist_ok=True)
 for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
@@ -70,11 +70,24 @@ if WECOM_ON:
         r = subprocess.run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=INST, capture_output=True, text=True)
         print("npm install:", "成功" if r.returncode == 0 else "失败\n" + r.stdout[-800:] + r.stderr[-800:])
 
-# 1.5 角色模板：缺哪个补哪个，已有的不动（主人会按项目改）
+def role_stock(f):
+    """实例里的角色文件是不是某一版模板原样（没被主人改过）：跟仓库历史里的每一版比。"""
+    try: mine = open(os.path.join(INST, "roles", f), encoding="utf-8").read()
+    except OSError: return False
+    repo, rel = os.path.dirname(T), os.path.join(os.path.basename(T), "roles", f)
+    r = subprocess.run(["git", "-C", repo, "log", "--format=%H", "--", rel], capture_output=True, text=True)
+    for c in r.stdout.split():
+        if subprocess.run(["git", "-C", repo, "show", f"{c}:{rel}"], capture_output=True, text=True).stdout == mine: return True
+    return False
+
+# 1.5 角色模板：缺哪个补哪个；没改过的跟着模板更新；主人改过的不动，列出来
 os.makedirs(os.path.join(INST, "roles"), exist_ok=True)
 for f in sorted(os.listdir(os.path.join(T, "roles"))):
     if f.endswith(".md") and not os.path.exists(os.path.join(INST, "roles", f)):
         shutil.copy(os.path.join(T, "roles", f), os.path.join(INST, "roles", f))
+    elif f.endswith(".md") and open(os.path.join(T, "roles", f), encoding="utf-8").read() != open(os.path.join(INST, "roles", f), encoding="utf-8").read():
+        if role_stock(f): shutil.copy(os.path.join(T, "roles", f), os.path.join(INST, "roles", f)); print("角色模板更新：", f)
+        else: print("角色模板改了，实例的这份你改过，没动，请手工合：", f)
 
 # 2. 守则：没有或带 --rules 就按模板写；已有就把模板的改动逐处合进去，实例自己改过的那一处不动并列出来
 rules = os.path.join(INST, CFG.get("rules_file", "rules.md"))
@@ -169,7 +182,7 @@ else:
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
-INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
+INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
                "package.json", "package-lock.json", "node_modules/**", "state/**", "logs/**", "inbox/**", "AGENTS.md", "CLAUDE.md",
                "*.service", "*.plist"]
 deny = [f"Read({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if p.startswith(("~", "/")) and "(" not in p and "\\" not in p]

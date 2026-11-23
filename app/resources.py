@@ -69,15 +69,20 @@ def parse_mem(v):
     return int(float(m.group(1)) * mult), (w.group(1).strip()[:120] if w else "")
 
 
+def small(t):
+    """方案里的小任务（不含收口）：只跟同类比历史，不被整仓编译的峰值拖成串行。"""
+    return bool(t.get("plan")) and not t.get("closing")
+
 def estimate(t, history, c):
     """max(派活方的估计, 同仓库同角色的历史峰值)；都没有时构建类角色按 4G、其余 1G。返回 (字节, 依据)。"""
     est, why = t.get("mem_est") or 0, t.get("mem_why") or ""
     hist = max([h.get("mem_peak") or 0 for h in history if h.get("id") != t.get("id") and h.get("repo") == t.get("repo")
-                and h.get("role") == t.get("role")] or [0])
+                and h.get("role") == t.get("role") and small(h) == small(t)] or [0])
     if hist > est:
         return hist, f"同仓库同角色历史峰值 {gb(hist)}" + (f"，高于派活写的 {gb(est)}" if est else "")
     if est:
         return est, f"派活方估计 {gb(est)}" + (f"：{why}" if why else "")
+    if small(t): return c.get("default_small_gb", 2) * GB, f"方案里的小任务只跑相关检查，没有历史按 {c.get('default_small_gb', 2)}G"
     build = not t.get("role") or t.get("role") in c["build_roles"]
     d = c["default_build_gb"] if build else c["default_light_gb"]
     return d * GB, f"没有历史也没写估计，{'构建类' if build else '只读和写文档类'}按 {d}G"
