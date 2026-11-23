@@ -917,15 +917,16 @@ def is_private(p, rules=None):
     return _under(p, lits) or any(x.search(p) or x.search(p + "/") for x in rx)
 
 def link_hops(p, hops=40):
-    """软链接一环一环指到哪（每一环的路径和最后的真实路径）。绕圈的、断的走到哪算哪。"""
-    out = []
+    """软链接一环一环指到哪：每一环写的路径、真正走到的路径，最后一个是真实路径。绕圈的、断的走到哪算哪。
+    “链接目录加 ..”要先走进链接指的目录再往上，不能按字面消掉 ..；真实路径只从最开始那个链接算。"""
+    out, end = [], os.path.realpath(p)
     while len(out) < hops:
-        try: to = os.readlink(p)
+        try: to = os.path.join(os.path.dirname(p), os.readlink(p)).rstrip("/") or "/"
         except OSError: break
-        p = os.path.normpath(os.path.join(os.path.dirname(p), to)); out.append(p)
-        if not os.path.islink(p): p = os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))   # 中间的目录也可能是链接
-        if out[-1] != p: out.append(p)
-    return list(dict.fromkeys(out + [os.path.realpath(p)]))
+        d, name = os.path.split(to)
+        p = os.path.realpath(to) if name in ("", ".", "..") else os.path.join(os.path.realpath(d), name)
+        out += [os.path.normpath(to), p]
+    return [h for h in dict.fromkeys(out) if h != end] + [end]
 
 def named_private(p, rules=None):
     """按写法（不解析软链接）看是不是私密的：自己和每一级上级里有软链接时，链接的名字、链上每一环也算。
