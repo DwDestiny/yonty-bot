@@ -2,8 +2,8 @@
 """动作（方案第 8 节）：实例登记好的脚本，按类别定自己办还是找主人批。
 
 Input:  实例 actions/<名字>.json：{"script", "params": {参数名: 正则}, "category": 修补|授权|花钱|方向, "coworker_ok", "undo", "why"}；
-        tk 是调用方加载的 tasks 模块；调用方身份由 tk.whoami() 认（cgroup 或 bridge 写的授权），范围取任务记录
-Output: 修补类直接执行并记决策日志；其余写审批单 state/actions.json（编号 短名#N.aK），经投递发给主人
+        tk 是调用方加载的 tasks 模块；调用方由 tk.whoami() 认，只用来署名和查范围，不带主人权限
+Output: request() 给命令行、发件箱、[服务命令] 共用：coworker_ok 的修补类直接执行并记决策日志；其余写审批单 state/actions.json（编号 短名#N.aK），经投递发给主人
 Pos:    tasks.py act 调 cli()；bridge 的 /approve 短名#N.aK 调 approve()。以 _ 开头的文件是示例，不算登记
 """
 import json, os, re, subprocess, sys, time
@@ -37,7 +37,7 @@ def _load(tk):
 
 def _save(tk, xs):
     os.makedirs(os.path.dirname(_sp(tk)), exist_ok=True)
-    with open(_sp(tk), "w") as f: json.dump(xs[-500:], f, ensure_ascii=False)
+    tk.fsio.write_json(_sp(tk), xs[-500:])
 
 
 def execute(tk, a, params):
@@ -49,44 +49,58 @@ def execute(tk, a, params):
         return 1, str(e)
 
 
-def cli(tk, argv):
-    if not argv: sys.exit("用法：tasks.py act <动作名> [--参数 值 ...]；动作登记在实例的 actions/ 目录")
-    name, rest = argv[0], argv[1:]
-    a = get(tk, name)
-    if not a: sys.exit(f"没有这个动作：{name}。登记过的：{'、'.join(names(tk)) or '无'}")
-    params, spec = {}, a.get("params") or {}
+def parse_params(rest):
+    """--名字 值 … -> {名字: 值}。写错抛 ValueError。"""
+    rest, out = list(rest), {}
     while rest:
         k = rest.pop(0)
-        if not k.startswith("--") or not rest: sys.exit(f"参数写成 --名字 值：{k}")
-        k, v = k[2:], rest.pop(0)
-        if k not in spec or not re.fullmatch(spec[k], v): sys.exit(f"动作 {name} 的参数 {k} 不合规（要匹配 {spec.get(k, '没有这个参数')}）")
-        params[k] = v
-    sender, trusted = tk.whoami()   # 身份按 cgroup 或 bridge 写的授权认，不信 FCB_OWNER、FCB_SCOPE（Claude 自己能改环境变量）
-    if not sender: sys.exit("认不出调用方：动作只在任务或聊天会话里用。")
-    t = tk.load(sender["task"]) if sender.get("task") else None
-    scope = (t or {}).get("scope") or ""
-    if scope:
-        try:
-            with open(scope) as f: allow = json.load(f).get("actions") or []
-        except Exception:
-            allow = []
-        if name not in allow: sys.exit(f"动作 {name} 不在这个定时任务的权限范围里")
+        if not k.startswith("--") or not rest: raise ValueError(f"参数写成 --名字 值：{k}")
+        out[k[2:]] = rest.pop(0)
+    return out
+
+
+def request(tk, name, params, sender, scope=None, direct=False):
+    """提交一个动作，返回 (办成没有, 说明)。不合规抛 ValueError。scope 不是 None 就是定时任务的范围，只能做里面列的。
+    修补类直接跑只有两种：登记了 coworker_ok；direct（主人私聊的 [服务命令]，由 bridge 调）。其余写审批单问主人。
+    命令行来的 sender 一律不带主人身份，不会走 direct。"""
+    a = get(tk, name)
+    if not a: raise ValueError(f"没有这个动作：{name}。登记过的：{'、'.join(names(tk)) or '无'}")
+    spec = a.get("params") or {}
+    for k, v in params.items():
+        if k not in spec or not re.fullmatch(spec[k], v): raise ValueError(f"动作 {name} 的参数 {k} 不合规（要匹配 {spec.get(k, '没有这个参数')}）")
+    if scope is not None and name not in scope: raise ValueError(f"动作 {name} 不在这个定时任务的权限范围里")
     cat = a.get("category") or "授权"
-    if cat == "修补" and ((trusted and sender.get("owner") and not scope) or a.get("coworker_ok")):
+    if cat == "修补" and (a.get("coworker_ok") or (direct and scope is None)):
         rc, out = execute(tk, a, params)
         tk.decide("动作", action=name, by=sender["ref"], category=cat, params=params, rc=rc)
-        print(f"动作 {name} 跑完了（退出码 {rc}）" + (f"，撤销用 {a['undo']}" if a.get("undo") else "") + f"：\n{out}")
-        sys.exit(0 if rc == 0 else 1)
-    xs = _load(tk)
-    aid = f"{sender['ref']}.a{1 + len([x for x in xs if x['by'] == sender['ref']])}"
-    xs.append({"id": aid, "name": name, "params": params, "by": sender["ref"], "task": sender.get("task"), "status": "pending", "ts": time.time()})
-    _save(tk, xs)
+        return rc == 0, f"动作 {name} 跑完了（退出码 {rc}）" + (f"，撤销用 {a['undo']}" if a.get("undo") else "") + f"：\n{out}"
+    with tk._Lock(_sp(tk) + ".lock"):
+        xs = _load(tk)
+        aid = f"{sender['ref']}.a{1 + len([x for x in xs if x['by'] == sender['ref']])}"
+        xs.append({"id": aid, "name": name, "params": params, "by": sender["ref"], "task": sender.get("task"), "status": "pending", "ts": time.time()})
+        _save(tk, xs)
     text = f"要做动作 {name}（{cat}）：{json.dumps(params, ensure_ascii=False)}。{a.get('why', '')}回 /approve {aid} 批准，/reject {aid} 不批。"
-    print(f"已提交审批 {aid}。" + tk.dl.submit(tk, sender, "主人", cat if cat in OWNER_CATS else "授权", text))
+    return True, f"已提交审批 {aid}。" + tk.dl.submit(tk, dict(sender, owner=False), "主人", cat if cat in OWNER_CATS else "授权", text)
+
+
+def cli(tk, argv):
+    if not argv: sys.exit("用法：tasks.py act <动作名> [--参数 值 ...]；动作登记在实例的 actions/ 目录")
+    try: params = parse_params(argv[1:])
+    except ValueError as e: sys.exit(str(e))
+    t = tk.box_task()
+    if t:   # 定时运行在沙箱里：请求进发件箱，服务在箱外按范围校验、执行或写审批单，记下了才算数
+        print(tk.box_ask(t, {"op": "act", "name": argv[0], "params": params})); return
+    sender = tk.whoami()   # 身份只用来署名和查范围，不带主人权限
+    if not sender: sys.exit("认不出调用方：动作只在任务或聊天会话里用。")
+    t = tk.load(sender["task"]) if sender.get("task") else None
+    try: ok, msg = request(tk, argv[0], params, sender, (tk._scope(t).get("actions") or []) if t and t.get("scope") else None)
+    except ValueError as e: sys.exit(str(e))
+    print(msg)
+    sys.exit(0 if ok else 1)
 
 
 def approve(tk, aid, yes=True):
-    xs = _load(tk)
+    with tk._Lock(_sp(tk) + ".lock"): xs = _load(tk)
     x = next((x for x in xs if x["id"] == aid), None)
     if not x or x["status"] != "pending": return f"没有待批的动作 {aid}。"
     a = get(tk, x["name"])
@@ -97,7 +111,9 @@ def approve(tk, aid, yes=True):
         msg = f"主人批了动作 {x['name']}，服务已执行（退出码 {rc}）：{out[-500:]}"
     else:
         x["status"], msg = "rejected", f"主人没批动作 {x['name']}，别做了，按不做的路子接着干。"
-    _save(tk, xs)
+    with tk._Lock(_sp(tk) + ".lock"):   # 执行要一会儿，这期间可能又提交了新的审批：重读再改这一条
+        xs = [x if y["id"] == aid else y for y in _load(tk)]
+        _save(tk, xs)
     tk.decide("动作审批", action=x["name"], id=aid, approved=yes)
     if x.get("task"): tk.inbox_add(x["task"], tk.OWNER_NAME, True, msg)
     return msg[:300]

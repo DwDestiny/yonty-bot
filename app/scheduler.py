@@ -7,13 +7,18 @@ Output: 定时任务的状态文件和范围文件；到点用 tk.create 建的�
 Pos:    bridge 解析 [定时]、每拍调 tick()、任务结束调 after_run()；用户级 systemd 定时器调 `scheduler.py watchdog`（不靠 bridge 活着）。
         探针用 tk.probe_box() 的 bwrap 沙箱跑，跟定时运行同一套读范围，环境里不带凭据
 """
-import copy, hashlib, json, os, re, shlex, shutil, subprocess, sys, time
+import copy, hashlib, importlib.util, json, os, re, shlex, shutil, subprocess, sys, time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "state", "schedules")
 UNIT = {"分钟": 60, "小时": 3600, "天": 86400}
+def _fsio():
+    spec = importlib.util.spec_from_file_location("fcb_fsio", os.path.join(ROOT, "fsio.py"))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m); return m
+
+fsio = _fsio()
 LABEL = {"active": "在跑", "proposed": "提议中（等主人批）", "paused": "暂停", "stopped": "停了", "done": "跑完了"}
 
 
@@ -107,9 +112,7 @@ def all_():
 
 
 def save(sc):
-    tmp = _p(sc["id"]) + ".tmp"
-    with open(tmp, "w") as f: json.dump(sc, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, _p(sc["id"]))
+    fsio.write_json(_p(sc["id"]), sc, 1)
 
 
 def _lk(tk): return tk._Lock(os.path.join(DIR, ".lock"))
@@ -175,7 +178,7 @@ def create(tk, f, creator):
         scope = {"schedule": ref, "read": reads, "tools": split(f.get("范围-工具")) or ["Read", "Grep", "Glob"],
                  "mcp": mcp, "devices": devs, "actions": acts, "to": to}
         os.makedirs(os.path.join(DIR, str(sid)), exist_ok=True)
-        with open(os.path.join(DIR, str(sid), "scope.json"), "w") as fh: json.dump(scope, fh, ensure_ascii=False, indent=1)
+        fsio.write_json(os.path.join(DIR, str(sid), "scope.json"), scope, 1)
         nxt = spec["at"] if spec["kind"] == "once" else next_time(spec, time.time(), cfg)
         sc = {"id": sid, "ref": ref, "project": proj, "name": f.get("名字") or f.get("标题") or "未命名", "repo": repo,
               "title": f.get("标题") or f.get("名字") or "定时任务", "brief": f.get("任务书", ""), "when": f.get("时间表"), "spec": spec,
@@ -424,7 +427,7 @@ def watchdog():
         subprocess.run(["lark-cli", "im", "+messages-send", "--as", "bot", "--user-id", cfg["owner_open_id"], "--text", msg],
                        capture_output=True, timeout=60)
         os.makedirs(os.path.dirname(st_p), exist_ok=True)
-        with open(st_p, "w") as f: json.dump({"alerted": down, "at": time.time()}, f)
+        fsio.write_json(st_p, {"alerted": down, "at": time.time()})
 
 
 if __name__ == "__main__":

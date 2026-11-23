@@ -28,15 +28,22 @@ def conf(cfg): return dict(DEFAULTS, **(cfg.get("delivery") or {}))
 
 def _mac(rec):
     body = json.dumps([rec["id"], rec["ts"], rec["from"], rec["to"], rec["kind"], rec.get("text"), rec.get("full"),
-                       rec.get("hop"), rec.get("need"), rec.get("about")],
+                       rec.get("hop"), rec.get("need"), rec.get("about"), rec.get("im")],
                       ensure_ascii=False, sort_keys=True)
     return hmac.new(KEY, body.encode(), hashlib.sha256).hexdigest()
+
+
+def signed(rec):
+    """这条记录是本进程（bridge）写的，没被改过，也不是送完又改回来的。"""
+    return bool(KEY and rec.get("sig") and rec["sig"] not in USED and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
 
 
 def vouched_owner(rec):
     """这条投递送的时候能不能带主人身份：发送方是主人，而且是 bridge 自己写的（签名对得上）。
     命令行、任务进程在 bridge 外写的，手写进 records.json 的，改过字的，送完又改回 new 的，bridge 重启前写的，一律不带。"""
-    return bool(KEY and rec["from"].get("owner") and rec.get("sig") and rec["sig"] not in USED and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
+    return bool(rec["from"].get("owner")) and signed(rec)
+
+
 def _dir(tk): return os.path.join(tk.ROOT, "state", "deliveries")
 def _file(tk): return os.path.join(_dir(tk), "records.json")
 def lock(tk): return tk._Lock(os.path.join(_dir(tk), ".lock"))
@@ -52,9 +59,7 @@ def load(tk):
 def save(tk, recs):
     os.makedirs(_dir(tk), exist_ok=True)
     keep = [r for r in recs if r["status"] in ("new", "queued", "handing", "open") or time.time() - r["ts"] < 7 * 86400][-2000:]
-    tmp = _file(tk) + ".tmp"
-    with open(tmp, "w") as f: json.dump(keep, f, ensure_ascii=False)
-    os.replace(tmp, _file(tk))
+    tk.fsio.write_json(_file(tk), keep)
 
 
 def origin_key(t):
@@ -173,6 +178,9 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
     need = (kind in NEED_REPLY) if need_reply is None else bool(need_reply)
     with lock(tk):
         recs = load(tk)
+        if (extra or {}).get("idem") and any(r.get("idem") == extra["idem"] for r in recs):   # 重送的那一轮、重放的发件箱行：已经投过
+            tk.decide("去重", sender=sender["ref"], category=kind, why=f"{extra['idem']} 已经投过")
+            return "这条已经送过，不再送。"
         if not need and not (extra or {}).get("auto"):   # 服务替项目经理补投的完成不去重：同一句结论可能是两次不同的失败
             if [r for r in recs if r["from"]["ref"] == sender["ref"] and r.get("full") == full and now - r["ts"] < c["dedup_min"] * 60]:
                 tk.decide("去重", sender=sender["ref"], category=kind, why=f"{c['dedup_min']} 分钟内送过一样的话")
@@ -268,9 +276,7 @@ def limits(tk):
 
 def limits_save(tk, st):
     os.makedirs(_dir(tk), exist_ok=True)
-    tmp = _lim(tk) + ".tmp"
-    with open(tmp, "w") as f: json.dump(st, f, ensure_ascii=False)
-    os.replace(tmp, _lim(tk))
+    tk.fsio.write_json(_lim(tk), st)
 
 
 def progress_key(tk, t):

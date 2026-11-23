@@ -60,13 +60,17 @@ class AuthTest(Base):
         os.environ['FCB_TASK_ID'] = str(b['id'])
         self.addCleanup(os.environ.pop, 'FCB_TASK_ID', None)
         self.t.update(a['id'], _force=True, turn=1)
-        self.t._cgroup = lambda: f"0::/user.slice/app.slice/{self.t.SLUG}-task-{a['id']}-1.service\n"
-        s, trusted = self.t.whoami()
-        self.assertTrue(trusted); self.assertEqual(s['task'], a['id'])
-        self.t._cgroup = lambda: f"0::/user.slice/app.slice/{self.t.SLUG}-task-{a['id']}-7.service\n"
-        self.assertEqual(self.t.whoami(), (None, True), '轮次对不上的单元（冒名）不认')
-        self.t._cgroup = lambda: f"0::/user.slice/app.slice/{self.t.SLUG}.service\n"
-        self.assertEqual(self.t.whoami(), (None, True), '在服务单元里却没有授权：不按环境变量认')
+        base = '/user.slice/user-1000.slice/user@1000.service/app.slice/'
+        u = f"{self.t.SLUG}-task-{a['id']}-1.service"
+        self.t.update(a['id'], invocation='abc')
+        self.t._cgroup = lambda pid='self': f"0::{base}{u}\n"
+        self.t.unit_show = lambda unit: {'MainPID': str(os.getpid()), 'InvocationID': 'abc', 'ControlGroup': base + u}
+        s = self.t.whoami()
+        self.assertEqual((s['task'], s['owner']), (a['id'], False), '认得出是谁，但不带主人')
+        self.t._cgroup = lambda pid='self': f"0::{base}{self.t.SLUG}-task-{a['id']}-7.service\n"
+        self.assertIsNone(self.t.whoami(), '轮次对不上的单元（冒名）不认')
+        self.t._cgroup = lambda pid='self': f"0::{base}{self.t.SLUG}.service\n"
+        self.assertIsNone(self.t.whoami(), '在服务单元里却没有授权：不按环境变量认')
 
     def test_grant_from_parent_process(self):
         srv = self.e.b.ident_start(); self.addCleanup(srv.close)   # 登记在 bridge 内存里，命令行走套接字问（第二轮复审 2）

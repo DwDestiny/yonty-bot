@@ -13,7 +13,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
         python3 bridge.py --cache-check 3 # 用服务同款参数开 3 个新会话，检查缓存是否跨会话命中
 来源:   feishu-claude-bot skill 的 assets/templates/bridge.py
 """
-import json, os, re, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
+import json, os, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
@@ -77,9 +77,7 @@ def load(path, default):
     except Exception: return default
 
 def save(path, obj):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f: json.dump(obj, f, ensure_ascii=False, indent=1)
-    os.replace(tmp, path)
+    tasks.fsio.write_json(path, obj, 1)
 
 sessions = load(SESS_FILE, {})    # 会话 key：飞书 p2p:/grp:/amb: 开头，企微 wx:p2p:/wx:grp: 开头
 for _s in sessions.values(): _s.pop("compacting", None)   # 上次退出时排着的压缩已经丢了，标记一起清掉
@@ -284,11 +282,9 @@ def ungrant(pid):
 tasks.ON_LAUNCH = lambda pid, tid: grant(pid, {"task": tid})
 
 def ident_of(pid):
-    """来访进程是谁：本实例的任务单元按 cgroup 认；否则沿父进程在登记表里找。都没有返回 None，不看环境变量。"""
-    try:
-        with open(f"/proc/{pid}/cgroup") as f: cg = f.read()
-    except OSError: cg = ""
-    hit, s = tasks.unit_sender(cg)
+    """来访进程是谁：本实例的任务单元按 MainPID 加 InvocationID 认；否则沿父进程在登记表里找。都没有返回 None，不看环境变量。
+    只用来署名、找收件箱，不带主人身份：命令行来的请求谁都可能想办法混进来，主人权限只给 IM 消息和服务自己从 runner 输出里解析的。"""
+    hit, s = tasks.unit_sender(pid)
     if hit: return s
     for a in [pid] + tasks._ancestors(pid):
         with GRANTS_LOCK: g = GRANTS.get(a)
@@ -297,8 +293,8 @@ def ident_of(pid):
         info = g[1]
         if info.get("task"):
             t = tasks.load(int(info["task"]))
-            return tasks.dl.task_sender(tasks._me(), t) if t and t.get("status") == "running" else None
-        return tasks._sess_sender(info, bool(info.get("owner")))
+            return dict(tasks.dl.task_sender(tasks._me(), t), owner=False) if t and t.get("status") == "running" else None
+        return tasks._sess_sender(info)
     return None
 
 def peer_pid(conn):
@@ -325,7 +321,7 @@ def ident_serve(conn):
             if not me: out = {"err": "认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。"}
             else:
                 try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
-                                                  str(req.get("text") or ""), None, req.get("reply"))}
+                                                  str(req.get("text") or ""), None, req.get("reply"), {"via": "cli"})}
                 except ValueError as e: out = {"err": str(e)}
         else: out = {"err": "不认识的请求"}
         conn.sendall((json.dumps(out, ensure_ascii=False) + "\n").encode())
@@ -360,9 +356,8 @@ def stream_claude(cmd, prompt, env, on_extra=None):
     global inflight
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          cwd=WORKDIR, env=env)
-    # 命令行（tasks.py send/act）问 bridge 认出是哪个会话、带不带主人身份：登记只在本进程内存里，环境变量、文件都不算数
-    grant(p.pid, {"owner": env.get("FCB_OWNER") == "1", "private": env.get("FCB_PRIVATE") == "1",
-                              "key": env.get("FCB_SESSION_KEY", ""), "hop": int(env.get("FCB_HOP") or 0),
+    # 命令行（tasks.py send/act）问 bridge 认出是哪个会话（不带主人身份）：登记只在本进程内存里，环境变量、文件都不算数
+    grant(p.pid, {"key": env.get("FCB_SESSION_KEY", ""), "hop": int(env.get("FCB_HOP") or 0),
                               "layer": env.get("FCB_LAYER", ""), "project": env.get("FCB_PROJECT", "")})
     q, err = queue.Queue(), []
     threading.Thread(target=lambda: [q.put(l) for l in p.stdout] + [q.put(None)], daemon=True).start()
@@ -408,8 +403,52 @@ def prime(sid):
     return subprocess.run(base_cmd() + ["--session-id", sid], input=PRIME, capture_output=True, text=True,
                           timeout=300, cwd=WORKDIR, env=hook_env(False, False, ""))
 
+SVC_LINE = re.compile(r"^[ \t]*\[服务命令\][ \t]*(.*?)[ \t]*$\n?", re.M)
+
+def service_run(line):
+    """主控在主人私聊那一轮写的 [服务命令]：服务在 bridge 里执行，返回结果文字。主人权限来自触发这一轮的 IM 消息或任务回报，不看进程身份。"""
+    name, _, rest = line.partition(" ")
+    try:
+        argv = shlex.split(rest)
+        if name == "diag": return tasks.diag_text(rest.strip())
+        if name == "mr": return tasks.create_mr(argv, owner=True)
+        if name == "act":
+            if not argv: return "用法：[服务命令] act <动作名> [--参数 值 ...]"
+            me = {"type": "ctrl", "ref": "主控", "label": "主控", "key": "p2p:" + OWNER_OPEN_ID, "owner": True, "hop": 0}
+            return acts.request(tasks._me(), argv[0], acts.parse_params(argv[1:]), me, None, direct=True)[1]
+        return f"不认识的服务命令 {name}：只有 diag、mr、act。"
+    except SystemExit as e: return f"没办成：{e.code if isinstance(e.code, str) else '参数不对'}"
+    except Exception as e: return f"没办成：{e or type(e).__name__}"
+
+def service_marks(text):
+    """(去掉 [服务命令] 行的文字, [命令])。"""
+    return SVC_LINE.sub("", text or "").strip() if SVC_LINE.search(text or "") else text, SVC_LINE.findall(text or "")
+
 def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
-    """跑一轮聊天会话，返回最后一个结果。这一轮中途的结果（起了后台任务时）交给 on_extra。"""
+    """跑一轮聊天会话，返回最后一个结果。这一轮中途的结果（起了后台任务时）交给 on_extra。
+    回复里的 [服务命令] 只在主人私聊那一轮生效：服务执行，结果接着喂给同一个会话（最多两次），几段回复合在一起返回。"""
+    svc, out = [], on_extra
+    def extra(x):
+        x, c = service_marks(x); svc.extend(c)
+        if out and x.strip(): out(x)
+    text = run_claude_once(key, s, prompt, owner, private, chat_id, quiet, extra if on_extra else None, layer, hop)
+    parts = []
+    for i in range(3):
+        head, c = service_marks(text); svc.extend(c)
+        if not svc: return text if not parts else "\n\n".join(x for x in parts + [head] if (x or "").strip())
+        todo, svc[:] = list(svc), []
+        if not (owner and private and not layer) or i == 2:
+            why = "只在主人私聊里由主控用" if i < 2 else "一轮最多接着跑两次"
+            tasks.decide("服务命令没执行", session=key, why=why, text="；".join(todo)[:300])
+            return "\n\n".join(x for x in parts + [head, f"（服务命令没执行：{why}。）"] if (x or "").strip())
+        res = "\n\n".join(f"$ {x}\n{service_run(x)}" for x in todo)
+        tasks.decide("服务命令", session=key, text="；".join(todo)[:300])
+        parts.append(head)
+        text = run_claude_once(key, s, f"[服务命令结果]\n{res}\n\n（接着回。前面写过的话已经留着，会跟这一段拼在一起发出去，别重复。）",
+                               owner, private, chat_id, True, extra if on_extra else None, layer, hop)
+        if text is None: return "\n\n".join(x for x in parts + [res] if (x or "").strip())   # 接着跑没成：结果原样给人，不丢
+
+def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
     with lock: sid, started = s["id"], s["started"]
     if not started and PRIME_ON:
         pr = prime(sid)
@@ -869,7 +908,12 @@ def task_approve(ev, yes, s):
         task_say(t, f"{OWNER_NAME}{'批了' if yes else '没批'} {n}（{t['title']}）" + ("，开工后在这儿报进度。" if yes else "。"), f"ap{tid}")
     return f"批了，{n} 排上了。" if yes else f"好，{n} 不做了。"
 
-def task_follow(ev, t, text):
+def idem_key(idem, tid, count):
+    """一轮里给同一个任务的第几条指令：同一轮重跑时顺序一样，键就一样。"""
+    count[tid] = count.get(tid, 0) + 1
+    return f"{idem}:{tid}:{count[tid]}" if idem else None
+
+def task_follow(ev, t, text, idem=None):
     if not t or not can_see(t, ev): return "没有这个任务。"
     n, tid = tasks.ref(t), t["id"]
     if not can_steer(t, ev): return f"{n} 不是你派的，有想法找{t['requester']['name']}或{OWNER_NAME}。"
@@ -877,7 +921,7 @@ def task_follow(ev, t, text):
     if st == "pending": return f"{n} 还在等{OWNER_NAME}批。"
     if st in ("cancelled", "rejected", "expired"): return f"{n} 已经{tasks.LABEL.get(st)}了，要做就重新提。"
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
-    tasks.inbox_add(tid, name, is_owner(ev), text)
+    tasks.inbox_add(tid, name, is_owner(ev), text, idem=idem)
     hop = 0 if ev.get("hop") is None else max(t.get("hop") or 0, ev["hop"] + 1)   # 人发话归零；投递轮里转的接着数
     tasks.update(tid, auto_follow=0, hop=hop)   # 人亲自发话了：主控的自动追加次数重新算
     if st == "running" and t.get("exec") == "cloud": return f"收到。{n} 在云端跑，这一轮交了结果后接着带上这条再跑。"
@@ -889,12 +933,14 @@ def task_follow(ev, t, text):
 def chat_followups(ev, result):
     """聊天回复里的 [任务指令] 短名#N 内容：主控替发消息的人转给任务。权限跟这个人自己发 短名#N 一样（只能管他能管的任务）。"""
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
-    pool = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)]
+    pool, count = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)], {}
     def apply(s, body):
         t, cands = tasks.resolve(s, pool)
         if not t: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
         if not body: return f"（给 {tasks.ref(t)} 的指令是空的，没转。）"
-        r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), t, body)
+        key = idem_key(ev.get("idem"), t["id"], count)
+        if tasks.inbox_seen(t["id"], key): return ""   # 这一轮是重送，上一次已经转过
+        r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), t, body, key)
         return "" if r.startswith("收到") else f"（{r}）"
     return apply_taskcmds(result, apply).strip()
 
@@ -1142,19 +1188,22 @@ def answer(ev, rid):
     tk = tasks._me()
     cur = tasks.dl.find(tk, rid)
     if not cur or not can_answer(ev, cur): return
+    who, text, fr = sender_name(ev.get("sender_id", "")), plain(ev), cur["from"]
+    if not fr.get("task"):   # 会话发的请求：这次答复新建一条投递（bridge 签名，主人身份来自这条 IM），落盘了才把原请求标成已回；出错照投递的规矩重送
+        me = {"type": "im", "ref": f"答复:{tasks.dl.head(cur)}:{ev.get('message_id')}", "label": who, "key": fr.get("key") or session_key(ev), "owner": is_owner(ev), "hop": 0}
+        im = {k: ev[k] for k in ("channel", "chat_id", "chat_type", "message_id", "sender_id", "thread_id", "root_id") if ev.get(k)}
+        tasks.dl.submit(tk, me, f"项目经理 {fr['project']}" if fr.get("type") == "pm" else "主控", "留言",
+                        f"{who} 回复了你的 {tasks.dl.head(cur)}：{text}", None, False, {"im": im, "auto": True, "idem": f"im-{ev.get('message_id') or time.time()}"})
+        tasks.dl.answered(tk, rid)
+        reply(ev, "转过去了。", in_topic(ev)); return
     rec = tasks.dl.answered(tk, rid)
     if not rec: return
-    who, text, fr = sender_name(ev.get("sender_id", "")), plain(ev), rec["from"]
     if fr.get("task"):
         t = tasks.load(fr["task"])
         n = tasks.inbox_add(t["id"], who, is_owner(ev), f"回复 {tasks.dl.head(rec)}：{text}")
         tasks.update(t["id"], _touch=False, hop=0)   # 人回话了，这条链重新数
         if t["status"] == "waiting": tasks.update(t["id"], status="approved")
         reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
-    else:
-        k = fr.get("key") or session_key(ev)
-        enqueue(k, {"deliver": dict(rec, text=f"{who} 回复了你的 {tasks.dl.head(rec)}：{text}", kind="留言", need=False), "key": k})
-        reply(ev, "转过去了。", in_topic(ev))
 
 def pm_intro(project):
     r = tasks.roles().get("项目经理") or {}
@@ -1162,12 +1211,12 @@ def pm_intro(project):
     rec = tasks.record_text(ts[-1]) if ts else ""
     return (f"[项目经理 {project}] 你是项目 {project} 的项目经理。\n{r.get('body', '')}\n" + (f"\n项目档案：\n{rec}\n" if rec else "") + "\n---\n")
 
-def pm_marks(project, key, owner, text, hop=0, about=None):
+def pm_marks(project, key, owner, text, hop=0, about=None, idem=None):
     """项目经理回复里的 [投递 目标 类别]：hop 是这一轮被第几跳叫起来的；about 是这一轮在处理哪个任务的回报。"""
     text, marks = tasks.dl.parse_marks(text)
-    for to, kind, body, need in marks:
-        try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need,
-                             {"about": about} if about else None, trusted=True)
+    for i, (to, kind, body, need) in enumerate(marks):
+        extra = {**({"about": about} if about else {}), **({"idem": f"{idem}:{i}"} if idem else {})}
+        try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need, extra or None, trusted=True)
         except ValueError as e: log.warning("pm delivery rejected: %s", e)
     return text
 
@@ -1241,31 +1290,38 @@ def _delivery_turn(ev):
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop)
     if result is None: return False   # 这一轮没成：调用方退回重送
-    if pm: result = pm_marks(pm, key, o_owner, result, hop, tid)
+    idem, im = f"dl{rec['id']}-{int(rec['ts'])}", rec.get("im")
+    if pm: result = pm_marks(pm, key, o_owner, result, hop, tid, idem)
+    if im and not t and len(batch) == 1 and result.strip() and result.strip() != AMB_SILENT:   # 人答复请求叫起来的那一轮：回在人答复的那个聊天里
+        ev2 = dict(im, idem=idem, hop=hop, **({} if tasks.dl.signed(rec) else {"sender_id": ""}))   # 签名对不上（服务重启过）：不知道是谁答的，只当没身份的人
+        deliver(ev2, key, (f"【{pm}】" if pm else "") + result, in_topic(ev2), [1])
     if t and result.strip() and result.strip() != AMB_SILENT:
-        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=f"dl{rec['id']}-{int(rec['ts'])}")
+        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dl{rec['id']}")
 
 def reply_target(fr):
     return {"pm": f"项目经理 {fr.get('project')}", "ctrl": "主控"}.get(fr.get("type"), fr.get("ref"))
 
-def turn_directives(t, result, hop, who, idem=None):
+def turn_directives(t, result, hop, who, idem=None, cli=False):
     """投递轮回复里的 [任务指令]、[派活]：按任务回报的规矩转（派活人的权限、每个任务最多自动追加 RELAY_MAX 次）。
-    这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。"""
+    这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。
+    cli：这一轮是命令行投递叫起来的，不带主人权限：[派活] 一律等主人批；[任务指令] 只能回给发来的那个任务，不改预算、不放开验收。"""
     mx = tasks.dl.conf(CFG)["max_hops"]
     if hop >= mx:
         if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
             tasks.decide("超跳不转", task=tasks.ref(t), why=f"这一轮是第 {hop} 跳，到了上限 {mx}，里面的任务指令和派活不转")
             result = "\n".join(b for s, b in split_taskcmds(tasks.parse_directive(result)[0]) if s is None)
         return result
-    text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop)
+    text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop, idem, cli)
     if TASKS_ON and tasks.parse_directive(text)[1]:
+        rev = relay_ev(t)
+        if cli and t["requester"].get("owner"): rev.update(sender_id="", sender_name=f"{tasks.ref(t)}（命令行投递）")
         if tasks.load(t["id"]).get("auto_follow", 0) >= RELAY_MAX:
             text = tasks.parse_directive(text)[0] + f"\n\n（{tasks.ref(t)} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
         else:
             tasks.update(t["id"], auto_follow=tasks.load(t["id"]).get("auto_follow", 0) + 1)
-            text = task_directive(dict(relay_ev(t), idem=idem) if idem else relay_ev(t), text)
+            text = task_directive(dict(rev, idem=idem) if idem else rev, text)
     return text
 
 def delivery_tick():
@@ -1274,9 +1330,11 @@ def delivery_tick():
     进展按任务限频；落到主人私聊的每 10 分钟最多 4 条、每小时最多 12 条，超出的不用回复的进摘要，要回复的接着排队。"""
     tk, dl, now = tasks._me(), tasks.dl, time.time()
     c = dl.conf(CFG)
-    for t in tasks.all_tasks():   # 定时运行在沙箱里写进发件箱的投递，按任务记录的身份送出
-        ob = os.path.join(tasks.tdir(t["id"]), "outbox.jsonl")
-        if t.get("schedule") and os.path.exists(ob) and os.path.getsize(ob): tasks.outbox_drain(t["id"])
+    for t in tasks.all_tasks():   # 定时运行在沙箱里写进发件箱的请求，按范围校验后在箱外执行；runner 从输出里解析出的 [投递]，按任务记录的身份投
+        try:
+            if t.get("schedule"): tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start())
+            if os.path.exists(os.path.join(tasks.tdir(t["id"]), "marks.jsonl")): tasks.marks_drain(t["id"])
+        except Exception: log.exception("outbox of task #%s failed", t["id"])
     for tid, text in dl.progress_due(tk, now):   # 进展留着的那条到点了
         t = tasks.load(tid)
         if t:
@@ -1352,7 +1410,7 @@ def delivery_tick():
 def v2_tick():
     try:
         os.makedirs(os.path.join(ROOT, "state"), exist_ok=True)
-        with open(os.path.join(ROOT, "state", "heartbeat"), "w") as f: f.write(str(int(time.time())))   # 看门狗读它
+        tasks.fsio.write(os.path.join(ROOT, "state", "heartbeat"), str(int(time.time())))   # 看门狗读它
     except OSError: pass
     for name, fn in (("freeze", freeze_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
@@ -1498,7 +1556,7 @@ def task_relay(ev):
         result, extra = None, []
         def more(x):   # 这一轮中途的结果：照样加工，单独发，不占回报的重发记录
             extra.append(1)
-            txt = relay_text(t, e, x, rev)
+            txt = relay_text(t, e, x, rev, f"t{n}e{idx}x{len(extra)}")
             if txt:
                 try: task_say(t, txt, f"t{n}e{idx}x{len(extra)}")
                 except Exception: log.exception("task #%s relay extra post failed", n)
@@ -1515,7 +1573,7 @@ def task_relay(ev):
         if result is None:
             text = task_event_text(t, e)   # 主控没跑成：原话照发，保证至少送到一次
         else:
-            text = relay_text(t, e, result, rev)
+            text = relay_text(t, e, result, rev, f"t{n}e{idx}x0")
             if not text and not extra and e["kind"] != "question": text = task_event_text(t, e)
         relay_post(t, idx, text)
     finally:
@@ -1557,14 +1615,14 @@ def pm_relay(ev):
             enqueue(okey, dict(ev, pm=None)); return
         note_briefed(key, n)
         absorbed = ABSORB_RE.search(result)
-        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）")
+        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}")
         if TASKS_ON and tasks.parse_directive(text)[1]:
             if tasks.load(n).get("auto_follow", 0) >= RELAY_MAX:
                 text = tasks.parse_directive(text)[0]; tasks.decide("没派", task=ref, why=f"已经自动追加 {RELAY_MAX} 次，新活要人来派")
             else:
                 tasks.update(n, auto_follow=tasks.load(n).get("auto_follow", 0) + 1)
-                text = task_directive(relay_ev(t), text)
-        text = pm_marks(pm, key, owner, text, t.get("hop") or 0, n).strip()
+                text = task_directive(dict(relay_ev(t), idem=f"pm{n}e{idx}"), text)
+        text = pm_marks(pm, key, owner, text, t.get("hop") or 0, n, f"pm{n}e{idx}").strip()
         mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("key") == key
                 and (r["to"]["to"] == "主控" or (e["kind"] == "question" and r["to"]["to"] == "主人"))]
         answered_q = len(tasks.inbox_items(n)) > inbox0
@@ -1584,16 +1642,16 @@ def pm_relay(ev):
     finally:
         if not fell_back: relaying.discard((n, idx))
 
-def relay_text(t, e, result, rev):
+def relay_text(t, e, result, rev, idem=None):
     """主控对一条任务回报的回复，加工成发回聊天的话。返回空串表示不发。"""
     n, ref = t["id"], tasks.ref(t)
-    text = relay_followups(t, result)
+    text = relay_followups(t, result, idem=idem)
     if TASKS_ON and tasks.parse_directive(text)[1]:
         if tasks.load(n).get("auto_follow", 0) >= RELAY_MAX:
             text = tasks.parse_directive(text)[0] + f"\n\n（{ref} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
         else:
             tasks.update(n, auto_follow=tasks.load(n).get("auto_follow", 0) + 1)
-            text = task_directive(rev, text)
+            text = task_directive(dict(rev, idem=idem) if idem else rev, text)
     text = text.strip()
     if text.startswith(AMB_SILENT) or not text: return ""
     r, o = t["requester"], t["origin"]
@@ -1615,17 +1673,24 @@ def relay_post(t, idx, text):
     if not ok: log.error("task #%s relay %s dropped after 20 tries", n, idx)
     tasks.update(n, posted=idx + 1, last_post=time.time(), post_fail=0, relay_pending=None)
 
-def relay_followups(t, text, who=None, hop=None):
-    """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。"""
-    pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or t["requester"].get("owner")]
+def relay_followups(t, text, who=None, hop=None, idem=None, cli=False):
+    """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。
+    idem：这一轮的幂等键，同一轮重跑（529、服务重启）再出一次同一条指令不转两次。cli 见 turn_directives。"""
+    owner = bool(t["requester"].get("owner")) and not cli
+    pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or owner] if not cli else [t]
+    count = {}
     def apply(s, body):
         x, cands = tasks.resolve(s, pool)
         if not x: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
         n, tid = tasks.ref(x), x["id"]
+        key = idem_key(idem, tid, count)
+        if tasks.inbox_seen(tid, key):
+            tasks.decide("指令去重", task=n, why=f"{key} 已经转过，这一轮是重送"); return ""
+        if cli and (tasks.BUDGET_RE.search(body) or "放开验收" in body): return "（命令行投递叫起来的这一轮不改预算、不放开验收，没转。）"
         why = tasks.steer_block(x, body, RELAY_MAX)
         if why: return f"（{why}）"
         raise_budget = bool(tasks.BUDGET_RE.search(body))
-        tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body, upper=True)
+        tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", owner, body, upper=True, idem=key)
         if hop is not None: tasks.update(tid, _touch=False, hop=max(x.get("hop") or 0, hop + 1))   # 投递轮里转的指令也是一跳
         tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))

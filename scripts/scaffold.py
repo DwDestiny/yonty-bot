@@ -45,7 +45,7 @@ if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
     sys.exit("workdir 不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
 
 # 1. 代码和钩子：总是用模板覆盖，保证和 skill 同版本
-for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py"):
+for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py"):
     shutil.copy(os.path.join(T, f), os.path.join(INST, f))
 os.makedirs(os.path.join(INST, "hooks", "git"), exist_ok=True)
 for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
@@ -106,7 +106,7 @@ else:
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
-INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
+INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
                "package.json", "package-lock.json", "node_modules/**", "state/**", "logs/**", "inbox/**", "AGENTS.md", "CLAUDE.md",
                "*.service", "*.plist"]
 deny = [f"Read({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if p.startswith(("~", "/")) and "(" not in p and "\\" not in p]

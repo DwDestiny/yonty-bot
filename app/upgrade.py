@@ -9,7 +9,7 @@ Pos:    实例目录的 upgrade.py，由 scaffold.py 从 app/upgrade.py 复制
 步骤：源码仓库干净、在 main → 只做快进 → 跑测试 → 等任务单元都结束 → 备份实例 → 先让服务回一句再重启 → 重新生成（不重写守则）
       → 重启服务 → 新服务写出 state/started.json 且版本对上就算好，否则用备份回滚。
 """
-import json, os, subprocess, sys, tarfile, time
+import json, os, subprocess, sys, tarfile, time, uuid
 
 INST = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(INST, "state")
@@ -24,8 +24,8 @@ def load(p, d=None):
 
 def put(**kw):
     s = load(F, {}); s.update(kw, updated=time.time())
-    tmp = F + ".tmp"
-    with open(tmp, "w") as f: json.dump(s, f, ensure_ascii=False, indent=1)
+    tmp = f"{F}.{uuid.uuid4().hex}.tmp"   # 随机临时名，不跟软链接（fsio 可能正在被换，这里不依赖它）
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o666), "w") as f: json.dump(s, f, ensure_ascii=False, indent=1)
     os.replace(tmp, F)
     return s
 
