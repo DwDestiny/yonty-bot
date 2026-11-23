@@ -4,3 +4,5 @@ __pycache__/
 node_modules/
 # 实例目录不进仓库
 instances/
+# 本机实例数据（主人名字、设备名），扫描用，不进 Git
+tests/.instance-words

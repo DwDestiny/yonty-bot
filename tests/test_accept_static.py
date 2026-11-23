@@ -13,6 +13,7 @@ Pos: 独立验收角色按任务书和 docs/plan-2.0.md 写的测试，负责人
 - 方案标“判断”的两处实测结论（用户级单元的沙箱属性、钩子配置进不进缓存前缀）写进 docs/ 下某份文档，
   文字里要出现 ProtectHome 或 bwrap，以及“缓存”二字。
 """
+import getpass
 import json
 import os
 import re
@@ -35,6 +36,16 @@ def read(p):
         raise AssertionError(f'{p.relative_to(ROOT) if ROOT in p.parents else p} 不存在')
     return p.read_text(encoding='utf-8')
 
+
+
+def instance_words():
+    """实例数据长什么样：本机家目录，加上 tests/.instance-words（不进 Git，一行一个：主人名字、用户名、设备名）
+    和环境变量 YB_INSTANCE_WORDS（逗号分隔）里的。真实值不写进仓库，扫描照样扫得出来。"""
+    ws = {os.path.expanduser('~'), '/home/' + getpass.getuser()}
+    p = Path(__file__).resolve().parent / '.instance-words'
+    if p.exists(): ws |= {l.strip() for l in p.read_text(encoding='utf-8').splitlines() if l.strip() and not l.startswith('#')}
+    ws |= {w.strip() for w in os.environ.get('YB_INSTANCE_WORDS', '').split(',') if w.strip()}
+    return tuple(sorted(w for w in ws if len(w) >= 3 and w not in ('/root', '/home/root')))
 
 class VersionAndConfigTest(unittest.TestCase):
     def test_version_is_2_0_0(self):
@@ -61,7 +72,7 @@ class VersionAndConfigTest(unittest.TestCase):
         """硬约束：模板仓不放实例数据。设备名、真实路径、主人的名字一律不写；样例里的设备表是空的。"""
         cfg = json.loads(read(APP / 'config.example.json'))
         self.assertFalse(cfg.get('devices'), 'devices 在模板里必须是空的，设备名是实例配置')
-        bad = ('/home/ubuntu', 'lcu', 'macfront', '党巍', 'dangdw')
+        bad = instance_words()   # 评审修复 8：真实值不写进公开仓，从本机和不进 Git 的 tests/.instance-words 取
         for sub in ('app', 'docs', 'scripts'):
             for f in (ROOT / sub).rglob('*'):
                 if not f.is_file() or f.suffix not in ('.md', '.py', '.sh', '.json', '.mjs') or '__pycache__' in f.parts:

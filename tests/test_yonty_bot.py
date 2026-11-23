@@ -37,10 +37,14 @@ class RepoDocsTest(unittest.TestCase):
 
     def test_no_real_ids_in_repo(self):
         pat = re.compile(r'\b(ou|oc|cli)_[0-9a-f]{12,}\b')
+        sys.path.insert(0, str(ROOT / 'tests')); from test_accept_static import instance_words
+        words = instance_words()   # 主人名字、用户名、设备名、家目录：整个仓库（含 tests）都不能有
         for f in ROOT.rglob('*'):
             if '.git' in f.parts or '_tmp' in f.parts: continue
             if f.is_file() and f.suffix in ('.md', '.py', '.sh', '.json', '.yaml', '.yml', '.mjs'):
-                self.assertIsNone(pat.search(f.read_text(encoding='utf-8')), f'{f} 含疑似真实 ID')
+                text = f.read_text(encoding='utf-8')
+                self.assertIsNone(pat.search(text), f'{f} 含疑似真实 ID')
+                for w in words: self.assertNotIn(w, text, f'{f.relative_to(ROOT)} 含实例数据')
 
 
 class ScaffoldTest(unittest.TestCase):
@@ -200,12 +204,12 @@ class ScaffoldTest(unittest.TestCase):
         cfg = Path(self.inst) / '_cg.json'
         cfg.write_text(json.dumps({'command_guard': [   # 和实例里的写法一样：mcporter 默认只给主人，用户的 Mac 再收窄到主人私聊
             {'match': r'\bmcporter\b', 'allow': ['owner', 'owner_task']},
-            {'match': r'\bmcporter\b.*\b(lcu|macfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
+            {'match': r'\bmcporter\b.*\b(devmac|devfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
         def run(cmd, **env):
             e = dict({k: v for k, v in self.env.items() if not k.startswith('FCB')}, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})   # 在任务里跑测试时不继承外面的 FCB_TASK_ID
             return subprocess.run([sys.executable, str(self.inst / 'hooks' / 'command_guard.py')], capture_output=True, text=True,
                                   input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}), env=e)
-        mac, mini = "mcporter call lcu.js code='1'", "mcporter call lcu-mini.js code='1'"
+        mac, mini = "mcporter call devmac.js code='1'", "mcporter call devmac-mini.js code='1'"
         try:
             self.assertEqual(run(mac, FCB_OWNER='1', FCB_PRIVATE='1').returncode, 0)
             r = run(mac, FCB_OWNER='1', FCB_PRIVATE='0')                           # 主人在群里也不行
@@ -215,10 +219,10 @@ class ScaffoldTest(unittest.TestCase):
             self.assertEqual(run(mini, FCB_OWNER='1', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 0)
             self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
             self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 2)
-            self.assertEqual(run('ls lcu.txt', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 0)
+            self.assertEqual(run('ls devmac.txt', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 0)
             self.assertEqual(run('mcporter config list', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)   # 会打印 ssh 参数
             self.assertEqual(run('npx mcporter daemon stop', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
-            self.assertEqual(run('mcporter call macfront.frontmost_app', FCB_OWNER='1', FCB_PRIVATE='0').returncode, 2)
+            self.assertEqual(run('mcporter call devfront.frontmost_app', FCB_OWNER='1', FCB_PRIVATE='0').returncode, 2)
         finally: cfg.unlink()
         st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
         self.assertTrue(any(m['matcher'] == 'Bash' and 'command_guard.py' in m['hooks'][0]['command'] for m in st['hooks']['PreToolUse']))
