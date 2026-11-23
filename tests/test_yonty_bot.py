@@ -207,6 +207,47 @@ class ScaffoldTest(unittest.TestCase):
                 self.assertIn('太宽', r.stdout + r.stderr)
                 self.assertFalse((inst / 'claude-settings.json').exists(), bad)
 
+    def test_scaffold_merges_rules_template(self):
+        """模板改了：实例自己改的保留、新段落合进来；冲突整份不动且基线不前移；手工合完 --rules-done 记下。"""
+        with tempfile.TemporaryDirectory() as d:
+            src, inst = Path(d) / 'src', Path(d) / 'b'
+            inst.mkdir()
+            for n in ('app', 'scripts'): shutil.copytree(ROOT / n, src / n)
+            shutil.copy(ROOT / 'VERSION', src / 'VERSION')
+            g = lambda *a: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *a], cwd=src, check=True, capture_output=True, text=True).stdout.strip()
+            def commit(): g('add', '-A'); g('commit', '-qm', 'x'); return g('rev-parse', 'HEAD')
+            g('init', '-q', '-b', 'main')
+            base = src / 'app' / 'rules' / 'base.md'
+            text = base.read_text(encoding='utf-8'); c1 = commit()
+            shutil.copy(self.inst / 'config.json', inst / 'config.json')
+            def gen(*a):
+                r = subprocess.run([sys.executable, str(src / 'scripts' / 'scaffold.py'), str(inst), '--no-npm', *a],
+                                   capture_output=True, text=True, env=dict(self.env, HOME=d))
+                self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+                return r.stdout
+            meta = lambda: json.loads((inst / 'yonty-bot.json').read_text())
+            gen(); rules = inst / json.loads((inst / 'config.json').read_text(encoding='utf-8')).get('rules_file', 'rules.md')
+            rules.write_text('主人加的一行\n' + rules.read_text(encoding='utf-8'), encoding='utf-8')
+            self.assertEqual(meta()['rules_commit'], c1)
+            # 老实例没有 rules_commit：按 commit 当基线
+            m = meta(); m.pop('rules_commit'); (inst / 'yonty-bot.json').write_text(json.dumps(m))
+            base.write_text(text + '\n- 模板新加：{{OWNER}}\n', encoding='utf-8'); c2 = commit()
+            out = gen(); got = rules.read_text(encoding='utf-8')
+            self.assertIn('已合并', out); self.assertTrue(got.startswith('主人加的一行\n'))
+            self.assertIn('- 模板新加：', got); self.assertNotIn('{{OWNER}}', got); self.assertEqual(meta()['rules_commit'], c2)
+            # 同一行两边都改：这处不动，别处照合（只合一遍），基线留在 c2
+            rules.write_text(got.replace('- 模板新加：', '- 实例改过：'), encoding='utf-8')
+            base.write_text(text.replace('## 任务回报', '## 新一节\n\n- 新内容\n\n## 任务回报') + '\n- 模板又改：{{OWNER}}\n', encoding='utf-8'); c3 = commit()
+            for _ in range(2):
+                self.assertIn('没合进', gen()); mine = rules.read_text(encoding='utf-8')
+                self.assertEqual((mine.count('## 新一节'), mine.count('## 任务回报')), (1, 1)); self.assertIn('- 实例改过：', mine); self.assertNotIn('- 模板又改：', mine)
+                self.assertEqual((meta()['rules_commit'], meta()['commit']), (c2, c3))
+            gen('--rules-done')
+            self.assertEqual(rules.read_text(encoding='utf-8'), mine); self.assertEqual(meta()['rules_commit'], c3)
+            # 基线取不到：不动
+            m = meta(); m['rules_commit'] = 'deadbeef'; (inst / 'yonty-bot.json').write_text(json.dumps(m))
+            self.assertIn('取不到', gen()); self.assertEqual(rules.read_text(encoding='utf-8'), mine)
+
     def test_scaffold_writes_upgrade_meta(self):
         meta = json.loads((self.inst / 'yonty-bot.json').read_text())   # /upgrade 靠它找源码仓库、用同样的参数重新生成
         self.assertEqual((meta['source'], meta['version']), (str(ROOT), (ROOT / 'VERSION').read_text().strip()))
@@ -866,6 +907,9 @@ class TaskTest(unittest.TestCase):
             self.b.upgrade_tick(); self.b.upgrade_tick()
             done = [s[1] for s in self.sent if s[0] == 'om_up']
             self.assertEqual(len(done), 2); self.assertIn('1.2.1 → 1.3.0', done[-1]); self.assertIn('守则模板有改动', done[-1])
+            self.assertIn('已合进', done[-1])
+            st = json.loads(f.read_text()); st.update(reported=False, rules_left=['- 某条']); f.write_text(json.dumps(st))
+            self.b.upgrade_tick(); self.assertIn('- 某条', self.sent[-1][1])
             self.assertNotIn('token', json.loads(f.read_text()))
             f.write_text(json.dumps({'status': 'running', 'origin': o, 'updated': time.time()}))
             self.assertIn('已经在升级', self.b.service_command(self.ev('/upgrade', chat_type='p2p')))

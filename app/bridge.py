@@ -890,7 +890,9 @@ def upgrade_tick():
     if st not in UP_FINAL: return
     if st == "done":
         text = f"升级好了：{up.get('from')} → {up.get('to')}（{up.get('commit')}）。"
-        if up.get("rules_changed"): text += "\n这次守则模板有改动。你的守则没被覆盖，要合进来请回终端处理。"
+        left = up.get("rules_left") or []
+        if left: text += f"\n守则模板有 {len(left)} 处跟你改过的地方撞了，没合，其余已合：\n" + "\n".join(f"- {x}" for x in left[:5])
+        elif up.get("rules_changed"): text += "\n守则模板有改动，已合进你的守则，你自己改过的都保留。"
     elif st == "uptodate": text = f"已经是最新版（{up.get('to') or META.get('version')}），没动。"
     elif st == "rolled_back": text = "升级没成，已回滚。\n" + (up.get("detail") or "")
     else: text = "升级没成，什么都没动。\n" + (up.get("detail") or "")
