@@ -176,6 +176,43 @@ class AnswerAuthTest(Base):
         self.assertEqual(self.e.b.route(self.e.ev('好', chat='oc_h', chat_type='group'))[0], 'answer', '主人照样走快速通道')
 
 
+class ScheduleScopeTest(Base):
+    """第 7 项：定时任务的范围不超过创建者：MCP、发给、探针提到的文件；审批私聊里写出范围。"""
+
+    def make(self, sender=MATE, **fields):
+        import test_accept_flow as A
+        text = A.SCHED.format(repo=self.e.repo, read=self.e.repo, extra=fields.pop('extra', ''))
+        for k, v in fields.items(): text = text.replace(f'{k}: ', f'{k}: {v}  # ', 1) if v is not None else text
+        n = len(list((self.e.inst / 'state' / 'schedules').glob('*.json'))) if (self.e.inst / 'state' / 'schedules').exists() else 0
+        self.e.deliver(self.e.ev('建', sender=sender, chat='oc_g', chat_type='group'), text)
+        return len(list((self.e.inst / 'state' / 'schedules').glob('*.json'))) > n
+
+    def test_coworker_cannot_grant_mcp(self):
+        self.assertFalse(self.make())
+        self.assertTrue([x for a, b, x in self.e.sent if '范围-MCP' in x and '只有主人' in x])
+
+    def test_owner_can_grant_mcp_and_coworker_dm_shows_scope(self):
+        self.assertTrue(self.make(sender=OWNER))
+        import test_accept_flow as A
+        text = A.SCHED.format(repo=self.e.repo, read=self.e.repo, extra='').replace('范围-MCP: foo\n', '')
+        self.e.deliver(self.e.ev('建', sender=MATE, chat='oc_g', chat_type='group'), text)
+        dm = [c for a, b, c in self.e.sent if a == 'lark' and '等你批' in c]
+        self.assertTrue(dm); self.assertIn('范围-读', dm[-1]); self.assertIn('范围-工具', dm[-1])
+
+    def test_bad_target_and_probe_outside_scope_rejected(self):
+        import test_accept_flow as A
+        base = A.SCHED.format(repo=self.e.repo, read=self.e.repo, extra='').replace('范围-MCP: foo\n', '')
+        self.e.deliver(self.e.ev('建', sender=OWNER), base.replace('发给: 主控', '发给: 随便谁'))
+        self.assertTrue([x for a, b, x in self.e.sent if '不是能投递的目标' in x])
+        key = self.e.home / '.ssh'; key.mkdir(parents=True, exist_ok=True); (key / 'id').write_text('KEY')
+        self.e.deliver(self.e.ev('建', sender=OWNER), base.replace('任务书:', f'探针: cat {key}/id\n任务书:'))
+        self.assertTrue([x for a, b, x in self.e.sent if '不在仓库或范围-读里' in x])
+        d = self.e.inst / 'state' / 'schedules' / '7'; d.mkdir(parents=True)
+        (d / 'scope.json').write_text(json.dumps({'read': [str(self.e.repo)]}))
+        box = self.t.probe_box(str(d / 'scope.json'), str(self.e.repo), [str(key / 'id')])
+        self.assertNotIn(str(key / 'id'), box or [], '探针沙箱不放回范围外的文件')
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'

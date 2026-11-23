@@ -131,8 +131,18 @@ def create(tk, f, creator):
     for r in reads:
         if r == tk.ROOT or r.startswith(tk.ROOT + os.sep): over.append(f"范围-读 {r} 在机器人自己的目录里，谁都不能给")
         elif not me and any(r == p or r.startswith(p + os.sep) for p in priv): over.append(f"范围-读 {r} 是私密目录，只有主人私聊里建的定时任务能给")
-    devs, acts = split(f.get("范围-设备")), split(f.get("范围-动作"))
+    devs, acts, mcp = split(f.get("范围-设备")), split(f.get("范围-动作")), split(f.get("范围-MCP"))
     if devs and not me: over.append("范围-设备 只有主人私聊里建的定时任务能给")
+    if not creator.get("owner"):   # MCP 跟聊天里一样：同事只能给 mcp_open_to 里的服务器
+        bad = [m for m in mcp if m not in (cfg.get("mcp_open_to") or [])]
+        if bad: over.append(f"范围-MCP {'、'.join(bad)} 只有主人能给（同事能用的只有 mcp_open_to 里的）")
+    to = f.get("发给") or "主控"
+    if not tk.dl.parse_target(to, {"project": None}) or to.startswith("事"):
+        over.append(f"发给 {to} 不是能投递的目标（{tk.dl.TARGETS}，事 除外）")
+    for p in probe_files(f.get("探针", ""), repo):   # 探针提到的文件会只读放进沙箱：只能是仓库或范围-读里的
+        rp = os.path.realpath(p)
+        if not any(rp == d or rp.startswith(d + os.sep) for d in [os.path.realpath(repo)] + reads):
+            over.append(f"探针提到的 {p} 不在仓库或范围-读里")
     pe = dur(f.get("探针频率") or "") if f.get("探针频率") else 0
     if f.get("探针频率") and not pe: return False, "定时任务没建：探针频率看不懂（写“2 分钟”“1 小时”）"
     if over: return False, "定时任务没建：权限范围超出了创建者能给的。" + "；".join(over) + "。"
@@ -143,7 +153,7 @@ def create(tk, f, creator):
         proj = tk.project_of(repo, tk.all_tasks())
         ref = f"{proj}#S{1 + len([x for x in allx if x['project'] == proj])}"
         scope = {"schedule": ref, "read": reads, "tools": split(f.get("范围-工具")) or ["Read", "Grep", "Glob"],
-                 "mcp": split(f.get("范围-MCP")), "devices": devs, "actions": acts, "to": f.get("发给") or "主控"}
+                 "mcp": mcp, "devices": devs, "actions": acts, "to": to}
         os.makedirs(os.path.join(DIR, str(sid)), exist_ok=True)
         with open(os.path.join(DIR, str(sid), "scope.json"), "w") as fh: json.dump(scope, fh, ensure_ascii=False, indent=1)
         nxt = spec["at"] if spec["kind"] == "once" else next_time(spec, time.time(), cfg)
@@ -158,6 +168,17 @@ def create(tk, f, creator):
     tk.decide("建定时任务", schedule=ref, by=creator.get("name"), status=sc["status"])
     return True, (f"定时任务 {ref}「{sc['name']}」建好了：{sc['when']}，下次 {fmt(nxt, cfg)}（{cfg.get('timezone') or 'Asia/Shanghai'}）。"
                   + ("" if sc["status"] == "active" else f"同事建的，主人发 /schedule approve {ref} 批了才跑。"))
+
+
+def scope_text(sc):
+    """审批私聊里给主人看的范围：一项一行。"""
+    try:
+        with open(os.path.join(DIR, str(sc["id"]), "scope.json")) as f: s = json.load(f)
+    except (OSError, ValueError): s = {}
+    j = lambda xs: "、".join(xs) or "无"
+    return (f"范围-读：{j(s.get('read') or [])}\n范围-工具：{j(s.get('tools') or [])}\n范围-MCP：{j(s.get('mcp') or [])}\n"
+            f"范围-设备：{j(s.get('devices') or [])}\n范围-动作：{j(s.get('actions') or [])}\n发给：{s.get('to', '主控')}\n"
+            f"探针：{sc.get('probe') or '无'}\n验证：{sc.get('verify') or '无'}")
 
 
 def fire(tk, sc, extra=""):

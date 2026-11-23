@@ -940,7 +940,8 @@ def probe_box(scope_path, repo=None, files=()):
     reads = _scope_reads(sc)
     hidden = [d for d in (_rp("~"), _rp("/tmp"), "/run/user") if os.path.isdir(d)]
     path = [_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
-    back = [p for p in dict.fromkeys(reads + [_rp(repo)] * bool(repo) + [os.path.realpath(f) for f in files] + path)
+    files = [f for f in (os.path.realpath(x) for x in files) if _under(f, reads + [_rp(repo)] * bool(repo))]   # 探针提到的文件只认仓库和范围-读里的
+    back = [p for p in dict.fromkeys(reads + [_rp(repo)] * bool(repo) + files + path)
             if os.path.exists(p) and _under(p, hidden)]
     a = _box_base(bw, hidden) + sum((["--ro-bind", p, p] for p in back), []) + ["--unshare-pid"]
     return a + _private_cover(back, reads) + ["--tmpfs", ROOT]

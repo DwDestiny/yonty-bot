@@ -1099,7 +1099,8 @@ def schedule_directive(ev, result):
                           "message_id": ev.get("message_id", ""), "key": session_key(ev)}}
     ok, msg = sch.create(tasks._me(), f, creator)
     if ok and not owner:
-        owner_dm(ev.get("channel", "feishu"), f"{creator['name']} 建了一个定时任务，等你批：{msg}")
+        sc = sch.all_()[-1] if sch.all_() else {}
+        owner_dm(ev.get("channel", "feishu"), f"{creator['name']} 建了一个定时任务，等你批：{msg}\n" + (sch.scope_text(sc) if sc else ""))
     return (head + "\n\n" + msg).strip()
 
 def delivery_turn(ev):

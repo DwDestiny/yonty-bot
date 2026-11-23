@@ -344,12 +344,13 @@ class ProbeTest(Base):
         os.environ['YB_TEST_TOKEN'] = 'TOKEN-LEAK'
         self.addCleanup(os.environ.pop, 'YB_TEST_TOKEN', None)
 
-    def make(self, wake=True, ev=None, read=None, extra=''):
+    def make(self, wake=True, ev=None, read=None, extra='', mcp=True):
         (self.e.repo / 'probe.py').write_text(PROBE.replace('WAKE', 'True' if wake else 'False'))
         now_bj = (datetime.utcnow() + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M')
         text = A.SCHED.format(repo=self.e.repo, read=read or self.e.work / 'secret',
                               extra=f'探针: python3 probe.py {self.e.work} {self.e.inst}\n' + extra)
         text = text.replace('每 30 分钟\n', f'一次 {now_bj}\n', 1)
+        if not mcp: text = text.replace('范围-MCP: foo\n', '')   # 同事给不了 MCP（评审修复 7）
         self.e.deliver(ev or self.e.ev('建'), text)
         return json.loads(sorted((self.e.inst / 'state' / 'schedules').glob('*.json'))[-1].read_text())
 
@@ -381,7 +382,7 @@ class ProbeTest(Base):
 
     def test_coworker_can_write_probe(self):
         """同事建的定时任务也能写探针（探针在沙箱里跑），照旧要主人批。"""
-        sc = self.make(ev=self.e.ev('建', sender=A.MATE, chat='oc_g', chat_type='group'), read=self.e.repo)
+        sc = self.make(ev=self.e.ev('建', sender=A.MATE, chat='oc_g', chat_type='group'), read=self.e.repo, mcp=False)
         self.assertEqual(sc['status'], 'proposed')
         self.assertTrue(sc['probe'])
 
