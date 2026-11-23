@@ -75,7 +75,9 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 ### 设备（hooks/device_guard.py）
 
 - 调用设备的命令用正则匹配（`devices[].match`），锚定命令开头。复合命令按 `&&`、`;`、`|` 和 `env` 前缀拆段，逐段查。
-- 任何设备上都不运行 `claude`，不打开 claude.ai。
+- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量再查；命令头是 `$变量` 或反引号、同时带 `claude` 字样的，一律拦。
+- 设备的 MCP 工具按 `devices[].mcp`（MCP 服务器名）认，参数里带 `claude` 或 claude.ai 的拦。
+- 钩子只看得到命令文字，挡不住写脚本再执行。设备上要装 `scripts/device-wrapper.sh` 做主防线：设成 SSH 的 `command=` 或设备上远程命令的入口，它拒绝以 `claude` 名义运行、拒绝命令或参数里带 `claude`、claude.ai 的（退出码 126），其余照常执行。
 - 身份：主人私聊会话短时可用（一轮 10 次、3 分钟）；主人派的任务独占租约；同事来源一律拦；项目经理不用设备。
 - 租约在 `state/devices/<名字>.json`。重置命令只给占用者；任务离开“进行中”就释放。
 
@@ -89,7 +91,7 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 
 ### 不可逆闸门（hooks/irreversible_gate.py）
 
-命令匹配 `irreversible` 里的正则，而任务还有没取的追加指令时，闸门拦下，先取指令再动手。
+命令匹配 `irreversible` 里的正则，而任务还有没取的追加指令时，闸门拦下，先取指令再动手。模板列了：推标签（`--tags`、`--follow-tags`、`refs/tags/`、`git push origin v1.2.3` 这种按版本号推）、`gh release create|edit|delete|upload`、`gh api` 写 `releases`（带 `-X POST` 之类或 `-f`）、`npm publish`。
 
 ### 沙箱实测（2026-11-22）
 
@@ -100,6 +102,28 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - `/run/user` 必须盖：没盖时，沙箱里用 `XDG_RUNTIME_DIR=/run/user/<uid> systemd-run --user --pipe --wait cat <范围外的文件>` 读得到（2026-11-22 实测），用户级 systemd 在沙箱外替它跑命令。
 - 探针比定时运行收得更紧（探针不经过钩子）：家目录、`/tmp` 整个盖掉，只读放回该看的，见 schedules.md 第 4 节。测试 `test_probe_sees_only_scope_and_no_credentials` 用真的 bwrap 验证范围外的文件、凭据目录、实例目录和用户级 systemd 这条路都走不通。
 - 机器上没有 bwrap 时，带读范围的定时运行不跑，不降级成只靠提示。
+
+### 定时运行的沙箱（评审修复 2、3，2026-11-23）
+
+- 整机只读（`--ro-bind / /`）。家目录、`/tmp`、`/run/user` 盖成空目录，`docker.sock` 盖掉。
+- 只读放回：实例代码、仓库、范围-读、`~/.claude`、git 配置、PATH 里的目录、每个 `claude` 的真实目录、Python 前缀、`tasks.sandbox_read`。
+- 可写：工作树；仓库的 git 目录（其中 `hooks` 和 `config` 再挂回只读）；本任务的收件箱回执、发件箱、锁；决策日志；设备租约；`tasks.sandbox_write`。`~/.claude.json` 换成本任务的副本。
+- 实例的 `state` 盖成空目录，只放回本任务目录、范围目录和身份登记目录（只读）。投递写进本任务的 `outbox.jsonl`，服务在沙箱外按任务记录的身份送出。
+- 私密路径最后盖：字面路径整机盖；正则在放回的目录树里找（解析软链接）。范围-读明确列的私密目录放开。范围-读的软链接被换过（真实路径和建的时候不一样）就不放。凭据目录（`~/.ssh`、`~/.config` 等）在放回的目录下也盖掉。
+- 会话记录：只把这次运行自己的会话目录挂成可写，同一个定时任务之前运行的会话目录只读（分叉、续接要读），别的项目的看不到。每个定时任务单独一件事。
+- 验证命令和运行在同一个沙箱里跑。
+
+### 身份（评审修复 1）
+
+- `tasks.py send/act/inbox/diag/mr` 不信环境变量里的身份。任务按 `/proc/self/cgroup` 里本实例的单元名认（任务要在跑、轮次对得上）；聊天和项目经理会话按服务写的登记文件 `state/live/<pid>.json` 认（进程号加启动时间，沿父进程找）。在服务单元里却没有登记的，拒绝。
+- CLI 发给任务的一律算留言。指令只来自服务解析的 `[任务指令]`。主人派的任务，这一轮不是主人触发的，只收留言。加预算、放开验收只认指令。
+
+### 已知的残余风险
+
+- 沙箱没开网络命名空间，抽象 unix 套接字还连得上。
+- Claude 自己的登录凭据在沙箱里读得到（不然 Claude 跑不起来）。
+- 装在家目录里的 MCP 服务器要写进 `tasks.sandbox_read` 才看得到。
+- 不在服务单元里的进程（测试、macOS）退回按环境变量认身份，主人身份一律不认；同一用户能用 `systemd-run --scope` 造出不在服务单元里的进程。
 
 ## 5. 私密资料（config.json 的 private）
 

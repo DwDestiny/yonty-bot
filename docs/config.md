@@ -13,8 +13,10 @@
 | `cross_im_read` | `false` | 两个渠道都启用时：会话能不能读另一个 IM 的聊天记录。打开要主人确认，见 boundary.md |
 | `tasks.enabled` | `true` | 长任务开关，见 tasks.md |
 | `tasks.root` | `~/work/.bot-tasks` | 任务工作树放哪（按服务名分子目录）。不能在实例目录里 |
-| `tasks.resources` | 见说明 | 按资源放行：`floor_gb` 1.5、`floor_pct` 10（可用内存底线取两者较大）、`pressure_pct` 20、`max_units` 8（单元总数上限）、`freeze_gb` 0.75、`freeze_pressure_pct` 60（可用低于 `freeze_gb` 或内存压力超过它就冻结一个单元）、`thaw_after_s` 60（冻满多久才解冻）、`default_build_gb` 4、`default_light_gb` 1、`build_roles` `["开发","排查","验收"]`。见 tasks.md 第 1 节 |
+| `tasks.resources` | 见说明 | 按资源放行：`floor_gb` 1.5、`floor_pct` 10（可用内存底线取两者较大）、`pressure_pct` 20、`max_units` 8（单元总数上限）、`freeze_gb` 0.75、`freeze_pressure_pct` 60（可用低于 `freeze_gb` 或内存压力超过它就冻结一个单元）、`thaw_after_s` 60（冻满多久才解冻）、`thaw_margin_gb` 0.5 和 `thaw_pressure_pct` 40（可用回到 `freeze_gb` 加这个余量、压力不超过它才解冻）、`freeze_settle_s` 90（冻一个后至少等这么久、内存没见好才冻下一个）、`freeze_max_min` 20（冻满这么久就停掉单元，按中断交回）、`default_build_gb` 4、`default_light_gb` 1、`build_roles` `["开发","排查","验收"]`。见 tasks.md 第 1 节 |
 | `tasks.approval_hours` | `24` | 同事派的活多久没人批就作废 |
+| `tasks.wait_block_min` | `60` | 等回复的任务最多挡同一件事的排队多少分钟；过了让排队的先跑，提醒主控一次 |
+| `tasks.sandbox_read` / `tasks.sandbox_write` | `[]` | 定时运行的沙箱里额外只读放回、可写挂载的目录（家目录里的 MCP 服务器、构建缓存之类）。见 boundary.md |
 | `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活时主控能挑的模型别名；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
 | `tasks.relay` | `true` | 任务的完成、提问、失败先交给派活的那个会话（主控）处理，再由主控对人汇报；`false` 就原话直发 |
 | `tasks.codeup_token` | `~/.config/codeup/token` | `tasks.py mr` 给 Codeup 建合并请求用的个人令牌文件 |
@@ -67,9 +69,9 @@
 | `processing_emoji` | `OnIt` | 处理中表情 |
 | `new_session_commands` | `["/new"]` | 私聊里发这些词开新会话 |
 | `timezone` | `Asia/Shanghai` | 定时任务和时间显示用的时区 |
-| `devices` | `[]` | 设备列表。每项 `name`、`match`（调用命令的正则，锚定命令开头）、`reset`、`release`、`idle_max_min`。模板为空，设备名是实例配置，见 boundary.md 4.1 |
+| `devices` | `[]` | 设备列表。每项 `name`、`match`（调用命令的正则，锚定命令开头）、`reset`、`release`、`idle_max_min`、`mcp`（这台设备的 MCP 服务器名，按它查参数）。模板为空，设备名是实例配置，见 boundary.md 4.1 |
 | `irreversible` | 见 app/config.example.json | 不可逆命令的正则。有没取的追加指令时 `irreversible_gate` 拦它们 |
-| `schedules` | 见说明 | `max_run_min` 120（单次最长分钟数）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）。见 schedules.md |
+| `schedules` | 见说明 | `max_run_min` 120（单次最长分钟数）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）、`tick_wait_s` 3（到点处理在单独线程，任务线程最多等它这么久）。见 schedules.md |
 | `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |
 | `delivery` | 见说明 | 投递：`max_hops` 3、`owner_max_chars` 300、`other_max_chars` 2000、`dedup_min` 30、`progress_gap_min` 10、`progress_max` 5、`owner_per_10min` 4、`owner_per_hour` 12、`pingpong_max` 3 和 `pingpong_min` 10（同一对智能体 10 分钟内来回 3 次后交给主控）、`merge_s` 120（同一发送方发给同一目标，离上次送不到这么多秒就等着合并）。见 architecture.md |
 
