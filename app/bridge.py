@@ -1333,7 +1333,7 @@ def delivery_tick():
     for t in tasks.all_tasks():   # 定时运行在沙箱里写进发件箱的请求，按范围校验后在箱外执行；runner 从输出里解析出的 [投递]，按任务记录的身份投
         try:
             if t.get("schedule"): tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start())
-            if os.path.exists(os.path.join(tasks.tdir(t["id"]), "marks.jsonl")): tasks.marks_drain(t["id"])
+            tasks.marks_drain(t["id"])
         except Exception: log.exception("outbox of task #%s failed", t["id"])
     for tid, text in dl.progress_due(tk, now):   # 进展留着的那条到点了
         t = tasks.load(tid)

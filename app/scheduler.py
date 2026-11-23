@@ -264,13 +264,15 @@ def probe(tk, sc, alerts, now):
         alerts.append(f"定时任务 {sc['ref']} 的探针内容变了（命令或脚本跟建的时候对不上），视为没批过，先暂停了。"
                       f"确认改动没问题后主人发 /schedule approve {sc['ref']}，按现在的内容重新记哈希。")
         return None
-    box = tk.probe_box(os.path.join(DIR, str(sc["id"]), "scope.json"), sc["repo"], probe_files(sc["probe"], sc["repo"]))
+    why, box = "", None
+    try: box = tk.probe_box(os.path.join(DIR, str(sc["id"]), "scope.json"), sc["repo"], probe_files(sc["probe"], sc["repo"]))
+    except RuntimeError as e: why = f"沙箱没搭成：{e}"
     env = {k: os.environ[k] for k in ("PATH", "LANG", "HOME") if k in os.environ}
     env.update(TZ=tk.CFG.get("timezone") or "Asia/Shanghai", FCB_SCHEDULE=sc["ref"])
     mem = int(c.get("probe_mem_mb", 1024)) * 1024 * 1024
     err, out = "", None
     if box is None:
-        err = "机器上没有 bwrap 或读不到范围文件，探针不能在沙箱里跑（apt install bubblewrap）"
+        err = why or "机器上没有 bwrap 或读不到范围文件，探针不能在沙箱里跑（apt install bubblewrap）"
     else:
         try:
             lim = [shutil.which("prlimit"), f"--as={mem}", "--"] if shutil.which("prlimit") else []   # bridge 有线程，不用 preexec_fn
@@ -288,7 +290,8 @@ def probe(tk, sc, alerts, now):
     if out is None:
         sc["probe_bad"] = sc.get("probe_bad", 0) + 1
         tk.decide("探针坏了", schedule=sc["ref"], why=err, times=sc["probe_bad"])
-        if sc["probe_bad"] == 3: alerts.append(f"定时任务 {sc['ref']} 的探针连着 3 次没跑通：{err}。探针坏着的时候不叫醒智能体。")
+        if sc["probe_bad"] == 1 and why: alerts.append(f"定时任务 {sc['ref']} 的探针跑不了：{err}。探针坏着的时候不叫醒智能体。")   # 不会自己好的，第一次就说
+        if sc["probe_bad"] == 3 and not why: alerts.append(f"定时任务 {sc['ref']} 的探针连着 3 次没跑通：{err}。探针坏着的时候不叫醒智能体。")
         return None
     sc["probe_bad"], sc["probe_last"] = 0, now
     rd = {"wake": out["wake"], "level": clean(out.get("level") or "", 40), "summary": clean(out.get("summary") or out.get("note") or "", 300),
