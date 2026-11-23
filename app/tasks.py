@@ -812,64 +812,152 @@ def admit(cands):
             decide("等待", task=ref(t), why=why)
     return out
 
+# ---------- 沙箱（方案 6.6）：定时运行、它的验证命令、探针共用一套。用户级单元的 ProtectHome 之类不生效，实测见 docs/boundary.md ----------
+CRED = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube", "~/.lark-cli",
+        "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc")
+CLAUDE_STATE = ("todos", "shell-snapshots", "statsig", "session-env", "debug", "file-history", "plans", "paste-cache", "ide", "telemetry")
+WALK_SKIP, WALK_MAX = {".git", "node_modules", "__pycache__", ".venv"}, 50000
+
+def _rp(p): return os.path.realpath(X(p))
+def _under(p, ds): return any(p == d or p.startswith(d.rstrip(os.sep) + os.sep) for d in ds)
+def _cover(p): return ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
+
+def _box_base(bw, hidden):
+    """整机只读；家目录、/tmp（tmux 之类的套接字）、/run/user（用户级 systemd 和 D-Bus，能借它在沙箱外跑命令）盖成空目录，docker.sock 盖掉。"""
+    a = [bw, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent", "--new-session"]
+    a += sum((["--tmpfs", d] for d in hidden), [])
+    return a + sum((["--ro-bind", "/dev/null", s] for s in sorted({os.path.realpath(x) for x in ("/run/docker.sock", "/var/run/docker.sock")})
+                    if os.path.exists(s)), [])
+
+def _scope_reads(sc):
+    """范围-读：建的时候存的是解析过软链接的真实路径。现在解析出来对不上（软链接被换了），这条不放。"""
+    out = []
+    for r in sc.get("read") or []:
+        if os.path.exists(r) and os.path.realpath(r) == r: out.append(r)
+        else: decide("范围-读不放", path=r, why="路径不在了，或解析出的真实路径和建的时候不一样（软链接被换过）")
+    return out
+
+def _private_cover(roots, reads, keep_cred=()):
+    """放回的目录里要盖掉的：私密路径（字面路径整机都盖；正则写的在放回的目录树里找）和凭据。
+    范围-读明确列的私密目录（或它下面的子目录）不盖；列了父目录不算放开里面的私密子目录。"""
+    pats = [X(p) for p in (CFG.get("private") or {}).get("paths") or []]
+    rx = []
+    for p in pats:
+        try: rx.append(re.compile(p))
+        except re.error: pass
+    lits = [os.path.realpath(p) for p in pats if os.path.lexists(p)]
+    open_ = [r for r in reads if _under(r, lits) or any(x.search(r) or x.search(r + "/") for x in rx)]   # 范围-读明确列的私密目录
+    out, seen = [], set()
+    def add(p):
+        if p in seen or _under(p, open_) or any(r.startswith(p + os.sep) for r in reads): return
+        seen.add(p); out.extend(_cover(p))
+    for p in lits: add(p)
+    n = 0
+    for root in dict.fromkeys(roots):
+        if not os.path.isdir(root): continue
+        for d, subs, files in os.walk(root):
+            n += 1 + len(files)
+            if n > WALK_MAX: break
+            for name in list(subs):
+                q = os.path.join(d, name)
+                if name in WALK_SKIP or os.path.islink(q): subs.remove(name); continue
+                if any(x.search(q) or x.search(q + "/") for x in rx): add(q); subs.remove(name)
+            for name in files:
+                q = os.path.join(d, name)
+                if any(x.search(q) for x in rx): add(q)
+    for c in CRED:
+        p = _rp(c)
+        if p in keep_cred or not os.path.lexists(p) or not _under(p, roots): continue
+        add(p)
+    return out
+
+def transcript_dir(path):
+    """Claude 存这个工作目录会话记录的地方（Claude 配置目录的 projects 下，按路径把非字母数字换成横线）。"""
+    return os.path.join(_rp("~/.claude"), "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path)))
+
+def box_files(t):
+    """沙箱里可写的本任务文件：收件箱回执、发件箱、锁、~/.claude.json 的副本（Claude 会写它，写进副本，不碰真的）。"""
+    d = tdir(t["id"])
+    fs = {n: os.path.join(d, n) for n in ("inbox.state.json", ".lock", "outbox.jsonl", "claude.json")}
+    for n, f in fs.items():
+        if n == "claude.json":
+            try: shutil.copyfile(_rp("~/.claude.json"), f)
+            except OSError:
+                with open(f, "w") as fh: fh.write("{}")
+        elif not os.path.exists(f):
+            with open(f, "w") as fh: fh.write("{}" if n.endswith(".json") else "")
+    return fs
+
 def sandbox(t):
-    """定时任务的读权限落在系统层（方案 6.6；用户级单元的 ProtectHome 之类不生效，实测见 docs/boundary.md）：
-    bwrap 把范围外的私密目录和实例运行态盖成空目录，实例代码只读。不是定时任务返回 []；要沙箱却做不到返回 None。"""
+    """定时运行的沙箱，验证命令也在里面跑：整机只读，家目录、/tmp、/run/user 盖掉，只放回该看的（实例代码、仓库、范围-读、
+    PATH、Claude 自己），只把该写的挂成可写（工作树、仓库的 .git 但不含 hooks 和 config、本任务的收件箱回执和发件箱、决策日志、
+    设备租约、本任务自己的会话记录目录）。私密路径和凭据最后盖。不是定时任务返回 []；要沙箱却做不到返回 None。"""
     if not t.get("scope"): return []
     bw = shutil.which("bwrap")
     try:
         with open(t["scope"]) as f: sc = json.load(f)
     except Exception: return None
     if not bw: return None
-    reads = [os.path.realpath(X(p)) for p in sc.get("read") or []]
-    a = [bw, "--bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--die-with-parent"] + _hide(reads)
-    if os.path.isdir("/run/user"): a += ["--tmpfs", "/run/user"]   # 用户级 systemd 和 D-Bus 的套接字：借它能在沙箱外跑命令（实测）
-    a += sum((["--ro-bind", "/dev/null", s] for s in sorted({os.path.realpath(x) for x in ("/run/docker.sock", "/var/run/docker.sock")})
-              if os.path.exists(s)), [])   # docker 套接字同理
+    home, cdir = _rp("~"), _rp("~/.claude")
+    hidden = [d for d in (home, _rp("/tmp"), "/run/user") if os.path.isdir(d)]
+    reads = _scope_reads(sc)
+    wt, repo = _rp(t["worktree"]), _rp(t["repo"])
+    gd = git(wt, "rev-parse", "--git-common-dir").stdout.strip()
+    gd = os.path.realpath(os.path.join(wt, gd)) if gd else ""
+    path = [_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    cls = [os.path.dirname(os.path.realpath(os.path.join(d, "claude"))) for d in path if os.path.exists(os.path.join(d, "claude"))]
+    ro = [ROOT, repo, cdir, _rp("~/.gitconfig"), _rp("~/.config/git")] + reads + path + cls + [os.path.realpath(sys.prefix)] + \
+         [_rp(x) for x in T.get("sandbox_read") or []]   # 实例配置里额外只读放回的（装在家目录里的 MCP 服务器、工具链）
+    ro = [p for p in dict.fromkeys(ro) if os.path.exists(p) and _under(p, hidden)]
+    a = _box_base(bw, hidden) + sum((["--ro-bind", p, p] for p in ro), [])
+    a += ["--bind", wt, wt] + (["--bind", gd, gd] if gd and os.path.isdir(gd) else [])
+    a += sum((["--ro-bind", p, p] for p in (os.path.join(gd, "hooks"), os.path.join(gd, "config")) if gd and os.path.exists(p)), [])
     st = os.path.join(ROOT, "state")
-    keep = [tdir(t["id"]), os.path.join(st, "deliveries"), os.path.join(st, "devices"), os.path.dirname(t["scope"])]
-    for d in keep: os.makedirs(d, exist_ok=True)
-    open(DECISIONS, "a").close()
-    return a + ["--ro-bind", ROOT, ROOT, "--tmpfs", st] + sum((["--bind", d, d] for d in keep), []) + ["--bind", DECISIONS, DECISIONS]
-
-def _hide(reads, extra=()):
-    """bwrap 参数：范围外的私密目录盖成空目录（列了父目录不算放开里面的私密子目录）。"""
-    out = []
-    for p in list((CFG.get("private") or {}).get("paths") or []) + list(extra):
-        rp = os.path.realpath(X(p))
-        if os.path.isdir(rp) and rp not in out and not any(r == rp or r.startswith(rp + os.sep) for r in reads):
-            out += ["--tmpfs", rp]
-    return out
-
-CRED = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube", "~/.lark-cli",
-        "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc")
+    devs = os.path.join(st, "devices"); os.makedirs(devs, exist_ok=True); open(DECISIONS, "a").close()
+    fs = box_files(t)
+    a += ["--tmpfs", st] + sum((["--ro-bind", p, p] for p in (tdir(t["id"]), os.path.dirname(t["scope"]), LIVE) if os.path.isdir(p)), [])
+    a += sum((["--bind", f, f] for n, f in fs.items() if n != "claude.json"), []) + ["--bind", DECISIONS, DECISIONS, "--bind", devs, devs]
+    a += ["--bind", fs["claude.json"], os.path.join(home, ".claude.json")]
+    for w in T.get("sandbox_write") or []:   # 实例配置里额外给定时运行写的目录（构建缓存之类）
+        w = _rp(w); os.makedirs(w, exist_ok=True); a += ["--bind", w, w]
+    a += sum((["--tmpfs", p] for p in (os.path.join(cdir, d) for d in CLAUDE_STATE) if os.path.isdir(p)), [])
+    a += _private_cover(ro + [wt], reads, keep_cred=(cdir,))
+    own = transcript_dir(wt); os.makedirs(own, exist_ok=True)
+    prior = [transcript_dir(x["worktree"]) for x in all_tasks()
+             if x["id"] != t["id"] and x.get("schedule") == t.get("schedule") and x.get("worktree")]
+    a += sum((["--ro-bind", p, p] for p in dict.fromkeys(prior) if os.path.isdir(p)), [])   # 同一个定时任务之前的运行：分叉、续接要读
+    return a + ["--bind", own, own]
 
 def probe_box(scope_path, repo=None, files=()):
     """探针的沙箱（方案 6.6“探针也在范围里”）：探针不经过钩子，所以默认什么都看不到，只放回该看的。
-    整机只读；家目录、/tmp、/run/user（用户级 systemd 和 D-Bus 的套接字，能借它在沙箱外跑命令，实测）、docker.sock 盖掉；
-    再只读放回范围里的目录、仓库、探针命令提到的文件和 PATH 里的目录；放回的目录里的私密目录、凭据和实例目录照样盖掉。
-    读不到范围文件或没有 bwrap 返回 None。"""
+    整机只读；家目录、/tmp、/run/user、docker.sock 盖掉；再只读放回范围里的目录、仓库、探针命令提到的文件和 PATH 里的目录；
+    放回的目录里的私密路径（字面和正则）、凭据和实例目录照样盖掉。读不到范围文件或没有 bwrap 返回 None。"""
     bw = shutil.which("bwrap")
     try:
         with open(scope_path) as f: sc = json.load(f)
     except Exception: return None
     if not bw: return None
-    rp = lambda p: os.path.realpath(X(p))
-    reads, home, tmp = [rp(p) for p in sc.get("read") or []], rp("~"), rp("/tmp")
-    under = lambda p, ds: any(p == d or p.startswith(d + os.sep) for d in ds)
-    hidden = [d for d in (home, tmp, "/run/user") if os.path.isdir(d)]
-    path = [rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
-    back = [p for p in dict.fromkeys(reads + [rp(repo)] * bool(repo) + [rp(f) for f in files] + path)
-            if os.path.exists(p) and under(p, hidden)]
-    a = [bw, "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"] + sum((["--tmpfs", d] for d in hidden), [])
-    a += sum((["--ro-bind", "/dev/null", s] for s in sorted({os.path.realpath(x) for x in ("/run/docker.sock", "/var/run/docker.sock")})
-              if os.path.exists(s)), [])
-    a += sum((["--ro-bind", p, p] for p in back), []) + ["--die-with-parent", "--unshare-pid", "--new-session"] + _hide(reads)
-    for c in CRED:   # 放回的目录（比如范围写了整个家目录）里的凭据
-        p = rp(c)
-        if os.path.exists(p) and under(p, back) and not any(r == p or r.startswith(p + os.sep) for r in reads):
-            a += ["--tmpfs", p] if os.path.isdir(p) else ["--ro-bind", "/dev/null", p]
-    return a + ["--tmpfs", ROOT]
+    reads = _scope_reads(sc)
+    hidden = [d for d in (_rp("~"), _rp("/tmp"), "/run/user") if os.path.isdir(d)]
+    path = [_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
+    back = [p for p in dict.fromkeys(reads + [_rp(repo)] * bool(repo) + [os.path.realpath(f) for f in files] + path)
+            if os.path.exists(p) and _under(p, hidden)]
+    a = _box_base(bw, hidden) + sum((["--ro-bind", p, p] for p in back), []) + ["--unshare-pid"]
+    return a + _private_cover(back, reads) + ["--tmpfs", ROOT]
+
+def outbox_drain(tid):
+    """定时运行在沙箱里写不了投递记录，tasks.py send 写进本任务的发件箱；服务在沙箱外按任务记录的身份送出。返回送了几条。"""
+    p = os.path.join(tdir(tid), "outbox.jsonl")
+    with _Lock(os.path.join(tdir(tid), ".lock")):
+        try:
+            with open(p) as f: rows = [json.loads(l) for l in f if l.strip()]
+        except (OSError, ValueError): rows = []
+        if rows: open(p, "w").close()
+    t = load(tid)
+    for r in rows:
+        try: dl.submit(_me(), dl.task_sender(_me(), t), r.get("to", ""), r.get("kind", ""), r.get("text", ""), None, r.get("reply"))
+        except ValueError as e: event(tid, "progress", f"投递没送出：{e}")
+    return len(rows)
 
 def _freezer(t, on):
     if t.get("unit"):
@@ -1105,6 +1193,13 @@ def first_prompt(t, base, forked=False):
 任务书：
 {t['brief']}"""
 
+def run_env(t):
+    """任务这一轮的环境：钩子按它判断。定时任务的一次运行按同事权限跑，范围文件交给钩子和沙箱（方案 6.6）。"""
+    o = t["origin"]
+    env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), t["id"])
+    if t.get("schedule"): env.update(FCB_OWNER="0", FCB_SCHEDULE=t["schedule"], FCB_SCOPE=t.get("scope") or "")
+    return env
+
 def run(tid):
     """后台单元的入口：跑一轮或几轮 Claude，把进展、提问、结果写成事件。"""
     t = load(tid)
@@ -1142,9 +1237,7 @@ def run(tid):
             if resume: cmd += ["--resume", t["session_id"]]
             elif fork: cmd += ["--resume", fork, "--fork-session", "--session-id", t["session_id"]]
             else: cmd += ["--session-id", t["session_id"]]
-            env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid)
-            if t.get("schedule"):   # 定时任务的一次运行：按同事权限跑，范围文件交给钩子和沙箱（方案 6.6）
-                env.update(FCB_OWNER="0", FCB_SCHEDULE=t["schedule"], FCB_SCOPE=t.get("scope") or "")
+            env = run_env(t)
             box = sandbox(t)
             if box is None: raise RuntimeError("定时任务要在沙箱里跑，可本机没有 bwrap 或范围文件读不了：按失败交回，不降级成只写在提示里")
             final, tools_n, last_u = None, t.get("tools", 0), {}
@@ -1178,6 +1271,7 @@ def run(tid):
                     elif obj.get("type") == "result":
                         final = obj
                 p.wait(); p.stdout.close(); grant_drop(p.pid)
+            if t.get("schedule"): outbox_drain(tid)
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
                 oom = "killed by the OOM killer" in unit_journal(load(tid) or {})
@@ -1289,10 +1383,10 @@ def run_verify(t, cmd=None):
     cmd = cmd or t["verify"]
     why = guard_check(cmd, t)
     if why: return False, "验证命令被护栏拦下：" + why
-    o = t["origin"]
-    env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), t["id"])
+    box = sandbox(t)   # 定时运行的验证命令跟运行在同一个沙箱里；普通任务是 []
+    if box is None: return False, "定时任务的验证命令要在沙箱里跑，可本机没有 bwrap 或范围文件读不了"
     try:
-        r = subprocess.run(["bash", "-c", cmd], cwd=t["worktree"], env=env, capture_output=True, text=True,
+        r = subprocess.run(box + ["bash", "-c", cmd], cwd=t["worktree"], env=run_env(t), capture_output=True, text=True,
                            timeout=T["verify_timeout_min"] * 60)
         return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:] or f"（没有输出，退出码 {r.returncode}）"
     except subprocess.TimeoutExpired:
@@ -1631,7 +1725,14 @@ def cli(cmd, argv):
         for k in ("--to", "--kind", "--text"): ap.add_argument(k, required=True)
         ap.add_argument("--reply", choices=("是", "否"))
         a = ap.parse_args(argv)
-        try: print(dl.submit(_me(), sender_from_env(), a.to, a.kind, a.text, None,
+        me = sender_from_env()
+        if me["type"] == "schedule":   # 定时运行在沙箱里，投递记录只读：写进本任务的发件箱，服务在外面按任务记录的身份送
+            with _Lock(os.path.join(tdir(me["task"]), ".lock")):
+                with open(os.path.join(tdir(me["task"]), "outbox.jsonl"), "a") as f:
+                    f.write(json.dumps({"to": a.to, "kind": a.kind, "text": a.text, "reply": None if a.reply is None else a.reply == "是"},
+                                       ensure_ascii=False) + "\n")
+            print("已放进发件箱，服务下一拍送出（改投、去重照常，记进决策日志）。"); return
+        try: print(dl.submit(_me(), me, a.to, a.kind, a.text, None,
                              None if a.reply is None else a.reply == "是"))
         except ValueError as e: sys.exit(str(e))
     elif cmd == "res":

@@ -170,7 +170,7 @@ def fire(tk, sc, extra=""):
     kw = dict(title=f"{sc['ref']} {sc['title']}"[:80], repo=sc["repo"], brief=brief, role=sc.get("role") or "", model=sc.get("model") or "",
               effort=sc.get("effort") or "", status="approved", requester=req, origin=sc["creator"].get("origin") or {}, schedule=sc["ref"],
               scope=sp, verify=sc.get("verify") or "", v2=True, budget=0)
-    if sc.get("private"): kw["thing"] = f"定时-{sc['ref']}"   # 读私密目录的定时任务单独一件事，档案不和别的活混
+    kw["thing"] = f"定时-{sc['ref']}"   # 每个定时任务单独一件事：分叉、续接只接自己之前的运行，沙箱只放回这些运行的会话记录
     return tk.create(**{k: v for k, v in kw.items() if v != "" or k in ("brief",)})
 
 

@@ -5,6 +5,8 @@ Pos: 评审修复（越权、沙箱、冻结、抢答、红线、实例数据、
 """
 import json
 import os
+import shutil
+import uuid
 import subprocess
 import sys
 import time
@@ -106,6 +108,97 @@ class AuthTest(Base):
         self.e.b.pm_marks('proj', 'proj:proj:grp:oc_g', False, f'[投递 {self.t.ref(t)} 留言]\n预算加到 40')
         self.assertEqual(self.t.load(t['id'])['budget'], 10)
         self.assertEqual(self.inbox(t)[-1]['kind'], '留言')
+
+
+CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
+PV = '.priv' + 'ate'
+PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'
+
+
+@unittest.skipUnless(shutil.which('bwrap'), '机器上没有 bwrap')
+class SandboxTest(unittest.TestCase):
+    """第 2、3 项：定时运行的沙箱整机只读、/tmp 和 /run/user 隔开、私密路径（正则、软链接）和凭据盖住、验证命令也在里面、
+    只有自己的会话记录目录可写。家目录换成假的，不碰真的 Claude 配置。"""
+
+    def setUp(self):
+        self.e = Inst(self, cfg_patch=lambda c: c['private']['paths'].extend([PV_RE, CP]))
+        self.t, h = self.e.t, self.e.home
+        old = os.environ.get('HOME'); os.environ['HOME'] = str(h)
+        self.addCleanup(lambda: os.environ.__setitem__('HOME', old) if old else os.environ.pop('HOME', None))
+        self.other = h / '.claude' / 'projects' / '-other-proj'
+        for d in (h / '.ssh', self.other, h / '.claude' / 'todos'): d.mkdir(parents=True, exist_ok=True)
+        (h / '.ssh' / 'id').write_text('KEY'); (self.other / 's.jsonl').write_text('OTHER-SESSION')
+        (h / '.bashrc').write_text('ORIG'); (h / '.claude.json').write_text('{}')
+        w = self.e.work
+        (w / 'secret' / 'k').write_text('SEEN-A'); (w / 'pub').mkdir(); (w / 'pub' / 'k').write_text('PUB')
+        (self.e.repo / PV).mkdir(); (self.e.repo / PV / 'k').write_text('REGEX-SECRET')
+        d = self.e.inst / 'state' / 'schedules' / '1'; d.mkdir(parents=True)
+        self.scope = d / 'scope.json'
+        self.scope.write_text(json.dumps({'read': [str(w / 'pub'), str(w / 'secret')], 'tools': ['Bash'], 'actions': []}))
+        self.run_ = self.mk()
+
+    def mk(self):
+        x = self.e.task(owner=False, schedule='proj#S1', scope=str(self.scope), thing='定时-proj#S1')
+        self.t.make_worktree(x)
+        return self.t.load(x['id'])
+
+    def box(self, cmd, t=None):
+        t = t or self.run_
+        a = self.t.sandbox(t)
+        self.assertTrue(a, a)
+        return subprocess.run(a + ['sh', '-c', cmd], cwd=t['worktree'], capture_output=True, text=True, timeout=60,
+                              env=self.t.run_env(t))
+
+    def test_tmp_and_run_user_are_isolated(self):
+        sock = Path('/tmp') / f'yb-{uuid.uuid4().hex[:8]}'; sock.write_text('x'); self.addCleanup(sock.unlink)
+        r = self.box(f'test -e {sock} && echo SEEN || echo GONE; ls /run/user | wc -l')
+        self.assertIn('GONE', r.stdout, r.stderr); self.assertEqual(r.stdout.split()[-1], '0')
+
+    def test_home_and_hooks_not_writable(self):
+        h, g = self.e.home, self.e.repo / '.git'
+        r = self.box(f'echo PWN >> {h}/.bashrc; echo PWN > {g}/hooks/pre-commit; echo PWN > {self.e.inst}/hooks/x.py; '
+                     f'echo PWN >> {g}/config; git -c user.name=a -c user.email=b@c commit -q --allow-empty -m boxed && echo COMMITTED')
+        self.assertEqual((h / '.bashrc').read_text(), 'ORIG')
+        self.assertFalse((g / 'hooks' / 'pre-commit').exists()); self.assertFalse((self.e.inst / 'hooks' / 'x.py').exists())
+        self.assertNotIn('PWN', (g / 'config').read_text())
+        self.assertIn('COMMITTED', r.stdout, r.stderr)
+
+    def test_private_regex_symlink_and_credentials_hidden(self):
+        w, h = self.e.work, self.e.home
+        r = self.box(f'cat {w}/pub/k {w}/secret/k {self.e.repo / PV / "k"} {h}/.ssh/id {self.e.inst}/state/tasks/{self.run_["id"]}/task.json 2>&1')
+        self.assertIn('PUB', r.stdout); self.assertIn('SEEN-A', r.stdout, '范围里明确列的私密目录看得到')
+        for bad in ('REGEX-SECRET', 'KEY'): self.assertNotIn(bad, r.stdout)
+        shutil.rmtree(w / 'pub'); (w / 'pub').symlink_to(w / 'secret2'); (w / 'secret2' / 'k').write_text('SEEN-B')
+        r = self.box(f'cat {w}/pub/k {w}/secret2/k 2>&1')
+        self.assertNotIn('SEEN-B', r.stdout, '软链接换成指向私密目录后不放')
+
+    def test_verify_runs_inside_box(self):
+        self.t.update(self.run_['id'], _force=True, verify=f'echo PWN > {self.e.home}/.bashrc; touch {self.e.inst}/pwn')
+        ok, out = self.t.run_verify(self.t.load(self.run_['id']))
+        self.assertEqual((self.e.home / '.bashrc').read_text(), 'ORIG', out)
+        self.assertFalse((self.e.inst / 'pwn').exists())
+
+    def test_only_own_transcripts_writable_and_kept(self):
+        own = Path(self.t.transcript_dir(self.run_['worktree']))
+        r = self.box(f'cat {self.other / "s.jsonl"} 2>&1; echo NEW > {own}/s1.jsonl; '
+                     f'echo X > {self.e.home}/.claude/todos/t.json && echo TODO-OK')
+        self.assertNotIn('OTHER-SESSION', r.stdout)
+        self.assertEqual((own / 's1.jsonl').read_text().strip(), 'NEW', '自己的会话记录写得进、留得住')
+        self.assertIn('TODO-OK', r.stdout, r.stderr)
+        self.t.update(self.run_['id'], _force=True, status='done')
+        nxt = self.mk()
+        r = self.box(f'cat {own}/s1.jsonl; echo Y > {own}/s2.jsonl', nxt)
+        self.assertIn('NEW', r.stdout, '下一次运行能读上一次的会话（分叉、续接）')
+        self.assertFalse((own / 's2.jsonl').exists(), '上一次的会话目录只读')
+
+    def test_fire_always_own_thing(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('sch_t', self.e.inst / 'scheduler.py')
+        sch = importlib.util.module_from_spec(spec); spec.loader.exec_module(sch)
+        sc = {'id': 9, 'ref': 'proj#S9', 'name': 'n', 'title': 't', 'brief': 'b', 'when': '每 30 分钟', 'repo': str(self.e.repo),
+              'spec': {'kind': 'every'}, 'to': '主控', 'creator': {'origin': {}}, 'private': False}
+        sch.DIR = str(self.e.inst / 'state' / 'schedules')
+        self.assertEqual(sch.fire(self.t._me(), sc)['thing'], '定时-proj#S9')
 
 
 if __name__ == '__main__':

@@ -106,7 +106,8 @@ class Inst:
                    private={'paths': [str(self.work / 'secret'), str(self.work / 'secret2')]},
                    irreversible=[r'\bgit\s+push\b.*--tags', r'\bgh\s+release\s+create\b'],
                    devices=[{'name': 'testbox', 'match': r'^\s*devcli\b', 'reset': 'devcli reset', 'release': 'devcli release'}])
-        cfg['tasks'].update(root=str(base / 'tasks'), max_running=1, heartbeat_min=30)   # max_running 是 1.3.0 实例的遗留配置
+        cfg['tasks'].update(root=str(base / 'tasks'), max_running=1, heartbeat_min=30,
+                            sandbox_write=[str(base / 'fake-state')])   # 评审修复 2：定时运行的沙箱盖了 /tmp，假 Claude 的记录目录要显式给写   # max_running 是 1.3.0 实例的遗留配置
         cfg['channels']['wecom']['enabled'] = False
         cfg['ambient']['enabled'] = False
         if cfg_patch: cfg_patch(cfg)

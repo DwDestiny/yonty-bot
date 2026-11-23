@@ -1145,6 +1145,9 @@ def delivery_tick():
     进展按任务限频；落到主人私聊的每 10 分钟最多 4 条、每小时最多 12 条，超出的不用回复的进摘要，要回复的接着排队。"""
     tk, dl, now = tasks._me(), tasks.dl, time.time()
     c = dl.conf(CFG)
+    for t in tasks.all_tasks():   # 定时运行在沙箱里写进发件箱的投递，按任务记录的身份送出
+        ob = os.path.join(tasks.tdir(t["id"]), "outbox.jsonl")
+        if t.get("schedule") and os.path.exists(ob) and os.path.getsize(ob): tasks.outbox_drain(t["id"])
     for tid, text in dl.progress_due(tk, now):   # 进展留着的那条到点了
         t = tasks.load(tid)
         if t:
