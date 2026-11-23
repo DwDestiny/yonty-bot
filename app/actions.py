@@ -2,7 +2,7 @@
 """动作（方案第 8 节）：实例登记好的脚本，按类别定自己办还是找主人批。
 
 Input:  实例 actions/<名字>.json：{"script", "params": {参数名: 正则}, "category": 修补|授权|花钱|方向, "coworker_ok", "undo", "why"}；
-        tk 是调用方加载的 tasks 模块；任务环境变量 FCB_TASK_ID、FCB_OWNER、FCB_SCOPE
+        tk 是调用方加载的 tasks 模块；调用方身份由 tk.whoami() 认（cgroup 或 bridge 写的授权），范围取任务记录
 Output: 修补类直接执行并记决策日志；其余写审批单 state/actions.json（编号 短名#N.aK），经投递发给主人
 Pos:    tasks.py act 调 cli()；bridge 的 /approve 短名#N.aK 调 approve()。以 _ 开头的文件是示例，不算登记
 """
@@ -61,15 +61,18 @@ def cli(tk, argv):
         k, v = k[2:], rest.pop(0)
         if k not in spec or not re.fullmatch(spec[k], v): sys.exit(f"动作 {name} 的参数 {k} 不合规（要匹配 {spec.get(k, '没有这个参数')}）")
         params[k] = v
-    sender = tk.sender_from_env()
-    if os.environ.get("FCB_SCOPE"):
+    sender, trusted = tk.whoami()   # 身份按 cgroup 或 bridge 写的授权认，不信 FCB_OWNER、FCB_SCOPE（Claude 自己能改环境变量）
+    if not sender: sys.exit("认不出调用方：动作只在任务或聊天会话里用。")
+    t = tk.load(sender["task"]) if sender.get("task") else None
+    scope = (t or {}).get("scope") or ""
+    if scope:
         try:
-            with open(os.environ["FCB_SCOPE"]) as f: allow = json.load(f).get("actions") or []
+            with open(scope) as f: allow = json.load(f).get("actions") or []
         except Exception:
             allow = []
         if name not in allow: sys.exit(f"动作 {name} 不在这个定时任务的权限范围里")
     cat = a.get("category") or "授权"
-    if cat == "修补" and (sender.get("owner") or a.get("coworker_ok")):
+    if cat == "修补" and ((trusted and sender.get("owner") and not scope) or a.get("coworker_ok")):
         rc, out = execute(tk, a, params)
         tk.decide("动作", action=name, by=sender["ref"], category=cat, params=params, rc=rc)
         print(f"动作 {name} 跑完了（退出码 {rc}）" + (f"，撤销用 {a['undo']}" if a.get("undo") else "") + f"：\n{out}")

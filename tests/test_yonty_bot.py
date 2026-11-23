@@ -1093,7 +1093,8 @@ class TaskTest(unittest.TestCase):
         self.assertNotEqual(self.t.sibling(t).get('head'), t['accept_session'])   # 验收的会话不当负责人的会话
         # 放开以后负责人可以改
         self.t.inbox_add(n, '同事甲', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'))
-        self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertTrue(self.t.load(n).get('accept_unlocked'))
+        self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'), '只写“主控”不算上级')
+        self.t.inbox_add(n, '主控', False, '放开验收测试', upper=True); self.assertTrue(self.t.load(n).get('accept_unlocked'))
         # 派活定的验证命令跑不到验收测试：闸门单独再跑验收命令
         m = self.new_task(accept=True, verify='true')
         os.environ['NOFEATURE'] = '1'

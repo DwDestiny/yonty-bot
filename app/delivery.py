@@ -103,8 +103,10 @@ def parse_marks(text):
     return "\n".join(keep).strip(), [(a, b, "\n".join(c).strip(), d) for a, b, c, d in out if "\n".join(c).strip()]
 
 
-def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None):
+def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, trusted=False):
     """记一条投递，返回给发送方的回执。目标、类别不合法抛 ValueError。
+    trusted：bridge 自己从回复里解析出的 [投递]（项目经理的回复、服务补投）。命令行 tasks.py send 投进来的不可信：
+    投给任务的一律按留言进收件箱，不动预算、不放开验收、不叫醒；要下指令得在回复里写 [任务指令]，走 relay_followups 的检查。
     hop：发送方这一轮是被第几跳叫起来的（不传就看 sender["hop"]），这条投递记成它加一。"""
     c = conf(tk.CFG)
     hop = (sender.get("hop") or 0) if hop is None else hop
@@ -162,11 +164,20 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None):
         receipt = f"已交给{tg['to']}" + (f" {tg.get('project') or tg.get('ref') or ''}" if tg["to"] in ("项目经理", "任务") else "") + "，下一拍送到。"
         if tg["to"] == "任务":
             t2, _ = tk.resolve(tg["ref"])
-            upstream = sender["type"] == "ctrl" or (sender["type"] == "pm" and sender.get("project") == t2.get("project"))
-            n = tk.inbox_add(t2["id"], sender["label"], False, full, kind="指令" if upstream else "留言", src=sender)
+            upstream = trusted and (sender["type"] == "ctrl" or (sender["type"] == "pm" and sender.get("project") == t2.get("project")))
+            if upstream and t2["requester"].get("owner") and not sender.get("owner"):
+                upstream, why = False, "这一轮不是主人触发的，主人派的任务只收留言"
+            else: why = tk.steer_block(t2, full, tk.T.get("relay_max", 3)) if upstream else ""
+            if why: upstream = False
+            n = tk.inbox_add(t2["id"], sender["label"], bool(sender.get("owner")) and upstream, full,
+                             kind="指令" if upstream else "留言", src=sender, upper=upstream)
             tk.update(t2["id"], _touch=False, hop=max(t2.get("hop") or 0, nh))   # 任务再往外投时从这一跳接着数
-            if t2["status"] == "waiting": tk.update(t2["id"], status="approved")
-            rec["status"] = "sent"; receipt = f"已进 {tk.ref(t2)} 的收件箱（i{n}）。"
+            if upstream:
+                tk.update(t2["id"], auto_follow=(t2.get("auto_follow") or 0) + (0 if tk.BUDGET_RE.search(full) else 1))
+                if t2["status"] in ("waiting", "done", "failed", "lost"): tk.update(t2["id"], status="approved")
+            rec["status"] = "sent"
+            receipt = f"已进 {tk.ref(t2)} 的收件箱（i{n}）" + ("。" if upstream else (
+                f"，按留言（{why}）。" if why else "，按留言：命令行投的不算指令，要下指令在回复里写 [任务指令] 短名#N 内容。"))
         elif tg["to"] == "事":
             ok = tk.thing_note(tg["project"], tg["thing"], sender["label"], full)
             rec["status"] = "sent"

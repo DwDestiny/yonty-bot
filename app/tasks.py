@@ -251,20 +251,23 @@ def events(tid, start=0): return _read(tid, "events.jsonl")[start:]
 
 BUDGET_RE = re.compile(r"预算\s*(?:加到|调到|改成|改为|提到|放到|到)\s*(\d+(?:\.\d+)?)")
 
-def inbox_add(tid, who, owner, text, kind="指令", src=None):
-    """收件箱加一条。kind：指令（主人、主控、本项目的项目经理发的）或留言（别的任务投来的，当材料）。返回编号 n（iN）。"""
+def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False):
+    """收件箱加一条。kind：指令（主人、主控、本项目的项目经理发的）或留言（别的任务投来的、命令行投来的，当材料）。返回编号 n（iN）。
+    upper：bridge 核过的上级（主控、项目经理替派活人转的）。只有指令会动预算和验收：主人或 upper 写“预算加到 N”、“放开验收”才算；
+    留言一律不动预算、不放开验收、不叫醒停在检查点的任务。权限只由调用方显式给，不按 who 的文字认。"""
     t = load(tid) or {}
     cost, budget = t.get("cost") or 0, t.get("budget") or T["budget_default"]
-    m = BUDGET_RE.search(text)
-    if m and (owner or who.startswith("主控")):   # 主人或主控写“预算加到 N”：把检查点挪过去（同事不能改）
+    m = BUDGET_RE.search(text) if kind == "指令" else None
+    if m and (owner or upper):   # 主人或上级写“预算加到 N”：把检查点挪过去（同事不能改）
         update(tid, budget=float(m.group(1)), budget_why=f"{who}调到 {m.group(1)}", checkpoint=False)
-    elif t.get("checkpoint") and not who.startswith("主控"):   # 人亲自让停在检查点的任务接着干：就是同意加预算
+    elif kind != "指令": pass
+    elif t.get("checkpoint") and not upper:   # 人亲自让停在检查点的任务接着干：就是同意加预算
         nb = round(max(cost * 1.5, cost + 5))
         update(tid, budget=nb, budget_why=f"{who}让接着干，自动加到 {nb}", checkpoint=False)
     elif not t.get("checkpoint") and budget - cost < max(5, budget * 0.25):   # 做完或超了估计后又来新要求：续一段，别一开工就被截停
         nb = round(cost + max(5, budget * 0.5), 1)
         update(tid, budget=nb, budget_why=f"{who}追加了要求，续到 {nb}")
-    if "放开验收" in text and (owner or who.startswith("主控")) and t.get("accept_files"):   # 验收测试确实写错了：主人或主控放开，负责人可以改
+    if kind == "指令" and "放开验收" in text and (owner or upper) and t.get("accept_files"):   # 验收测试确实写错了：主人或上级放开
         update(tid, accept_unlocked=True)
     with _Lock(os.path.join(tdir(tid), ".lock")):
         n = 1 + len(_read(tid, "inbox.jsonl"))
@@ -272,6 +275,16 @@ def inbox_add(tid, who, owner, text, kind="指令", src=None):
             f.write(json.dumps({"n": n, "who": who, "owner": owner, "text": text, "ts": time.time(), "kind": kind,
                                 "src": (src or {}).get("ref", "")}, ensure_ascii=False) + "\n")
     return n
+
+def steer_block(x, body, auto_max):
+    """上级替派活人给任务转指令前的检查（bridge.relay_followups 和投递共用）。返回没转的原因，能转返回空串。"""
+    n = ref(x)
+    if not body: return f"给 {n} 的指令是空的，没转。"
+    raise_budget = bool(BUDGET_RE.search(body))
+    if x.get("checkpoint") and not raise_budget: return f"{n} 停在检查点，要接着干请写“预算加到 X”，没转。"
+    if x.get("auto_follow", 0) >= auto_max and not raise_budget: return f"{n} 已经自动追加 {auto_max} 次了，下一步请人来定：{body}"
+    if x["status"] in ("pending", "cancelled", "rejected", "expired"): return f"{n} {LABEL.get(x['status'])}，没转。"
+    return ""
 
 def _inbox_state(tid):
     try:
@@ -1138,6 +1151,7 @@ def run(tid):
             with open(os.path.join(tdir(tid), "stream.log"), "a") as raw:
                 p = subprocess.Popen(box + cmd, cwd=t["worktree"], env=env, text=True,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
+                grant_write(p.pid, {"task": tid})   # popen 起的任务没有单元：命令行往上找父进程按这份授权认
                 p.stdin.write(prompt); p.stdin.close()
                 for line in p.stdout:
                     raw.write(line)
@@ -1163,7 +1177,7 @@ def run(tid):
                         quota_note(obj.get("rate_limit_info"))
                     elif obj.get("type") == "result":
                         final = obj
-                p.wait(); p.stdout.close()
+                p.wait(); p.stdout.close(); grant_drop(p.pid)
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
                 oom = "killed by the OOM killer" in unit_journal(load(tid) or {})
@@ -1454,7 +1468,7 @@ def create_mr(argv):
     body = open(a.body_file).read() if a.body_file else a.body
     branch = a.branch or git(".", "branch", "--show-current").stdout.strip()
     if not branch: sys.exit("当前不在分支上")
-    if os.environ.get("FCB_OWNER") != "1" and not branch.startswith("bot/"):
+    if not owner_cli() and not branch.startswith("bot/"):
         sys.exit(f"不是{OWNER_NAME}本人触发的会话，只能从 bot/ 开头的分支建合并请求（当前 {branch}）")
     if git(".", "ls-remote", "--exit-code", "--heads", "origin", branch).returncode != 0:
         sys.exit(f"远端还没有 {branch}，先 git push -u origin {branch}")
@@ -1481,7 +1495,7 @@ def create_mr(argv):
 
 # ---------- 诊断：主人问额度、任务为什么断了时用。运行态和日志机器人不能直接读（防它改写自己的监督记录），这里只读、只给主人 ----------
 def diag(s=""):
-    if os.environ.get("FCB_OWNER") != "1": sys.exit(f"诊断只给{OWNER_NAME}本人触发的会话用。")
+    if not owner_cli(): sys.exit(f"诊断只给{OWNER_NAME}本人触发的会话用。")
     try: print(diag_text(s))
     except LookupError as e: sys.exit(str(e))
 
@@ -1516,19 +1530,93 @@ def diag_text(s=""):
     return "\n".join(out)
 
 # ---------- 任务和各层会话里用的子命令（方案 4.6、5.2、7.2、8 节） ----------
-def sender_from_env():
+LIVE = os.path.join(ROOT, "state", "live")
+
+def _stat(pid):
+    try:
+        with open(f"/proc/{pid}/stat") as f: return f.read().rsplit(")", 1)[1].split()
+    except (OSError, IndexError): return []
+
+def grant_write(pid, info):
+    """bridge 和 run() 起 claude 后给这个进程写授权：命令行往上找父进程认出调用方。带进程启动时间，进程号复用了不认。"""
+    try:
+        os.makedirs(LIVE, exist_ok=True)
+        st = _stat(pid)
+        with open(os.path.join(LIVE, f"{pid}.json"), "w") as f: json.dump(dict(info, start=st[19] if len(st) > 19 else ""), f)
+    except OSError: pass
+
+def grant_drop(pid):
+    try: os.remove(os.path.join(LIVE, f"{pid}.json"))
+    except OSError: pass
+
+def _grant(pid):
+    try:
+        with open(os.path.join(LIVE, f"{pid}.json")) as f: g = json.load(f)
+    except (OSError, ValueError): return None
+    st = _stat(pid)
+    return g if st and len(st) > 19 and g.get("start") == st[19] else None
+
+def _cgroup():
+    try:
+        with open("/proc/self/cgroup") as f: return f.read()
+    except OSError: return ""
+
+def _ancestors(limit=64):
+    pid, out = os.getpid(), []
+    for _ in range(limit):
+        st = _stat(pid)
+        pid = int(st[1]) if len(st) > 1 else 0
+        if pid <= 1: break
+        out.append(pid)
+    return out
+
+def _sess_sender(g, owner):
+    if g.get("layer") == "pm": return dict(dl.pm_sender(g.get("project", ""), g.get("key", ""), owner), hop=int(g.get("hop") or 0))
+    return {"type": "ctrl", "ref": "主控", "label": "主控", "key": g.get("key", ""), "owner": owner, "hop": int(g.get("hop") or 0)}
+
+def whoami():
+    """命令行（send、act、inbox、diag、mr）认调用方，返回 (发送方或 None, 是否可信)。
+    任务按 cgroup 里本实例的单元名认（任务在跑、轮次对得上才算）；聊天和项目经理按 bridge 给这一轮 claude 写的授权认（往上找父进程）；
+    popen 起的任务同样有授权。在本实例的单元里却对不上的，一律不认。两样都没有、也不在本实例的单元里（测试、macOS），
+    才按环境变量兜底：兜底的不可信，不带主人身份，任务的身份、范围、跳数照样从任务记录取。"""
+    cg = _cgroup()
+    m = re.search(r"/" + re.escape(SLUG) + r"-task-(\d+)-(\d+)\.service", cg)
+    if m:
+        t = load(int(m.group(1)))
+        ok = t and t.get("status") == "running" and str(t.get("turn")) == m.group(2)
+        return (dl.task_sender(_me(), t) if ok else None), True
+    for pid in _ancestors():
+        g = _grant(pid)
+        if not g: continue
+        if g.get("task"):
+            t = load(int(g["task"]))
+            return (dl.task_sender(_me(), t) if t and t.get("status") == "running" else None), True
+        return _sess_sender(g, bool(g.get("owner"))), True
+    if re.search(r"/" + re.escape(SLUG) + r"\.service(/|$)", cg, re.M): return None, True
     tid = os.environ.get("FCB_TASK_ID")
-    if tid: return dl.task_sender(_me(), load(int(tid)))
-    owner, key = os.environ.get("FCB_OWNER") == "1", os.environ.get("FCB_SESSION_KEY", "")
-    hop = int(os.environ.get("FCB_HOP") or 0)   # 这一轮是被第几跳的投递叫起来的，服务填
-    if os.environ.get("FCB_LAYER") == "pm": return dict(dl.pm_sender(os.environ.get("FCB_PROJECT", ""), key, owner), hop=hop)
-    return {"type": "ctrl", "ref": "主控", "label": "主控", "key": key, "owner": owner, "hop": hop}
+    if tid and tid.isdigit():
+        t = load(int(tid))
+        return (dl.task_sender(_me(), t) if t else None), False
+    g = {"key": os.environ.get("FCB_SESSION_KEY", ""), "hop": os.environ.get("FCB_HOP") or 0,
+         "layer": os.environ.get("FCB_LAYER"), "project": os.environ.get("FCB_PROJECT", "")}
+    return _sess_sender(g, False), False
+
+def sender_from_env():
+    """旧名字：现在按 whoami 认，认不出抛 SystemExit。"""
+    s, _ = whoami()
+    if not s: sys.exit("认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。")
+    return s
+
+def owner_cli():
+    """diag、mr 这类主人专用的子命令：可信来源看授权；兜底（测试、macOS）看环境变量。"""
+    s, trusted = whoami()
+    return bool(s and s.get("owner")) if trusted else os.environ.get("FCB_OWNER") == "1"
 
 def cli(cmd, argv):
     if cmd == "inbox":
-        tid = os.environ.get("FCB_TASK_ID")
-        if not tid: sys.exit("tasks.py inbox 只在任务里用，读的是本任务的收件箱")
-        tid = int(tid)
+        me, _ = whoami()
+        if not me or me["type"] not in ("task", "schedule"): sys.exit("tasks.py inbox 只在任务里用，读的是本任务的收件箱")
+        tid = me["task"]
         if not argv:
             print("\n".join(f"i{x['n']} {x['kind']} 来自 {x['who']}：{'已取' if x['fetched'] else '没取'}" for x in inbox_items(tid)) or "收件箱是空的")
             return

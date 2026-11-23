@@ -278,6 +278,10 @@ def stream_claude(cmd, prompt, env, on_extra=None):
     global inflight
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          cwd=WORKDIR, env=env)
+    # 命令行（tasks.py send/act）按这份授权认出是哪个会话、带不带主人身份；环境变量 Claude 自己能改，不算数
+    tasks.grant_write(p.pid, {"owner": env.get("FCB_OWNER") == "1", "private": env.get("FCB_PRIVATE") == "1",
+                              "key": env.get("FCB_SESSION_KEY", ""), "hop": int(env.get("FCB_HOP") or 0),
+                              "layer": env.get("FCB_LAYER", ""), "project": env.get("FCB_PROJECT", "")})
     q, err = queue.Queue(), []
     threading.Thread(target=lambda: [q.put(l) for l in p.stdout] + [q.put(None)], daemon=True).start()
     threading.Thread(target=lambda: err.extend(p.stderr), daemon=True).start()
@@ -312,6 +316,7 @@ def stream_claude(cmd, prompt, env, on_extra=None):
                 flush()                        # 又开了一轮：上一个结果不是最后一个
         rc = p.wait()
     finally:
+        tasks.grant_drop(p.pid)
         with lock: inflight -= 1
     h = st["held"]
     return st["last"], (h.get("result") or "") if h else "", rc, "".join(tail) + "".join(err)[-1500:]
@@ -1056,7 +1061,7 @@ def pm_marks(project, key, owner, text, hop=0, about=None):
     text, marks = tasks.dl.parse_marks(text)
     for to, kind, body, need in marks:
         try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need,
-                             {"about": about} if about else None)
+                             {"about": about} if about else None, trusted=True)
         except ValueError as e: log.warning("pm delivery rejected: %s", e)
     return text
 
@@ -1103,7 +1108,8 @@ def delivery_turn(ev):
     prompt = (pm_intro(pm) if pm and not s["started"] else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
         for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
-        + f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
+        + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
+           if fr.get("task") else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）")
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop) or ""
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid)
@@ -1418,7 +1424,7 @@ def pm_relay(ev):
             body = (f"{ref} 有提问：{e['text']}" if kind == "问题" else f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "")) + f"\n全文 /task {ref}"
             if kind == "问题": body += f"\n回答写 [任务指令] {ref} 你的回答"
             tasks.decide("替项目经理投递", task=ref, category=kind, why="项目经理这一轮既没上交主控也没写 [处理掉] 理由（7.4 防沉默）")
-            try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, t.get("hop") or 0, None, {"about": n, "auto": True})
+            try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, t.get("hop") or 0, None, {"about": n, "auto": True}, trusted=True)
             except ValueError as x: log.warning("auto delivery for task #%s rejected: %s", n, x)
         if text and not text.startswith(AMB_SILENT): tasks.decide("项目经理回报", task=ref, text=text[:500])
         relay_post(t, idx, "")
@@ -1463,15 +1469,10 @@ def relay_followups(t, text, who=None, hop=None):
         x, cands = tasks.resolve(s, pool)
         if not x: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
         n, tid = tasks.ref(x), x["id"]
-        if not body: return f"（给 {n} 的指令是空的，没转。）"
+        why = tasks.steer_block(x, body, RELAY_MAX)
+        if why: return f"（{why}）"
         raise_budget = bool(tasks.BUDGET_RE.search(body))
-        if x.get("checkpoint") and not raise_budget:
-            return f"（{n} 停在检查点，要接着干请写“预算加到 X”，没转。）"
-        if x.get("auto_follow", 0) >= RELAY_MAX and not raise_budget:   # 加预算是主控看过进展的决定，不占自动追加次数
-            return f"（{n} 已经自动追加 {RELAY_MAX} 次了，下一步请人来定：{body}）"
-        if x["status"] in ("pending", "cancelled", "rejected", "expired"):
-            return f"（{n} {tasks.LABEL.get(x['status'])}，没转。）"
-        tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body)
+        tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", bool(t["requester"].get("owner")), body, upper=True)
         if hop is not None: tasks.update(tid, _touch=False, hop=max(x.get("hop") or 0, hop + 1))   # 投递轮里转的指令也是一跳
         tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
