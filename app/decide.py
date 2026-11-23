@@ -2,7 +2,7 @@
 
 Input:  bridge 给的最少事实；config.json 的 decide；密钥文件（只在服务进程里读）
 Output: decide() 的选项和概率；state/decide/<点>.jsonl 的记录；report() 的对比
-Pos:    只由服务进程用。不做身份、审批、设备、不可逆、合并、对外发送、私密判断；只有群消息会送出本机，送之前去掉密钥、令牌
+Pos:    只由服务进程用。不做身份、审批、设备、不可逆、合并、对外发送、私密判断；内容不限（主人 2026-11-23 放开），送之前去掉密钥、令牌、密码、验证码
 """
 import json, logging, os, random, re, subprocess, time, urllib.request, urllib.error, uuid
 
@@ -14,12 +14,17 @@ NEED, SAMPLE, MISS = 200, 0.05, 0.03   # 切换最少样本；切换后照走原
 POINTS = {"ambient": {"q": "The assistant is a silent member of this work group chat. Should it speak up now, because someone asks a question it could answer, requests work, or states a factual error that matters?",
                       "yes": "A question, request or problem is raised that a knowledgeable assistant should answer",
                       "no": "Ordinary talk between people, chit-chat, acknowledgements, or something already handled by others"}}
+def ask(point, cfg):
+    """问题：有守则原文就按守则问。回放 21 批真实旁听：笼统问法和瞎猜差不多，按守则问能分开（AUC 0.87）。"""
+    if not cfg.get("rule"): return POINTS[point]
+    return {"q": "按下面的规则，助手看到这批新消息后应该开口插话吗？\n" + cfg["rule"], "yes": "按规则该插话", "no": "按规则该沉默"}
+
 REMIND = {"at": 0}           # 后端欠费、密钥失效：只提醒一次
 
-SECRET = re.compile(r"(?i)(-----BEGIN[\s\S]+?-----END[^-]*-----|\b(?:sk|pk|rk|ghp|gho|ghu|ghs|glpat|xox[abpsr]|tvly|AKIA|AIza)[-_A-Za-z0-9]{10,}|github_pat_\w+|eyJ[\w-]{8,}\.[\w-]+\.[\w-]*"
-                    r"|\bBearer\s+\S+|(?:https?|ssh|ftp|postgres(?:ql)?|mysql|redis|mongodb(?:\+srv)?)://[^\s/@:]*:[^\s/@]+@\S+"
-                    r"|(?:api[_-]?key|secret|token|passw(?:or)?d|pwd|access[_-]?key|credential|密码|口令|密钥|令牌|验证码)[\"']?\s*(?:[:：=]|是|为)\s*\S+"
-                    r"|\b\d{15,19}[\dXx]?\b|\b1[3-9]\d{9}\b|[\w.+-]+@[\w-]+\.[\w.]+|\b(?:\d{1,3}\.){3}\d{1,3}\b|\b[A-Fa-f0-9]{32,}\b|\b[A-Za-z0-9+/_-]{40,}={0,2})")
+SECRET = re.compile(r"(?i:-----BEGIN[\s\S]+?-----END[^-]*-----|\b(?:sk|pk|rk|ghp|gho|ghu|ghs|glpat|xox[abpsr]|tvly|AKIA|AIza)[-_A-Za-z0-9]{10,}|github_pat_\w+|eyJ[\w-]{8,}\.[\w-]+\.[\w-]*"
+                    r"|\bBearer\s+\S+|\w+://[^\s/@:]*:[^\s/@]+@\S+"
+                    r"|(?:api[_-]?key|secret|token|passw(?:or)?d|pwd|access[_-]?key|credential|密码|口令|密钥|令牌|验证码)[\"']?\s*(?:[:：=]|是|为)\s*\S+)"
+                    r"|\b\d{15,19}[\dXx]?\b|\b[A-Fa-f0-9]{32,}\b|\b(?=[\w+=-]*\d)(?=[\w+=-]*[a-z])(?=[\w+=-]*[A-Z])[A-Za-z0-9_+=-]{32,}")
 def clean(s): return SECRET.sub("[略]", s or "")
 
 def _post(url, body, key, timeout):
@@ -30,7 +35,7 @@ def _key(cfg):
     with open(os.path.expanduser(cfg.get("key_file") or "~/.config/yonty-bot/jev-api-key"), encoding="utf-8") as f: return f.read().strip()
 
 def jev(point, facts, options, cfg):
-    p = POINTS[point]
+    p = ask(point, cfg)
     q = {"type": "noul", "instructions": p["q"], "criteria": {"true": p["yes"], "false": p["no"]}}
     r = _post(cfg.get("url") or "https://api.typesafe.ai/v1/systemone", {"model": cfg.get("model") or "jev-1.14.0", "state": facts, "questions": {"q": q}}, _key(cfg), cfg.get("timeout", 5))
     return float(r["answers"]["q"]["noul"]), (r.get("usage") or {}).get("input_tokens", 0)
@@ -42,12 +47,12 @@ def _num(s):
     return float(m.group(0))
 
 def openai(point, facts, options, cfg):
-    r = _post(cfg["url"], {"model": cfg["model"], "max_tokens": 8, "temperature": 0, "messages": [{"role": "user", "content": ASK.format(facts=facts, **POINTS[point])}]}, _key(cfg), cfg.get("timeout", 5))
+    r = _post(cfg["url"], {"model": cfg["model"], "max_tokens": 8, "temperature": 0, "messages": [{"role": "user", "content": ASK.format(facts=facts, **ask(point, cfg))}]}, _key(cfg), cfg.get("timeout", 5))
     return _num(r["choices"][0]["message"]["content"]), (r.get("usage") or {}).get("prompt_tokens", 0)
 
 def haiku(point, facts, options, cfg):
     r = subprocess.run(["claude", "-p", "--model", "haiku", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}', "--tools", "", "--no-session-persistence"],
-                       input=ASK.format(facts=facts, **POINTS[point]), capture_output=True, text=True, timeout=cfg.get("timeout", 60))
+                       input=ASK.format(facts=facts, **ask(point, cfg)), capture_output=True, text=True, timeout=cfg.get("timeout", 60))
     return _num(r.stdout), 0
 
 def rules(point, facts, options, cfg):
