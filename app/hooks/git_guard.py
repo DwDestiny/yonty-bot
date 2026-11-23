@@ -9,7 +9,7 @@ Pos:    机器人实例的硬限制，由 claude-settings.json 引用。推送�
     不能直接碰代码平台凭据（config.json 的 credential_paths、git 凭据助手、带令牌的接口请求头）。
     建合并请求走 python3 tasks.py mr，它在自己进程里读凭据、只建草稿。
   - 主人本人：不能强推或删除 main/master。
-  - 其他人（含主人批准过的同事任务）：git push 不能强推、删分支、推标签、--mirror/--all；
+  - 其他人（含主人批准过的同事任务）：git push 不能强推、删分支、推标签、--mirror/--all；不能删工作树（worktree remove/prune）和本地分支；
     gh 只能建草稿合并请求、看合并请求/issue/CI、提 issue 和评论、只读的 gh api。合并、发版、改仓库设置一律不行。
 """
 import json, os, re, sys
@@ -65,6 +65,8 @@ for seg in segs:
                     block(f"这个会话不是主人本人触发的：只能推 bot/ 开头的分支，{dst} 不行。")
     if owner:
         continue
+    if re.search(r"(?:^|[\s/])git\s+(?:-C\s+\S+\s+)?(worktree\s+(remove|prune)|branch\s+.*(-D|-d|--delete)(\s|$))", s):
+        block("这个会话不是主人本人触发的：不能删工作树和分支（可能是别的任务正在用的）。清理请主人来。")
     for g in re.finditer(r"(?:^|[\s/])gh\s+(\S+)\s*(\S*)(.*)", s):
         sub, act, rest = g.group(1), g.group(2), g.group(3)
         ok = (sub == "pr" and act in ("view", "list", "diff", "checks", "status")) \

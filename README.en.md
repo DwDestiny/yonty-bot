@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 1.3.0 · 2026-11-22 · MIT · [中文](README.md) | English
+> 1.3.1 · 2026-11-23 · MIT · [中文](README.md) | English
 
 **Bring your Claude Code into Feishu/Lark and WeCom group chats, and run it as a dev team that takes tasks, checks its own work, and remembers what it decided.**
 
