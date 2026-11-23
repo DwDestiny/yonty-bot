@@ -59,6 +59,14 @@ def decide(kind, **kv):
     os.makedirs(os.path.dirname(DECISIONS), exist_ok=True)
     fsio.append(DECISIONS, json.dumps(dict(ts=time.time(), kind=kind, **kv), ensure_ascii=False) + "\n")
 
+# 机器人用的 Claude Code：updates.py 测过才换的独立版本排在 PATH 最前；自己不自动升级
+os.environ["DISABLE_AUTOUPDATER"] = "1"
+try:
+    with open(os.path.join(ROOT, "state", "updates.json"), encoding="utf-8") as _f: _cb = json.load(_f).get("claude_bin") or ""
+except (OSError, ValueError): _cb = ""
+if _cb and os.path.exists(os.path.join(_cb, "claude")) and _cb not in os.environ.get("PATH", "").split(os.pathsep):
+    os.environ["PATH"] = _cb + os.pathsep + os.environ.get("PATH", "")
+
 # ---------- Claude 参数和钩子环境：聊天会话和任务会话共用，缓存前缀才一致 ----------
 def claude_args():
     cmd = ["claude", "-p", "--permission-mode", CFG.get("permission_mode", "auto"),
@@ -701,10 +709,18 @@ def session_cmd(t):
 COMPACT_KEEP = ("/compact 保留：正在做的事和做到哪一步、已经定下的结论和决定、还没做完的事、"
                 "涉及的文件路径、分支、任务编号和命令、对方提过的要求和偏好。")
 
+def compact_min(c=None):
+    """多大的上下文值得压（单位：输入 token 当量）。压一次：读缓存 0.1×上下文 + 写摘要约 4000×5；
+    不压，过期后再叫醒要按 2 倍价重写整段；压了只重写固定开头加摘要 keep。按有一半的机会再被叫醒算，
+    省的比花的多才压：p×2×(上下文 − keep) > 0.1×上下文 + 20000。"""
+    c = c or {}
+    p, keep = c.get("wake_p", 0.5), c.get("keep_ctx", 60000)
+    return int((2 * p * keep + 20000) / max(2 * p - 0.1, 0.1))
+
 def compact_due(ctx, last, compacted, now=None):
     now = now or time.time()
     c = T.get("compact") or {}
-    lo, idle = c.get("min_ctx", 120000), now - (last or now)
+    lo, idle = compact_min(c) if c.get("min_ctx") is None else c["min_ctx"], now - (last or now)
     return bool(lo and last) and (ctx or 0) >= lo and c.get("idle_min", 50) * 60 <= idle < 3600 \
         and (compacted or 0) < last
 

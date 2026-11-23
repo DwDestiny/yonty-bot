@@ -33,8 +33,7 @@
     "sibling_warm_min": 55,
     "sibling_max_ctx": 150000,
     "compact": {
-      "idle_min": 50,
-      "min_ctx": 120000
+      "idle_min": 50
     },
     "stuck_min": 40,
     "verify_retries": 2,
@@ -54,6 +53,19 @@
       "freeze_gb": 0.75,
       "freeze_pressure_pct": 60,
       "thaw_after_s": 60
+    }
+  },
+  "updates": {
+    "enabled": true
+  },
+  "decide": {
+    "enabled": false,
+    "backend": "jev",
+    "model": "jev-1.14.0",
+    "key_file": "~/.config/yonty-bot/jev-api-key",
+    "timeout": 5,
+    "points": {
+      "ambient": "shadow"
     }
   },
   "persona": "work",

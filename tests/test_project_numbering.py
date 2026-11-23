@@ -195,7 +195,7 @@ class ProjectNumberingTest(NumberingBase):
         假设：新增字段是字典；示例里有条目就按条目判方向（键像路径 → {路径: 短名}，值像路径 → {短名: 路径}），空字典按 {路径: 短名}。"""
         ex, top, sub = new_config_keys()
         cands = [(k, ex[k], True) for k in top] + [(k, ex['tasks'][k], False) for k in sub]
-        cands = [c for c in cands if isinstance(c[1], dict)]
+        cands = [c for c in cands if isinstance(c[1], dict) and 'alias' in c[0]]
         self.assertTrue(cands, 'app/config.example.json 里没有新增的别名字段（要是字典，路径和短名一一对应）')
         key, sample, at_top = cands[0]
         looks_path = lambda x: isinstance(x, str) and ('/' in x or x.startswith('~'))
