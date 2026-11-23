@@ -143,6 +143,41 @@ def update(tid, _force=False, _touch=True, **kv):
         fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
         return t
 
+AUTO_ROLES = ("", "开发")   # 这些角色的模型由服务定：有验证命令、在本机跑的先用 sonnet，验证过不了再换 opus
+def pick_model(role, verify, ex, model="", effort="", forced=False):
+    """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
+    除非主人的话派的、写明“主人指定”。没有验证命令或云端跑的没有自动换人的机会，照原来的：写了听写的，没写用角色模板。"""
+    if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
+        return {"model": model, "effort": effort, "auto_model": False}
+    return {"model": "sonnet", "effort": "high", "auto_model": True}
+
+def sibling_drop(t, model):
+    """验证没过、换了人的会话不再拿来分叉。"""
+    p = _sib_path(t, ".json")
+    if not os.path.exists(p): return
+    with _Lock(os.path.join(os.path.dirname(p), ".lock")):
+        s = sibling(t); h = (s.get("heads") or {}).get(model) or {}
+        if h.get("head") != t.get("session_id"): return
+        s["heads"].pop(model)
+        if s.get("head") == h["head"]: s["head"] = ""
+        fsio.write_json(p, s, 1)
+
+def escalate(tid, why, out, text):
+    """sonnet 返工后还是没过：换 opus 开新会话，在同一个工作树、同一个分支上接着做。返回新会话的首条提示。"""
+    t = load(tid)
+    sibling_drop(t, t.get("model"))
+    got = [x for x in inbox_items(tid) if x.get("kind", "指令") == "指令"]
+    note = (f"\n[换人接手] 这个任务先由 {t.get('model')} 做，{why}，现在换你。分支上已有的提交和没提交的改动都在工作树里，先看 git log、git diff 再动手，"
+            f"方向不对就改掉重来。\n" + (f"之前的负责人收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
+            + f"验证命令：{t.get('verify')}\n最近一次输出末尾：\n{out[-1500:]}\n之前的负责人最后写的：\n{text[-1500:]}\n")
+    cost = t.get("cost") or 0
+    kw = {} if (t.get("budget_why") or "").startswith("主控估") else {"budget": round(max(t.get("budget") or 0, cost + budget_basis(t.get("role"), "opus")[0]), 1)}
+    t = update(tid, model="opus", effort="high", escalated=True, verify_round=0, session_id=str(uuid.uuid4()), session_started=False,
+               forked_from="", cost_base=-cost, takeover=note, **kw)
+    decide("换模型接手", task=ref(t), why=why)
+    event(tid, "progress", f"{why}，换 opus 接手。")
+    return first_prompt(t, t.get("base", ""), False) + (t.get("accept_notice") or "")
+
 def create(**fields):
     r = roles().get(fields.get("role") or "")
     if r:   # 角色模板给默认模型和思考档；主控在 [派活] 里写了就以主控为准
@@ -833,9 +868,9 @@ def _directive(block):
     lst = lambda v: [x.strip() for x in re.split(r"[,，、;；]+", v) if x.strip() and x.strip() not in ("无", "没有", "-")]
     return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "closing": field("收口") == "是",
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
-                  "model": pick(field("模型"), MODELS), "effort": pick(field("思考"), EFFORTS), "target": target,
+                  "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
-                  "verify": verify, "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
+                  "verify": verify, "verify_said": bool(field("验证")), "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
@@ -1547,7 +1582,7 @@ def first_prompt(t, base, forked=False):
   档案会给这件事以后所有的任务看，不管是谁从哪个聊天派的：只写工作上的事实，不写谁在哪个聊天里说了什么
 {role}{team}{plan_note(t)}
 任务书：
-{t['brief']}"""
+{t['brief']}{t.get('takeover', '')}"""
 
 def part(t):
     """方案里的小任务（不含收口）：只推分支，不建合并请求。"""
@@ -1710,6 +1745,11 @@ def run(tid):
             if rc: note += "\n\n" + rc
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
             verdict = handback_verdict(text, "Edit" in (roles().get(load(tid).get("role") or "", {}).get("deny") or []))
+            cur = load(tid)
+            can_up = cur.get("auto_model") and not cur.get("escalated")
+            if verdict == "failed" and can_up and cur.get("verify_round"):   # 便宜模型认输：换贵的再来一次
+                prompt, resume = escalate(tid, "验证没过、它修不了", cur.get("verify_out", ""), text), False
+                continue
             if verdict == "failed":   # 写了按失败交回：结束，交回主控，不占着这件事
                 update(tid, status="failed", verify_round=0); event(tid, "failed", text + note)
                 return
@@ -1732,6 +1772,11 @@ def run(tid):
                         ok, out = run_verify(t, ac)
                         if not ok: out = f"验收命令没通过：{ac}\n{out}"
                     rnd = t.get("verify_round", 0)
+                    if not ok:
+                        t = update(tid, verify_fails=t.get("verify_fails", 0) + 1, verify_out=out[-1500:])
+                        if can_up and rnd >= 1:
+                            prompt, resume = escalate(tid, f"验证 {rnd + 1} 次没过", out, text), False
+                            continue
                     if not ok and rnd < T["verify_retries"]:
                         update(tid, verify_round=rnd + 1)
                         prompt, resume = (f"[验证失败] 派活时定的验证命令没通过（第 {rnd + 1} 次退回）：{t['verify']}\n"

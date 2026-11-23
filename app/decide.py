@@ -1,4 +1,4 @@
-"""决策点：一句话的判断交给便宜的后端，先影子记录，够数了才能切换（#11）。
+"""决策点：一句话的判断交给便宜的后端，影子记录对照，能切换，带抽查和自动停用（#11）。
 
 Input:  bridge 给的最少事实；config.json 的 decide；密钥文件（只在服务进程里读）
 Output: decide() 的选项和概率；state/decide/<点>.jsonl 的记录；report() 的对比
@@ -10,7 +10,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 D = os.path.join(ROOT, "state", "decide")
 log = logging.getLogger("bridge")
 PRICE = 0.042 / 1e6          # Jev 输入每 token 美元，输出免费（2026-11-23 官方价）
-NEED, SAMPLE, MISS = 200, 0.05, 0.03   # 切换最少样本；切换后照走原路的比例；可接受的漏判率
+SAMPLE, SKIP = 0.05, 0.19   # 切换后照走原路的比例（头 20 次抽查用 0.2）；低于多少不叫醒
 POINTS = {"ambient": {"q": "The assistant is a silent member of this work group chat. Should it speak up now, because someone asks a question it could answer, requests work, or states a factual error that matters?",
                       "yes": "A question, request or problem is raised that a knowledgeable assistant should answer",
                       "no": "Ordinary talk between people, chit-chat, acknowledgements, or something already handled by others"}}
@@ -93,31 +93,52 @@ def rows(point):
 
 def good(point): return [r for r in rows(point) if r.get("p") is not None and r.get("actual") is not None]
 
-def threshold(rs):
-    """漏判率不超过 MISS 的最大阈值：低于它就不叫醒。"""
-    best = 0.0
-    yes = [r["p"] for r in rs if r["actual"]]
-    for t in (x / 100 for x in range(1, 100)):
-        if yes and sum(p < t for p in yes) / len(yes) > MISS: break
-        best = t if yes else 0.0
-    return best
+def skip_below(cfg):
+    """低于它就不叫醒。固定值，不拿切换后的样本重算：没叫醒的没有答案，重算会越算越松。回放 20 批：0.19 以下没有该开口的。"""
+    return cfg.get("skip_below", SKIP)
 
-def may_skip(point, r, cfg):
-    """真能跳过吗：开关是 on、样本够、这次没出错、低于阈值、没抽中 5%。"""
-    if cfg.get("mode") != "on" or r["p"] is None or r["error"]: return False
-    rs = good(point)
-    if len(rs) < NEED or r["p"] >= min(threshold(rs), cfg.get("threshold", 0.3)): return False
-    return random.random() >= SAMPLE
+def sampled_rows(point): return [r for r in good(point) if r.get("sampled")]
+
+def sample_rate(point): return SAMPLE if len(sampled_rows(point)) >= 20 else 0.2   # 头 20 次抽查抽得密
+
+def drifting(point):
+    """抽查发现判低了的那批里其实有不少该开口：自动停用，全部照原路走。"""
+    s = sampled_rows(point)
+    return len(s) >= 5 and sum(bool(r["actual"]) for r in s) / len(s) > 0.15
+
+def below(point, r, cfg):
+    """这次判的够低、可以不叫醒吗：开关是 on、没出错、低于阈值、抽查没发现跑偏。"""
+    return cfg.get("mode") == "on" and r["p"] is not None and not r["error"] and r["p"] < skip_below(cfg) and not drifting(point)
+
+TASK_Q = {"cross": "这个任务要改多个模块，或跨系统协同吗？", "risk": "这个任务涉及安全、鉴权、并发、数据迁移这类做错代价大的地方吗？",
+          "design": "做这个任务要自己定设计或方案吗（任务书没写清怎么做）？", "mech": "这是照清单做的机械活吗（改名、整理、搜集、按模板补文件）？"}
+def score(facts, cfg):
+    """一次请求问几个小问题（笼统一问没有区分力）。只有 jev 后端。"""
+    if cfg.get("backend", "jev") != "jev": raise ValueError("只有 jev 后端能一次问多题")
+    r = _post(cfg.get("url") or "https://api.typesafe.ai/v1/systemone", {"model": cfg.get("model") or "jev-1.14.0", "state": clean(facts)[:20000],
+              "questions": {k: {"type": "noul", "instructions": v} for k, v in TASK_Q.items()}}, _key(cfg), cfg.get("timeout", 5))
+    return {k: float(r["answers"][k]["noul"]) for k in TASK_Q}
+
+def report_task(ts, cfg):
+    """先用 sonnet 的任务：一次过、返工过、换 opus 的各多少；影子打分在“一次过”和“没一次过”之间差多少。"""
+    other = sum(t.get("role") in ("", "开发", "排查") and not t.get("auto_model") and t.get("model") == "opus" and t.get("created", 0) > time.time() - 7 * 86400 for t in ts.values())
+    end = [t for t in ts.values() if t.get("auto_model") and t.get("status") in ("done", "failed")]
+    if not end: return f"开发活先用 sonnet：还没有做完的。最近 7 天直接用 opus 的开发、排查活 {other} 个。"
+    bad = {t["id"] for t in end if t.get("verify_fails")}
+    out = [f"开发活先用 sonnet：做完 {len(end)} 个，一次过 {len(end) - len(bad)} 个，换 opus {sum(bool(t.get('escalated')) for t in end)} 个。最近 7 天直接用 opus 的开发、排查活 {other} 个。"]
+    rs = [r for r in rows("task") if r.get("task") in {t["id"] for t in end}]
+    a, b = [r for r in rs if r["task"] in bad], [r for r in rs if r["task"] not in bad]
+    if a and b: out.append("影子打分（没一次过 / 一次过）：" + "，".join(f"{k} {sum(r[k] for r in a) / len(a):.2f}/{sum(r[k] for r in b) / len(b):.2f}" for k in TASK_Q))
+    return "\n".join(out)
 
 def report(point, cfg):
     rs, all_ = good(point), rows(point)
     if not all_: return f"{point}：还没有样本。"
-    t = min(threshold(rs), 0.99) if rs else 0
-    skip = [r for r in rs if r["p"] < t]
-    spoke = [r for r in rs if r["actual"]]
-    miss = sum(r["actual"] for r in skip)
-    save = sum(r.get("cost", 0) for r in skip); fee = sum(r.get("tokens", 0) for r in all_) * PRICE
+    skipped, sampled = [r for r in all_ if r.get("skipped")], sampled_rows(point)
+    t = skip_below(cfg); fee = sum(r.get("tokens", 0) for r in all_) * PRICE
+    low = [r for r in rs if r["p"] < t and not r.get("named")]
     bad = sum(bool(r.get("error")) for r in all_)
-    return "\n".join([f"{point}：{len(rs)}/{NEED} 条样本，" + ("够切换了" if len(rs) >= NEED else "还不够切换") + f"，现在是 {cfg['mode']}。",
-                      f"Claude 开口 {len(spoke)} 次；按阈值 {t:.2f} 能少叫醒 {len(skip)} 次，漏 {miss} 次。",
-                      f"折合省 {save:.0f} 输入 token 当量，判断花了 {fee:.4f} 美元，出错 {bad} 次，平均 {sum(r.get('ms', 0) for r in all_) / len(all_):.0f} 毫秒。"])
+    return "\n".join([f"{point}：现在是 {cfg['mode']}，低于 {t:.2f} 不叫醒" + ("；抽查漏得太多，已自动停用" if drifting(point) else "") + "。",
+                      f"判了 {len(all_)} 批，没叫醒 {len(skipped)} 批；叫醒的里开口 {sum(bool(r['actual']) for r in rs)} 批。",
+                      f"有答案的 {len(rs)} 批里低于阈值 {len(low)} 批，其中其实该开口 {sum(bool(r['actual']) for r in low)} 批；切换后抽查 {len(sampled)} 批，漏 {sum(bool(r['actual']) for r in sampled)} 批。",
+                      f"判断花了 {fee:.4f} 美元，出错 {bad} 次，平均 {sum(r.get('ms', 0) for r in all_) / len(all_):.0f} 毫秒。"])

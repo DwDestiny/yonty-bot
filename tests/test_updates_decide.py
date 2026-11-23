@@ -157,18 +157,38 @@ class DecideTest(Base):
         for _ in range(3): r = self.d.decide('ambient', 'x', ['a', 'b'], {'backend': 'fake'}, told.append)
         self.assertIsNone(r['option']); self.assertEqual(len(told), 1)
 
-    def test_not_skipped_until_enough_samples(self):
-        self.mode('on'); self.flush(); self.assertEqual(len(self.e.streams), 1)
-        for i in range(200): self.d.record('ambient', p=0.9 if i % 10 == 0 else 0.05, actual=i % 10 == 0, cost=100, tokens=10)
-        self.d.random.random = lambda: 0.5
+    def test_on_skips_low_and_samples(self):
+        self.msgs = [dict(self.msgs[0], content='今天食堂不错')]
+        self.mode('on'); self.d.random.random = lambda: 0.5
         try:
-            self.flush(); self.assertEqual(len(self.e.streams), 1, '低于阈值，攒着')
-            self.p = 0.95; self.msgs = [dict(self.msgs[0], message_id='om_a2', content='后来的')]; self.flush()
+            self.flush(); self.assertEqual(len(self.e.streams), 0, '低于 0.19，攒着')
+            self.p = 0.25; self.msgs = [dict(self.msgs[0], message_id='om_a2', content='后来的')]; self.flush()
             p = self.e.streams[-1]['prompt']; self.assertLess(p.index('om_a1'), p.index('om_a2')); self.assertEqual(self.b.amb_held, {})
-            self.p = 0.05; self.d.random.random = lambda: 0.01; self.flush(); self.assertEqual(len(self.e.streams), 3, '抽中 5% 照常叫醒')
-            self.d.random.random = lambda: 0.5; self.mode('off'); self.flush(); self.assertEqual(len(self.e.streams), 4)
+            self.assertEqual(self.d.sample_rate('ambient'), 0.2); self.p = 0.05; self.d.random.random = lambda: 0.01; self.flush(); self.assertEqual(len(self.e.streams), 2, '抽中 5% 照常叫醒')
+            self.assertTrue(self.d.rows('ambient')[-1]['sampled'])
+            self.d.random.random = lambda: 0.5; self.mode('off'); self.flush(); self.assertEqual(len(self.e.streams), 3)
         finally: import importlib; importlib.reload(self.d.random)
-        self.assertIn('够切换了', self.d.report('ambient', {'mode': 'on'}))
+        self.assertIn('没叫醒 1 批', self.d.report('ambient', {'mode': 'on'}))
+
+    def test_named_always_wakes_and_errors_wake(self):
+        self.mode('on')
+        self.msgs = [dict(self.msgs[0], content=f'{self.b.NAME}今天没吭声')]; self.p = 0.01; self.flush(); self.assertEqual(len(self.e.streams), 1)
+        self.msgs = [dict(self.msgs[0], content='随便说说')]; self.p = RuntimeError('x'); self.flush(); self.assertEqual(len(self.e.streams), 2)
+
+    def test_drift_turns_skipping_off(self):
+        r = {'p': 0.05, 'error': ''}; c = {'mode': 'on'}
+        for i in range(20): self.d.record('ambient', p=0.05, actual=i < 3, sampled=True)
+        self.assertTrue(self.d.below('ambient', r, c)); self.assertEqual(self.d.sample_rate('ambient'), 0.05)
+        self.d.record('ambient', p=0.05, actual=True, sampled=True); self.d.record('ambient', p=0.05, actual=True, sampled=True)
+        self.assertFalse(self.d.below('ambient', r, c)); self.assertIn('自动停用', self.d.report('ambient', c))
+
+    def test_task_scores_recorded_and_reported(self):
+        self.d._post = lambda u, b, k, t: {'answers': {q: {'noul': 0.4} for q in b['questions']}}
+        self.d._key = lambda c: 'k'
+        self.assertEqual(self.d.score('x', {}), {k: 0.4 for k in self.d.TASK_Q})
+        for n in (1, 2): self.d.record('task', task=n, **self.d.score('x', {}))
+        ts = {1: {'id': 1, 'auto_model': True, 'status': 'done'}, 2: {'id': 2, 'auto_model': True, 'status': 'done', 'verify_fails': 2, 'escalated': True}}
+        r = self.d.report_task(ts, {}); self.assertIn('一次过 1 个，换 opus 1 个', r); self.assertIn('0.40/0.40', r)
 
     def test_key_not_in_session_env(self):
         self.flush(); self.assertFalse([k for s in self.e.streams for k in s['env'] if 'JEV' in k or 'KEY' in k.upper() and 'SESSION' not in k])

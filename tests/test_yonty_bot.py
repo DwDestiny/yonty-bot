@@ -1199,6 +1199,49 @@ class TaskTest(unittest.TestCase):
         self.assertIn('结论：BLOCKED', self.t.events(n)[-1]['text'])
         self.assertEqual((Path(t['worktree']) / 'rounds').read_text(), str(1 + self.t.T['verify_retries']))
 
+    def test_pick_model(self):
+        pm = self.t.pick_model
+        self.assertEqual(pm('开发', 'npm test', '', 'opus', 'xhigh'), {'model': 'sonnet', 'effort': 'high', 'auto_model': True})
+        self.assertEqual(pm('', 'npm test', '')['model'], 'sonnet')
+        self.assertEqual(pm('开发', '', '', 'opus')['model'], 'opus'); self.assertEqual(pm('开发', 'x', 'cloud')['model'], '')   # 照原来的
+        self.assertEqual(pm('评审', 'x', '')['model'], '')                 # 角色模板的默认
+        self.assertEqual(pm('开发', 'x', '', 'opus', 'max', True), {'model': 'opus', 'effort': 'max', 'auto_model': False})
+        d = self.t.parse_directive("x\n[派活]\n仓库: ~/w\n标题: t\n模型: opus（主人指定）\n任务书:\nb\n")[1]
+        self.assertEqual((d['model'], d['forced']), ('opus', True))
+
+    FAKE_UP = ('prompt = sys.stdin.read()\n'
+               'a = sys.argv; m = a[a.index("--model") + 1]\n'
+               'i = "--resume" if "--resume" in a else "--session-id"\n'
+               'open("calls", "a").write(json.dumps([m, i, a[a.index(i) + 1], prompt]) + "\\n")\n'
+               'if m == "opus": open("ok.txt", "w").write("ok")\n'
+               'r = "按失败交回" if os.environ.get("GIVEUP") and "[验证失败]" in prompt else "做完了"\n'
+               'print(json.dumps({"type": "system", "subtype": "init"}), flush=True)\n'
+               'print(json.dumps({"type": "result", "result": r, "is_error": False, "total_cost_usd": 0.5}), flush=True)\n')
+
+    def escalated(self, **kw):
+        n = self.new_task(verify='test -f ok.txt', role='开发', auto_model=True, model='sonnet', effort='high', **kw)
+        sid = self.t.load(n)['session_id']
+        self.t.inbox_add(n, '小王', True, '别动接口', idem='k1')
+        self.run_with(self.fake_bin(self.FAKE_UP), n)
+        t = self.t.load(n)
+        return t, sid, [json.loads(l) for l in (Path(t['worktree']) / 'calls').read_text().splitlines()]
+
+    def test_sonnet_escalates_to_opus_in_new_session(self):
+        t, sid, c = self.escalated()
+        self.assertEqual(t['status'], 'done', self.t.events(t['id']))
+        self.assertEqual([x[0] for x in c], ['sonnet', 'sonnet', 'opus'])
+        self.assertEqual([x[1] for x in c], ['--session-id', '--resume', '--session-id'])   # 新会话，不接着便宜模型的
+        self.assertEqual(c[0][2], sid); self.assertNotEqual(c[2][2], sid); self.assertEqual(t['session_id'], c[2][2])
+        self.assertIn('[换人接手]', c[2][3]); self.assertIn('i1', c[2][3])
+        self.assertEqual((t['model'], t['verify_fails'], t['cost']), ('opus', 2, 1.0))       # 两个会话的花费都算上
+        self.assertNotIn('sonnet', self.t.sibling(t).get('heads', {}))
+
+    def test_sonnet_giving_up_after_rework_escalates(self):
+        os.environ['GIVEUP'] = '1'
+        try: t, sid, c = self.escalated()
+        finally: os.environ.pop('GIVEUP')
+        self.assertEqual((t['status'], [x[0] for x in c]), ('done', ['sonnet', 'sonnet', 'opus']))
+
     def test_verify_command_goes_through_guards(self):
         settings = self.inst / 'claude-settings.json'
         settings.write_text(json.dumps({'hooks': {'PreToolUse': [{'matcher': 'Bash', 'hooks': [

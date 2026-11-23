@@ -13,7 +13,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
         python3 bridge.py --cache-check 3 # 用服务同款参数开 3 个新会话，检查缓存是否跨会话命中
 来源:   feishu-claude-bot skill 的 assets/templates/bridge.py
 """
-import contextlib, json, os, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
+import contextlib, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
@@ -1019,7 +1019,7 @@ def service_command(ev):
     if re.match(r"^/(updates|decide)(\s|$)", text):
         if not owner: return f"这条只有{OWNER_NAME}能用。"
         if ev.get("chat_type") != "p2p": return "请在私聊里发。"
-        if text.startswith("/decide"): return dm.report("ambient", dm.conf(CFG.get("decide"), "ambient"))
+        if text.startswith("/decide"): return dm.report("ambient", dm.conf(CFG.get("decide"), "ambient")) + "\n" + dm.report_task({t["id"]: t for t in tasks.all_tasks()}, dm.conf(CFG.get("decide"), "task"))
         return updates.command(text, META, owner_say, lambda: upgrade_request(ev))
     if text == "/status" or text.startswith("/status "):
         if not owner: return f"/status 只有{OWNER_NAME}能看。"
@@ -1298,7 +1298,8 @@ def dispatch_one(ev, d):
     if ex == "cloud":
         why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
-    t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], model=d["model"], effort=d["effort"],
+    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced") and owner)
+    t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
@@ -1309,6 +1310,7 @@ def dispatch_one(ev, d):
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
                              "message_id": ev["message_id"], "thread": in_topic(ev), "key": session_key(ev),
                              "thread_id": ev.get("thread_id"), "root_id": ev.get("root_id")}, target=d["target"])
+    task_judge(t)
     note_briefed(session_key(ev), t["id"])   # 任务书是这个会话自己写的，回报时不用再贴
     n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
     log.info("task %s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
@@ -2412,9 +2414,12 @@ def ambient_flush(chat_id, msgs):
         st["turns"] = 0
     s = get_session(key)
     got, dc = ambient_judge(chat_id, msgs)
-    if got and dc["mode"] == "on":   # 影子阶段不等它；切换后才等，判不用叫醒的攒着，下次叫醒时按原样排在前面
+    named, sampled = amb_named(msgs), False
+    if got and dc["mode"] == "on" and not named:   # 影子阶段不等它；切换后才等，判不用叫醒的攒着，下次叫醒时按原样排在前面
         got["th"].join(dc.get("timeout", 5) + 1)
-        if got.get("r") and dm.may_skip("ambient", got["r"], dc) and len(amb_held.get(chat_id, [])) + len(msgs) < AMB["max_batch"]:
+        low = bool(got.get("r") and dm.below("ambient", got["r"], dc))
+        sampled = low and random.random() < dm.sample_rate("ambient")
+        if low and not sampled and len(amb_held.get(chat_id, [])) + len(msgs) < AMB["max_batch"]:
             amb_held[chat_id] = amb_held.get(chat_id, []) + msgs
             with lock: save(HELD_FILE, amb_held)
             dm.record("ambient", **got["r"], actual=None, skipped=True); return
@@ -2438,8 +2443,22 @@ def ambient_flush(chat_id, msgs):
     if got:
         got["th"].join(dc.get("timeout", 5) + 1)
         if got.get("r"):
-            try: dm.record("ambient", **got["r"], actual=bool(st.get("said", 0) > said0), cost=s.get("cost", 0), msgs=len(msgs))
+            try: dm.record("ambient", **got["r"], named=named, sampled=sampled, actual=bool(st.get("said", 0) > said0), cost=s.get("cost", 0), msgs=len(msgs))
             except OSError: log.exception("decide record failed")
+
+def amb_named(msgs):
+    """点到机器人或主人名字的，不问后端，一定叫醒。"""
+    names = [x for x in [NAME, OWNER_NAME] + list((CFG.get("decide") or {}).get("wake") or []) if x]
+    return any(n in (m.get("content") or "") for m in msgs for n in names)
+
+def task_judge(t):
+    """影子：新任务让决策后端按几个小问题打分，只记，不影响派活；做完后和“验证一次过没过、换没换人”对照。"""
+    dc = dm.conf(CFG.get("decide"), "task")
+    if dc["mode"] != "shadow" or not t.get("auto_model"): return
+    def go():
+        try: dm.record("task", task=t["id"], **dm.score(f"{t['title']}\n{t['brief']}", dc))
+        except Exception as e: log.warning("task judge failed: %s", type(e).__name__)
+    threading.Thread(target=go, daemon=True).start()
 
 HELD_FILE = os.path.join(STATE, "ambient_held.json")
 amb_held = load(HELD_FILE, {})    # 判了不用叫醒、还没给 Claude 看的群消息
