@@ -18,7 +18,6 @@ from test_accept_flow import Inst, OWNER, MATE  # noqa: E402
 import test_accept_flow as A  # noqa: E402
 
 APP = Path(__file__).resolve().parents[1] / 'app'
-CL = 'cla' + 'ude'   # 线上钩子按文字拦，拼出来写
 
 
 class VerdictTest(unittest.TestCase):
@@ -58,7 +57,7 @@ class DeviceRedline2Test(unittest.TestCase):
         return self.e.bash('device_guard.py', cmd, FCB_OWNER=1, FCB_PRIVATE=1, FCB_CHAT_ID='oc_p').returncode
 
     def test_hook_blocks_package_and_split_forms(self):
-        for cmd in (f'devcli npx @anthropic-ai/{CL}-code -p hi', f'devcli node /usr/lib/node_modules/@anthropic-ai/{CL}-code/cli.js',
+        for cmd in ('devcli npx @anthropic-ai/claude-code -p hi', 'devcli node /usr/lib/node_modules/@anthropic-ai/claude-code/cli.js',
                     "devcli 'cl''aude' -p hi", 'devcli $(printf cla)ude -p hi', 'devcli c\\laude', 'devcli `printf cla`ude'):
             self.assertEqual(self.g(cmd), 2, cmd)
         self.assertEqual(self.g('devcli list'), 0)
@@ -98,7 +97,7 @@ class DeviceRedline2Test(unittest.TestCase):
         return subprocess.run([argv0 or str(w), *args], env=env, capture_output=True, text=True)
 
     def test_wrapper_checks_final_program(self):
-        for c in (f'npx @anthropic-ai/{CL}-code -p hi', f'node /x/@anthropic-ai/{CL}-code/cli.js', "cl''aude -p hi",
+        for c in ('npx @anthropic-ai/claude-code -p hi', 'node /x/@anthropic-ai/claude-code/cli.js', "cl''aude -p hi",
                   '$(printf cla)ude -p hi', 'n=$(printf no)de; $n $(printf /x/@anthr)opic-ai/x.js', 'X=$(printf npx); $X $(printf @anthr)opic-ai/x'):
             r = self.wrapper(c)
             self.assertEqual(r.returncode, 126, c + r.stdout + r.stderr)

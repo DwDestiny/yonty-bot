@@ -6,9 +6,18 @@ Input:  实例 config.json 的 devices：[{"name", "match"（调用命令的正�
 Output: check() 给 hooks/device_guard.py 用；租约文件 state/devices/<名字>.json（存在即被占）；tick() 释放过期租约
 Pos:    钩子按文件路径 import 本模块；bridge 每拍调 tick()，聊天一轮结束调 release_holder()。设备侧包装脚本是红线的主防线，这里是第二道
 """
-import itertools, json, os, re, shlex, subprocess, time
+import importlib.util, itertools, json, os, re, shlex, subprocess, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+
+def _mod(name):
+    spec = importlib.util.spec_from_file_location("fcb_dev_" + name, os.path.join(ROOT, name + ".py"))
+    m = importlib.util.module_from_spec(spec); spec.loader.exec_module(m)
+    return m
+
+
+fsio, outbox = _mod("fsio"), _mod("outbox")
 DIR = os.path.join(ROOT, "state", "devices")
 CHAT_MAX_CALLS, CHAT_MAX_S, IDLE_CAP_S = 10, 180, 7200
 # 运行 claude、npx @anthropic-ai/claude-code、node …/claude-code/cli.js、打开 claude.ai 都算：设备命令里出现 claude 或 anthropic 字样就拦
@@ -22,7 +31,22 @@ SAFE_REDEF = re.compile(r"(?:^|[\s;&|({])(?:alias|source|function|eval|set(?!\s+
 DYNAMIC = re.compile(r"\$[({A-Za-z_0-9@*-]|`|[<>]\(")
 FOR = re.compile(r"\bfor\s+([A-Za-z_]\w*)\s+in\s+([^;\n]*)")
 VARIANTS = 64
-PREFIX = re.compile(r"^(?:(?:do|then|else|elif|if|while|until)\s+|(?:env|nohup|exec|time|command|sudo)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+|[({!]\s*)+")
+# 设备命令名出现在这些命令的参数里，才算普通用途（搜索、查看、写进提交说明）；别的命令带着设备名，分不清是不是在调用，一律按设备命令处理
+PLAIN = {"echo", "printf", "grep", "egrep", "fgrep", "cat", "head", "tail", "wc", "ls", "ll", "stat", "file", "cd", "pushd", "popd", "mkdir", "touch",
+         "which", "type", "whereis", "tree", "du", "df", "diff", "cmp", "cut", "uniq", "jq", "basename", "dirname", "realpath", "readlink", "pwd", "date",
+         "test", "[", "[[", "true", "false", ":", "lark-cli", "wecom-cli", "seq", "sleep", "kill", "pgrep", "rmdir"}
+PLAIN_RX = re.compile(r"rg\b(?!.*\s--pre\b)|find\b(?!.*\s-(?:exec|execdir|ok|okdir|delete|fprint\w*)\b)|sed\s+-n\s+[\d,$p'\"]+(?:\s|$)|command\s+-[vV]\s"
+                      r"|git\s+(?:-C\s+\S+\s+)?(?:commit|log|show|diff|status|add|grep|branch|push|fetch|pull|tag|blame|ls-files|rev-parse|mv|rm|restore|switch|merge|checkout)\b"
+                      r"(?!.*\s(?:-O|-x|--exec\b|--open-files-in-pager|--upload-pack|--receive-pack|--ext-diff|--textconv))(?!.*\bext::)"
+                      r"|gh\s+(?:pr|issue|run|repo|api|release)\b")
+RUNNERS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "xargs", "parallel", "ssh"}
+# 换行、管道之外还能让文字变成命令的写法：整条命令里有，设备名出现在哪儿都不算普通用途
+REBIND = re.compile(r"(?:^|[\s;&|({])(?:alias|function|hash|enable|trap|coproc|complete)\s|\w\s*\(\s*\)")
+KEYWORD = re.compile(r"^(?:(?:do|then|else|elif|if|while|until|time)\s+|[({!]\s*|(?:case\s+\S+\s+in\s+)|[^\s()]*\)\s+)+")
+LITERAL_SUB = re.compile(r"(?:\$\(|`)\s*(?:printf|echo)(?:\s+-n)?\s+([\"']?)([\w./@:-]+)\1\s*(?:\)|`)")
+EMPTY = re.compile(r"\$\{[^}]*\}|\$\w+|\$[@*#?!-]|\$\([^()]*\)|`[^`]*`")
+START = re.compile(r"(?:^|(?<=[\s/=,:;(){}\[\]!@|&<>$`]))(?=\S)")
+PREFIX =re.compile(r"^(?:(?:do|then|else|elif|if|while|until)\s+|(?:env|nohup|exec|time|command(?!\s+-[vV]\b)|sudo)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+|[({!]\s*)+")
 
 
 def config():
@@ -32,8 +56,8 @@ def config():
         return {}
 
 
-def segments(cmd):
-    """按 && || ; | & 换行拆成几段（引号里的不拆）。"""
+def segments(cmd, raw=False):
+    """按 && || ; | & 换行拆成几段（引号里的不拆）。raw：前面套的 env、赋值之类不去掉。"""
     out, cur, q, i = [], "", None, 0
     while i < len(cmd):
         c = cmd[i]
@@ -50,7 +74,7 @@ def segments(cmd):
             cur += c
         i += 1
     out.append(cur)
-    return [PREFIX.sub("", s.strip()) for s in out if s.strip()]
+    return [s.strip() if raw else PREFIX.sub("", s.strip()) for s in out if s.strip()]
 
 
 WRAP = re.compile(r"^(?:(?:ba|z|da|k)?sh|env\s+(?:ba|z|da)?sh)\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s+(.+)$|^eval\s+(.+)$", re.S)
@@ -136,15 +160,99 @@ def _expand(cmd, depth):
     return out
 
 
+def inner(s, depth=0):
+    """$(…)、反引号、<(…)、>(…) 里的命令，一层层拆出来。"""
+    out, i = [], 0
+    while i < len(s) and depth < 4:
+        if s[i] == "`":
+            j = s.find("`", i + 1)
+            if j < 0: break
+            out.append(s[i + 1:j]); i = j + 1; continue
+        if s[i:i + 2] in ("$(", "<(", ">("):
+            n, j = 1, i + 2
+            while j < len(s) and n: n += {"(": 1, ")": -1}.get(s[j], 0); j += 1
+            out.append(s[i + 2:j - 1 if not n else j]); i += 2; continue
+        i += 1
+    return [x for y in out for x in [y] + inner(y, depth + 1)]
+
+
+def flatten(s):
+    """去掉引号和反斜杠、还原 $'…'、把空白压成一个：d'ev'cli、de\\vcli、$'\\x64evcli' 都还原成 devcli。"""
+    def ansi_c(m):
+        try: return m.group(1).encode("latin-1", "replace").decode("unicode_escape")
+        except UnicodeDecodeError: return m.group(1)
+    s = LITERAL_SUB.sub(lambda m: m.group(2), re.sub(r"\$'((?:[^'\\]|\\.)*)'", ansi_c, s))
+    return re.sub(r"\s+", " ", re.sub(r"[\"'\\]", "", s)).strip()
+
+
+def mentions(s, d):
+    """这段文字的哪个词的开头能匹配设备的调用正则（绝对路径看最后一级）。空变量、空替换拆开的（dev${X}cli）也看。"""
+    for f in dict.fromkeys((flatten(s), flatten(EMPTY.sub("", LITERAL_SUB.sub(lambda m: m.group(2), s))))):
+        for m in START.finditer(f):
+            p = m.start()
+            if p and f[p - 1] == "/" and "/" in f[p:].split(" ")[0]: continue   # 路径中间的一级目录，不是在调用它
+            try:
+                if re.match(d["match"], f[p:]): return True
+            except re.error:
+                return False
+    return False
+
+
+def head_of(s):
+    """(去掉关键字和前面的赋值之后的段, 前面的赋值)。"""
+    s, pre = KEYWORD.sub("", s.strip()), ""
+    while True:
+        m = re.match(r"^[A-Za-z_]\w*=(?:\"[^\"]*\"|'[^']*'|[^\s\"'])*\s+", s)
+        if not m: return s, pre
+        pre += m.group(0); s = s[m.end():]
+
+
+def ordinary(raw, d):
+    """这一段带着设备名，但能确定只是普通用途：注释、搜索、查看、写进提交说明、给一个普通变量赋值（用到的地方另外代入检查）。"""
+    s, pre = head_of(raw)
+    if s.startswith("#"): return True
+    if re.match(r"^[A-Za-z_]\w*=\"?(?:\$\([^()]*\)|`[^`]*`)\"?$", KEYWORD.sub("", raw.strip())): return True   # X=$(…)：里面的命令单独拆出来查
+    if pre and mentions(pre, d): return False   # GIT_PAGER=devcli git log
+    m = re.match(r"^([A-Za-z_]\w*)=(?:\"[^\"]*\"|'[^']*'|[^\s\"'])*$", s)
+    if m: return not re.search(r"PAGER|EDITOR|VISUAL|SHELL|BROWSER|CMD|COMMAND|SSH|ENV|PROMPT|PATH|IFS", m.group(1), re.I)
+    w = s.split(None, 1)[0] if s else ""
+    name = w.rsplit("/", 1)[-1] if w.startswith(("/bin/", "/usr/bin/")) else w
+    return name in PLAIN or bool(PLAIN_RX.match(s))
+
+
+def runs_text(raws, cmd):
+    """整条命令里有没有把文字当命令跑的：套在任何东西后面的 shell、xargs、ssh，eval、source，拿变量或替换当命令，改名（alias、函数）。"""
+    if REBIND.search(cmd): return True
+    for r in raws:
+        s, _ = head_of(r)
+        ws = [w.rsplit("/", 1)[-1] for w in re.sub(r"[\"'\\]", "", s).split()]
+        if not ws: continue
+        if ws[0] in (".", "source", "eval") or ws[0][:1] in "$`": return True
+        if ws[0] not in PLAIN and not PLAIN_RX.match(s) and set(ws) & RUNNERS: return True
+    return False
+
+
 def calls(cmd, devs):
-    """命令里哪几段是在调用设备：段首匹配设备的调用正则才算，只是搜索设备名的不算。sh -c、eval、变量包一层的照样拆开看。"""
-    out = []
-    for s in expand(cmd):
+    """命令里哪几段是在调用设备：(设备, 段, 是不是直接写在命令开头)。文字里出现设备命令名、又没法确定是普通用途的，都算。
+    timeout、nice、setsid、xargs、ssh、env -u、sudo -u 套在前面的，$(…)、反引号、引号、反斜杠、绝对路径、函数体、case、变量里的都认得到；
+    只是搜索、查看设备名的不算，除非同一条命令里还有把文字当命令跑的写法。"""
+    devs = [d for d in devs if d.get("match")]
+    if not devs: return []
+    raws, flat = [], (cmd or "").replace("\\\n", "")
+    for c in variants(flat):
+        for text in [c] + inner(c): raws += segments(text, raw=True)
+    raws = list(dict.fromkeys(raws))
+    runs, out = runs_text(raws, flat), []
+    for s in expand(cmd):   # 变量代入、sh -c 拆开之后写在段首的
         for d in devs:
             try:
-                if d.get("match") and re.match(d["match"], s): out.append((d, s))
+                if re.match(d["match"], s): out.append((d, s, True))
             except re.error:
                 pass
+    for s in raws:
+        for d in devs:
+            if mentions(s, d) and (runs or not ordinary(s, d)) and not any(x is d and t == PREFIX.sub("", s.strip()) for x, t, _ in out):
+                out.append((d, s, False))
     return out
 
 
@@ -160,9 +268,7 @@ def lease(name):
 
 def _write(name, obj):
     os.makedirs(DIR, exist_ok=True)
-    tmp = _path(name) + ".tmp"
-    with open(tmp, "w") as f: json.dump(obj, f, ensure_ascii=False)
-    os.replace(tmp, _path(name))
+    fsio.write_json(_path(name), obj)
 
 
 def release(name, cfg=None):
@@ -194,7 +300,7 @@ def who(env):
         label = f"{t.get('project') or 'task'}#{t.get('num') or tid}"
         if t.get("schedule"):
             try:
-                with open(env.get("FCB_SCOPE") or t.get("scope") or "") as f: allow = set(json.load(f).get("devices") or [])
+                with open(t.get("scope") or "") as f: allow = set(json.load(f).get("devices") or [])
             except Exception:
                 allow = set()
             if not allow: return None, "", False, None, "这个定时任务的权限范围里没有设备。"
@@ -226,9 +332,12 @@ def check(cmd, env=None, now=None):
         return 2, ("红线：命令里有 claude，又用变量或命令替换间接调用别的命令，分不清是不是在设备上跑，按红线拦下。"
                    "要用设备就直接写设备命令，被拦了不要绕路。")
     if not hits: return 0, ""
-    for d, s in hits:
+    loose = bool(re.search(r"(?<!\|)\|(?!\|)|<<|[<>]\(", cmd))   # 管道、heredoc 喂进去的文字也可能在设备上跑
+    for d, s, direct in hits:
         texts, dyn = unknown(s, cmd)
-        bare = [re.sub(r"[\"'\\]", "", x) for x in [s, *texts] + ([cmd] if len(texts) > 1 else [])]   # 引号、反斜杠拆开的（'cl''aude'、cl\aude）拼回去再查
+        dyn = dyn or bool(re.search(r"\b(?:xargs|parallel)\b", s))   # 参数从标准输入来，算不出
+        whole = [cmd, flatten(cmd)] + variants(cmd) if loose or not direct or len(texts) > 1 else []   # 不是直接写在命令开头的（套着别的、函数、case、替换里），查整条
+        bare = [re.sub(r"[\"'\\]", "", x) for x in [s, flatten(s), *texts, *whole]]   # 引号、反斜杠拆开的（'cl''aude'、cl\aude）拼回去再查
         if any(REDLINE.search(x) for x in bare):
             return 2, (f"红线：任何设备上都不运行 claude、不打开或登录 claude.ai（{d['name']}）。"
                        "Claude 的登录态只在运行机上，主人来源也一样，被拦了不要绕路。")
@@ -238,26 +347,55 @@ def check(cmd, env=None, now=None):
     holder, label, chat, allow, err = who(env)
     if err: return 2, err
     now = now or time.time()
-    for d, s in hits:
-        name = d["name"]
-        if allow is not None and name not in allow: return 2, f"{name} 不在这个定时任务的权限范围里。"
-        l = lease(name)
-        if l and l.get("holder") != holder:
-            if stale(l, now):
-                release(name, cfg); l = None
-            else:
-                q = l.get("queue") or []
-                if holder not in q: q.append(holder); l["queue"] = q; _write(name, l)
-                return 2, (f"{name} 被 {l.get('label')} 占着，你排第 {q.index(holder) + 1}。"
-                           + ("这台设备现在不能用，换个时间或派成任务。" if chat else "先做别的；空出来会往你的收件箱留言。要等就结束这一轮说明在等设备。"))
-        if not l:
-            l = {"name": name, "holder": holder, "label": label, "since": now, "count": 0, "chat": chat,
-                 "idle_max_min": d.get("idle_max_min") or 120}
-        l["count"] = l.get("count", 0) + 1; l["last"] = now
-        _write(name, l)
-        if chat and (l["count"] > CHAT_MAX_CALLS or now - l["since"] > CHAT_MAX_S):
-            return 2, (f"聊天里一轮最多用设备 {CHAT_MAX_CALLS} 次、{CHAT_MAX_S // 60} 分钟。剩下的派成任务（[派活]），"
-                       "任务能独占设备、等人时不占资源。")
+    tid = outbox.in_box(ROOT)
+    for d in {d["name"]: d for d, *_ in hits}.values():
+        if tid: rc, msg = box_lease(tid, d["name"], allow)
+        else: rc, msg = acquire(d, holder, label, chat, allow, now, cfg)
+        if rc: return rc, msg
+    return 0, ""
+
+
+def box_lease(tid, name, allow):
+    """定时运行的沙箱里看不到租约文件：请求进发件箱，服务按任务的范围在箱外取租约；记下了才放行。一轮里取到一次就够（任务在跑，租约就不会被收）。"""
+    if allow is not None and name not in allow: return 2, f"{name} 不在这个定时任务的权限范围里。"
+    t = _task(tid) or {}
+    d = os.path.join(ROOT, "state", "tasks", str(tid))
+    if any(a.get("op") == "lease" and a.get("device") == name and a.get("ok") and a.get("turn") == t.get("turn")
+           for a in outbox._rows(os.path.join(d, "outbox.ack.jsonl"))): return 0, ""
+    try: a = outbox.request(d, {"op": "lease", "device": name}, min(40, float((config().get("tasks") or {}).get("outbox_wait_s", 40))))
+    except OSError as e: return 2, f"{name} 的租约请求写不进发件箱：{e}"
+    if a is None: return 2, f"{name} 的租约请求还没等到服务的回执，先不放行；先做别的，过一会儿再试。"
+    return (0, "") if a.get("ok") else (2, a.get("msg") or "没拿到租约")
+
+
+def take(t, name, allow, now=None):
+    """服务在箱外替定时任务取租约：身份和范围看任务记录。"""
+    cfg = config()
+    d = next((d for d in cfg.get("devices") or [] if d.get("name") == name), None)
+    if not d: return 2, f"没有设备 {name}"
+    return acquire(d, f"task:{t['id']}", f"{t.get('project') or 'task'}#{t.get('num') or t['id']}", False, allow, now or time.time(), cfg)
+
+
+def acquire(d, holder, label, chat, allow, now, cfg):
+    name = d["name"]
+    if allow is not None and name not in allow: return 2, f"{name} 不在这个定时任务的权限范围里。"
+    l = lease(name)
+    if l and l.get("holder") != holder:
+        if stale(l, now):
+            release(name, cfg); l = None
+        else:
+            q = l.get("queue") or []
+            if holder not in q: q.append(holder); l["queue"] = q; _write(name, l)
+            return 2, (f"{name} 被 {l.get('label')} 占着，你排第 {q.index(holder) + 1}。"
+                       + ("这台设备现在不能用，换个时间或派成任务。" if chat else "先做别的；空出来会往你的收件箱留言。要等就结束这一轮说明在等设备。"))
+    if not l:
+        l = {"name": name, "holder": holder, "label": label, "since": now, "count": 0, "chat": chat,
+             "idle_max_min": d.get("idle_max_min") or 120}
+    l["count"] = l.get("count", 0) + 1; l["last"] = now
+    _write(name, l)
+    if chat and (l["count"] > CHAT_MAX_CALLS or now - l["since"] > CHAT_MAX_S):
+        return 2, (f"聊天里一轮最多用设备 {CHAT_MAX_CALLS} 次、{CHAT_MAX_S // 60} 分钟。剩下的派成任务（[派活]），"
+                   "任务能独占设备、等人时不占资源。")
     return 0, ""
 
 

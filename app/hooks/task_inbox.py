@@ -29,4 +29,5 @@ if top > st.get("max", 0) or st.get("calls", 0) >= 5:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": "PostToolUse", "additionalContext": tasks.inbox_hint(unf)}}, ensure_ascii=False))
 else:
     st["calls"] = st.get("calls", 0) + 1
-with open(p, "w") as f: json.dump(st, f)
+try: tasks.fsio.write_json(p, st)
+except OSError: pass   # 定时运行的沙箱里状态只读：记不了提示过第几条，就每次都提示
