@@ -1227,8 +1227,8 @@ def v2_tick():
 def freeze_tick():
     """内存紧时冻结任务单元、缓过来解冻（方案 5.4），都私聊告诉主人。这是服务告警，不占主人私聊的限额。"""
     for act, t, why in tasks.freeze_tick():
-        msg = (f"内存紧，冻结了 {tasks.ref(t)}（{t['title'][:30]}）：{why}。缓过来自动解冻。" if act == "冻结"
-               else f"解冻了 {tasks.ref(t)}（{t['title'][:30]}）：{why}。")
+        msg = {"冻结": f"内存紧，冻结了 {tasks.ref(t)}（{t['title'][:30]}）：{why}。缓过来自动解冻。",
+               "停掉": f"{tasks.ref(t)}（{t['title'][:30]}）{why}，按中断交回。"}.get(act, f"解冻了 {tasks.ref(t)}（{t['title'][:30]}）：{why}。")
         owner_dm(t["origin"].get("channel", "feishu"), msg)
 
 def v2_command(ev, text, owner):

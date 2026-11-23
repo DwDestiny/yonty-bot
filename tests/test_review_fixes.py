@@ -110,6 +110,38 @@ class AuthTest(Base):
         self.assertEqual(self.inbox(t)[-1]['kind'], '留言')
 
 
+class FreezeFixTest(Base):
+    """第 4 项：冻一个先等信号；可用内存停在两条线中间也能解冻或按中断交回。"""
+
+    def run3(self):
+        now = time.time()
+        return [self.task(title=f'f{i}', status='running', unit=f'demo-task-f{i}', launched=now - 600 + i) for i in range(3)], now
+
+    def test_no_cascade_within_settle_window(self):
+        ts, now = self.run3()
+        self.e.meminfo(8, 0.5)
+        for dt in (0, 15, 30):
+            self.t.freeze_tick(now=now + dt)
+        self.assertEqual(len([x for x in ts if self.t.load(x['id']).get('frozen')]), 1, '15 秒内只冻一个')
+        self.t.freeze_tick(now=now + 120)
+        self.assertEqual(len([x for x in ts if self.t.load(x['id']).get('frozen')]), 2, '等够了、没缓过来才冻下一个')
+
+    def test_thaw_with_hysteresis_and_stop_after_max(self):
+        ts, now = self.run3()
+        self.e.meminfo(8, 0.5); self.t.freeze_tick(now=now)
+        f = [x for x in ts if self.t.load(x['id']).get('frozen')][0]
+        self.e.meminfo(8, 1.3); self.t.freeze_tick(now=now + 120)
+        self.assertFalse(self.t.load(f['id']).get('frozen'), '回到冻结线以上 0.5G 就解冻，不等底线')
+        self.e.meminfo(8, 0.5); self.t.freeze_tick(now=now + 200)
+        f = [x for x in ts if self.t.load(x['id']).get('frozen')][0]
+        self.e.meminfo(8, 0.79)
+        out = self.t.freeze_tick(now=now + 3600)
+        x = self.t.load(f['id'])
+        self.assertEqual(x['status'], 'lost'); self.assertFalse(x.get('frozen'))
+        self.assertEqual(out[0][0], '停掉')
+        self.assertTrue([e for e in self.t.events(f['id']) if e['kind'] == 'lost' and '冻了' in e['text']])
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'

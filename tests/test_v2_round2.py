@@ -300,7 +300,7 @@ class FreezeTest(Base):
         t = self.e.t.load(new['id'])
         self.assertFalse(t.get('frozen')); self.assertTrue(t.get('thawed'))
         d = [x for x in self.e.decisions() if x['kind'] == '解冻']
-        self.assertEqual(len(d), 1); self.assertIn('回到底线', d[0]['why'])
+        self.assertEqual(len(d), 1); self.assertIn('回到解冻线', d[0]['why'])
 
     def test_schedule_run_frozen_first_and_frozen_not_stuck(self):
         now = time.time()

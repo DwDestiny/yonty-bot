@@ -10,7 +10,7 @@ import re, shutil
 
 GB = 1024 ** 3
 DEFAULTS = {"floor_gb": 1.5, "floor_pct": 10, "pressure_pct": 20, "max_units": 8, "freeze_gb": 0.75, "freeze_pressure_pct": 60,
-            "thaw_after_s": 60,
+            "thaw_after_s": 60, "thaw_margin_gb": 0.5, "thaw_pressure_pct": 40, "freeze_settle_s": 90, "freeze_max_min": 20,
             "default_build_gb": 4, "default_light_gb": 1, "build_roles": ["开发", "排查", "验收"]}
 
 
@@ -114,10 +114,11 @@ def hot(snap, c):
 
 
 def cool(snap, c):
-    """能不能解冻：可用内存回到底线以上，且内存压力不超过压力线。冻结线和解冻线隔开，免得来回冻。"""
-    fl = floor(snap, c)
-    if snap["total"] and snap["avail"] >= fl and snap["mem_some"] <= c["pressure_pct"]:
-        return True, f"可用内存 {gb(snap['avail'])} 回到底线 {gb(fl)} 以上，内存压力 {snap['mem_some']:.0f}% 不超过 {c['pressure_pct']}%"
+    """能不能解冻：可用内存回到冻结线以上 thaw_margin_gb（回差，免得来回冻），且内存压力不超过 thaw_pressure_pct。
+    不等回到放行的底线：底线比冻结线高得多，停在两条线中间就一直解不开。"""
+    line = (c["freeze_gb"] + c["thaw_margin_gb"]) * GB
+    if snap["total"] and snap["avail"] >= line and snap["mem_some"] <= c["thaw_pressure_pct"]:
+        return True, f"可用内存 {gb(snap['avail'])} 回到解冻线 {gb(line)} 以上，内存压力 {snap['mem_some']:.0f}% 不超过 {c['thaw_pressure_pct']}%"
     return False, ""
 
 

@@ -974,16 +974,28 @@ def freeze_tick(now=None):
     for x in ts:   # 冻着的时候被取消、结束了，不再算冻着
         if x.get("frozen") and x["status"] != "running": update(x["id"], _touch=False, frozen=None, frozen_why="")
     run_ = [x for x in ts if x["status"] == "running" and x.get("exec") != "cloud" and (x.get("unit") or x.get("pid"))]
+    out = []
+    for x in [x for x in run_ if x.get("frozen") and now - x["frozen"] > rc["freeze_max_min"] * 60]:   # 冻太久没缓过来：停掉，按中断交回
+        m = int((now - x["frozen"]) // 60)
+        why = f"内存紧，冻了 {m} 分钟还没缓过来（超过 {rc['freeze_max_min']} 分钟），停掉了"
+        _freezer(x, False); stop(x)
+        update(x["id"], _touch=False, frozen=None, frozen_why="", status="lost")
+        event(x["id"], "lost", why + "。会话和工作树都在，内存宽松了再让它接着干。")
+        decide("冻太久停掉", task=ref(x), why=why); out.append(("停掉", x, why))
+    if out: return out
     hot, why = res.hot(snap, rc)
     if hot:
         cand = [x for x in run_ if not x.get("frozen")]
         if not cand: return []
+        last = max([x for x in run_ if x.get("frozen")], key=lambda x: x["frozen"], default=None)
+        if last and (now - last["frozen"] < rc["freeze_settle_s"] or snap["avail"] > (last.get("frozen_avail") or 0) + 0.1 * res.GB):
+            return []   # 刚冻了一个：等内存信号反映出来（压力是 60 秒均值），没缓过来才冻下一个；在好转就不再冻
         t = min(cand, key=lambda x: (0 if x.get("schedule") else 1, -(x.get("launched") or 0)))
         why += "；冻结" + ("定时运行" if t.get("schedule") else "最晚开的任务") + "，保住服务"
         ok, err = _freezer(t, True)
         if not ok:
             decide("冻结失败", task=ref(t), why=f"{why}；{err}"); return []
-        update(t["id"], _touch=False, frozen=now, frozen_why=why)
+        update(t["id"], _touch=False, frozen=now, frozen_why=why, frozen_avail=snap["avail"])
         decide("冻结", task=ref(t), why=why)
         return [("冻结", t, why)]
     frozen = sorted([x for x in run_ if x.get("frozen")], key=lambda x: x["frozen"])
