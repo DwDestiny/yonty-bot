@@ -11,6 +11,7 @@ Pos:    tasks.py 和 bridge 共用。本模块只做判断和记账；真正发�
 import hashlib, hmac, json, os, re, time
 
 CATS = ("授权", "花钱", "方向", "动作", "进展", "节点", "完成", "问题", "留言")
+REQ_MAX = 5000   # 同事派的任务发到主人私聊的请求最多多少字（两个渠道一条消息都装得下）
 OWNER_CATS = ("授权", "花钱", "方向")
 NEED_REPLY = ("授权", "花钱", "方向", "动作", "问题")
 DEFAULTS = {"max_hops": 3, "owner_max_chars": 300, "other_max_chars": 2000, "dedup_min": 30, "progress_gap_min": 10,
@@ -191,11 +192,14 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
     full = text
     lim = c["owner_max_chars"] if tg["to"] in ("主人", "聊天", "主控") else c["other_max_chars"]
     if (extra or {}).get("im"): lim = len(text)   # 人的答复不截，全文送到
+    asker = tk.load(sender["task"]) if sender.get("task") else None
+    dm = tg["to"] == "主人" and asker and not asker["requester"].get("owner")   # 同事派的任务找主人：发到主人私聊，主人别处看不到全文，不按 300 字截
+    if dm: lim = max(lim, REQ_MAX)
     if len(text) > lim:
         if tg["to"] not in ("任务", "事", "记录"):   # 这三种收的是全文（事另有上限，回执里说）
             notes.append(f"没送全：正文 {len(full)} 字，只送了前 {lim} 字")
             tk.decide("截短", sender=sender["ref"], category=kind, why=f"正文 {len(full)} 字，只送前 {lim} 字")
-        text = text[:lim] + (f"……（全文：/task {sender['ref']}）" if sender.get("task") else "……（后面截掉了）")
+        text = tk.cut(text, lim) if dm else text[:lim] + (f"……（全文：/task {sender['ref']}）" if sender.get("task") else "……（后面截掉了）")
     need = (kind in NEED_REPLY) if need_reply is None else bool(need_reply)
     with lock(tk):
         recs = load(tk)

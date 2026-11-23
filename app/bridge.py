@@ -743,14 +743,15 @@ def owner_dm(channel, text):
     """私聊主人（同事私聊派的活要主人批）。优先同渠道，没配就换另一个。返回用了哪个渠道。"""
     return owner_post(channel, text)[0]
 
-def owner_channel(channel):
-    """私聊主人实际走哪个渠道，一个都没配返回 None。"""
+def owner_channel(channel, tries=0):
+    """私聊主人实际走哪个渠道，一个都没配返回 None。tries：前面没送到几次，两个渠道都配了就轮着试。"""
     on = {"wecom": WECOM["enabled"] and WECOM["owner_userid"], "feishu": FEISHU_ON and OWNER_OPEN_ID}
-    return next((c for c in (["wecom", "feishu"] if channel == "wecom" else ["feishu", "wecom"]) if on[c]), None)
+    cs = [c for c in (["wecom", "feishu"] if channel == "wecom" else ["feishu", "wecom"]) if on[c]]
+    return cs[tries % len(cs)] if cs else None
 
-def owner_post(channel, text, key=None):
+def owner_post(channel, text, key=None, tries=0):
     """私聊主人，返回 (渠道, 结果)：结果是消息 ID；True、None 是发出去了但没有 ID；False 是没发出去。key：重发不重复的幂等键。"""
-    c = owner_channel(channel)
+    c = owner_channel(channel, tries)
     if c == "wecom":
         return c, wecom_send({"op": "send", "chatid": WECOM["owner_userid"], "content": wecom_trim(text), "ref": key or "approve"})
     if c == "feishu":
@@ -1313,7 +1314,9 @@ def answer(ev, rid):
     tasks.update(t["id"], _touch=False, hop=0)   # 人回话了，这条链重新数
     if t["status"] == "waiting": tasks.update(t["id"], status="approved")
     tasks.dl.answered(tk, rid)
-    reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
+    st, rf = t["status"], tasks.ref(t)
+    reply(ev, f"交给 {rf} 了（i{n}）。" if st in tasks.ACTIVE else
+          f"记进 {rf} 的收件箱了（i{n}），但它已经{tasks.LABEL.get(st, st)}，不会自己看。要它接着干，发 {rf} 加你的话。", in_topic(ev))
 
 def pm_intro(project):
     r = tasks.roles().get("项目经理") or {}
@@ -1483,6 +1486,56 @@ def how_to_answer(r, channel):
     if not code: return ""
     return f"\n（{'引用这条回，或者' if channel == 'feishu' else '回这条就'}发：{code} 你的答复）"
 
+def owner_only(r, t):
+    """这条发到主人自己的私聊：会话发的；或者给主人的、主人以外的人派的任务发的（发在派活人的会话里主人看不到）。"""
+    return not t or (r["to"]["to"] == "主人" and not t["requester"].get("owner"))
+
+def asked_by(t):
+    o = t["origin"]
+    where = CHANNEL_LABEL.get(o.get("channel"), "") + ("私聊" if o.get("chat_type") == "p2p" else "群里")
+    return " ".join(f"{t['requester']['name']} 在{where}派的任务 {tasks.ref(t)}《{t['title']}》".split()) + "：\n"
+
+def not_sent(rs, now, why, over=False):
+    """没发出去：留着重发（幂等键不变；两个渠道都配了就换一个）。要回复的一直试，不用回复的试 20 次。
+    任务给主人的，连着 3 次（over：试也没用）还没送到，就告诉派活人的会话和任务自己，只说没送到，不带正文。"""
+    tk, dl, r = tasks._me(), tasks.dl, rs[0]
+    n, fr = (r.get("send_fail") or 0) + 1, r["from"]
+    t = tasks.load(fr["task"]) if fr.get("task") else None
+    if n == 1 or n == 20: tasks.decide("没发出去", sender=fr["ref"], category=r["kind"], why=f"第 {n} 次，{why}，" + ("接着重发" if r.get("need") or n < 20 else "不再发"))
+    wait = 0 if n < 3 else min(600, 5 * 2 ** min(n, 7))   # 连着失败的放慢，最慢 10 分钟一次
+    kv = {}
+    if t and owner_only(r, t) and not r.get("fail_told") and (over or n >= 3):
+        kv = {"fail_told": True, "tell": {"text": f"{tasks.ref(t)}：有件事要主人定，还没送到主人那里（{why}），留着接着发。"}}
+        tasks.inbox_add(t["id"], "服务", False, f"给主人的 {dl.head(r)} 还没送到（{why}），服务留着接着发，送到之前别当主人看过了。", kind="留言")
+    for x in rs:
+        x = dl.find(tk, x["id"]) or x
+        tell = {"tell": None} if (x.get("tell") or {}).get("wait") else {}   # 还没说出口的“已转给主人”不说了
+        dl.update(tk, x["id"], status="new" if x.get("need") or n < 20 else "dropped", send_fail=n, send_at=now + wait, **{**tell, **(kv if x["id"] == r["id"] else {})})
+
+def tell_origin(late=False):
+    """告诉派活人的会话“已转给主人”“还没送到”，没发出去就下一拍再发，最多 20 次。
+    企微的发送结果要等网关回，“已转给主人”放到下一拍开头再说（late）。"""
+    tk, dl = tasks._me(), tasks.dl
+    for r in dl.load(tk):
+        m = r.get("tell")
+        t = tasks.load(r["from"]["task"]) if m and r["from"].get("task") else None
+        if not t or (m.get("wait") and not late): continue
+        try: ok = task_say(t, m["text"], f"dl{r['id']}t{r.get('send_fail') or 0}") is not False
+        except Exception: log.exception("notice of delivery %s failed", r["id"]); ok = False
+        n = (m.get("fail") or 0) + 1
+        if not ok and n >= 20: tasks.decide("没发出去", sender=r["from"]["ref"], why="给派活人会话的一句话 20 次都没发出去，不再发")
+        dl.update(tk, r["id"], tell=None if ok or n >= 20 else dict(m, fail=n))
+
+BOUNCED = set()
+
+def wecom_sent(raw):
+    """网关报的发送结果。给主人的投递平台没发出去：退回去重发，不当成已经送到。"""
+    log.info("wecom sent %s ok=%s %s", raw.get("ref"), raw.get("ok"), raw.get("error", ""))
+    if raw.get("ok") or not raw.get("ref"): return
+    rs = [r for r in tasks.dl.load(tasks._me()) if r.get("sent_key") == raw["ref"] and r["status"] in ("open", "sent") and (r.get("chat") or "").startswith("wx:p2p:")]
+    if rs: not_sent(rs, time.time(), f"企微没发出去 {raw.get('error', '')}".strip())
+    elif re.match(r"dl\d+-\d+$", raw["ref"]): BOUNCED.add(raw["ref"])   # 结果比记账先到：记完账再退回去
+
 def delivery_tick():
     """把新投递送出去（方案 7.5 防刷屏）：主人、派活人、聊天发到来源聊天（带编号），主控、项目经理排进会话队列。
     同一发送方发给同一目标的，离上一次送不到 2 分钟就等着，到点合成一条（要回复的找主人请求不合并）；
@@ -1498,6 +1551,7 @@ def delivery_tick():
         if t:
             try: task_say(t, task_event_text(t, {"kind": "progress", "text": text}), f"pg{tid}_{int(now)}")
             except Exception: log.exception("held progress for task #%s failed", tid)
+    tell_origin(True)
     dl.release(tk)
     groups = {}
     for r in dl.load(tk):
@@ -1514,7 +1568,7 @@ def delivery_tick():
             if r["kind"] == "进展" and t:
                 v = dl.progress_gate(tk, t, r["text"], now)
                 if v != "send": dl.update(tk, r["id"], status="held" if v == "hold" else "dropped"); continue
-            dest = dl.origin_key(t) if t else "p2p:" + OWNER_OPEN_ID
+            dest = "p2p:" + OWNER_OPEN_ID if owner_only(r, t) else dl.origin_key(t)
             if r.get("need"): groups[("one", r["id"])] = [r]; continue   # 要回复的不合并：每条有自己的编号和引用回复
             groups.setdefault(("chat", fr["ref"], to, dest), []).append(r)
         elif to == "主控":
@@ -1545,29 +1599,33 @@ def delivery_tick():
                     else:
                         for x in rs: dl.digest_add(tk, x); dl.update(tk, x["id"], status="digest")
                     continue
-                ch = t["origin"]["channel"] if t else owner_channel("feishu") or "feishu"
-                if len(rs) == 1: text = f"{dl.head(r)} {r['text']}"
+                dm, tries = owner_only(r, t), r.get("send_fail") or 0
+                ch = owner_channel(t["origin"]["channel"] if t else "feishu", tries) if dm else t["origin"]["channel"]
+                by = asked_by(t) if dm and t else ""   # 主人在自己私聊里看到的：写明哪个任务、谁派的
+                if len(rs) == 1: text = f"{dl.head(r)} {by}{r['text']}"
                 else:
-                    text = "\n".join(f"{dl.head(x)} {x['text']}" for x in rs)
+                    text = "\n".join(f"{dl.head(x)} {by}{x['text']}" for x in rs)
                     tasks.decide("合并", sender=fr["ref"], why=f"{len(rs)} 条不用回复的合成一条")
-                if r["to"]["to"] == "主人" and not (t and t["requester"].get("owner")): text = owner_ref(ch) + " " + text
+                if r["to"]["to"] == "主人" and not t: text = owner_ref(ch or "feishu") + " " + text
                 text += how_to_answer(r, ch)
-                if t: out = task_say(t, text, f"dl{r['id']}")
-                else: out = owner_post("feishu", text, f"dl{r['id']}-{int(r['ts'])}")[1]
-                if out is False:   # 没发出去：留着下一拍重发（幂等键不变）。要回复的一直试，不用回复的试 20 次
-                    n = (r.get("send_fail") or 0) + 1
-                    if n == 1 or n == 20: tasks.decide("没发出去", sender=fr["ref"], category=r["kind"], why=f"第 {n} 次，" + ("下一拍重发" if r.get("need") or n < 20 else "不再发"))
-                    wait = 0 if n < 3 else min(600, 5 * 2 ** min(n, 7))   # 连着失败的放慢，最慢 10 分钟一次
-                    for x in rs: dl.update(tk, x["id"], send_fail=n, send_at=now + wait, **({} if x.get("need") or n < 20 else {"status": "dropped"}))
-                    continue
+                key = f"dl{r['id']}-{int(r['ts'])}"
+                BOUNCED.discard(key)
+                if dm: out = owner_post(t["origin"]["channel"] if t else "feishu", text, key, tries)[1]
+                else: out = task_say(t, text, f"dl{r['id']}")
+                if out is False: not_sent(rs, now, "没配主人的私聊" if dm and not ch else "发不出去", over=dm and not ch); continue
                 if to_owner: dl.owner_sent(tk, now)
                 if isinstance(out, str): post_note(out, r["id"])
-                for x in rs: dl.update(tk, x["id"], status="open" if x.get("need") else "sent", chat=dl.origin_key(t) if t else "p2p:" + OWNER_OPEN_ID)
+                told = {"tell": {"text": f"{tasks.ref(t)}：有件事要主人定，已转给主人。", "wait": ch == "wecom"}} if dm and t and fr.get("task") and r.get("need") else {}
+                for x in rs:
+                    dl.update(tk, x["id"], status="open" if x.get("need") else "sent", sent_key=key, **told,
+                              chat=("wx:p2p:" + WECOM["owner_userid"] if ch == "wecom" else "p2p:" + OWNER_OPEN_ID) if dm else dl.origin_key(t))
+                if key in BOUNCED: BOUNCED.discard(key); not_sent([dl.find(tk, x["id"]) for x in rs], now, "企微没发出去"); continue
             with dl.lock(tk):
                 st2 = dl.limits(tk); st2.setdefault("merge", {})[gk] = now
                 st2["merge"] = {k: v for k, v in st2["merge"].items() if now - v < 3600}; dl.limits_save(tk, st2)
         except Exception:
             log.exception("delivery %s failed", r["id"])
+    tell_origin()
     dg = dl.limits(tk).get("digest")
     if dg and dl.owner_room(tk, now):   # 攒着的不用回复的，合成一条摘要发给主人
         dg = dl.digest_take(tk)
@@ -2117,7 +2175,9 @@ def wecom_loop(stopping):
             try: raw = json.loads(line)
             except Exception: continue
             if raw.get("type") == "ready": log.info("wecom ready")
-            elif raw.get("type") == "sent": log.info("wecom sent %s ok=%s %s", raw.get("ref"), raw.get("ok"), raw.get("error", ""))
+            elif raw.get("type") == "sent":
+                try: wecom_sent(raw)
+                except Exception: log.exception("bad wecom sent: %s", line[:300])
             elif raw.get("type") == "message":
                 try: dispatch(wecom_event(raw))
                 except Exception: log.exception("bad wecom event: %s", line[:300])
