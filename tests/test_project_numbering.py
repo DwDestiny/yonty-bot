@@ -47,8 +47,9 @@ BASE_TASKS = {'enabled', 'root', 'max_running', 'approval_hours', 'heartbeat_min
 
 def new_config_keys():
     ex = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
-    top = [k for k in ex if k not in BASE_TOP]
-    sub = [k for k in ex.get('tasks', {}) if k not in BASE_TASKS]
+    v2 = {'timezone', 'devices', 'irreversible', 'schedules', 'routing', 'delivery', 'resources'}   # 2.0 新增的配置，不是别名字段
+    top = [k for k in ex if k not in BASE_TOP and k not in v2]
+    sub = [k for k in ex.get('tasks', {}) if k not in BASE_TASKS and k not in v2]
     return ex, top, sub
 
 
@@ -303,8 +304,9 @@ class ProjectNumberingTest(NumberingBase):
         t = e.t.load(x['id'])
         prompt = e.b.relay_prompt(t, {'kind': 'done', 'text': '做完了'})
         self.assertIn('a#2', prompt); self.assertNoBare(prompt, '给主控的材料里')
-        # 走完整的回报流程：主控回一句话，发到聊天里的那条要带 a#2
-        e.t.update(x['id'], _force=True, status='done')
+        # 走完整的回报流程：主控回一句话，发到聊天里的那条要带 a#2。
+        # 2.0 的任务（v2）回报先到项目经理，见 test_v2_round2；这里测 1.x 留下来的任务走的老路
+        e.t.update(x['id'], _force=True, status='done', v2=False)
         e.t.event(x['id'], 'done', '做完了')
         queued = []
         oq, orc, ol = e.b.enqueue, e.b.run_claude, e.t.launch
@@ -535,7 +537,7 @@ class DocsAndRulesTest(unittest.TestCase):
         """完成定义：VERSION 升一个小版本。"""
         v = tuple(int(x) for x in self.read('VERSION').strip().split('.'))
         self.assertGreater(v, (1, 0, 0), 'VERSION 要升一个小版本')
-        self.assertEqual(v[0], 1)
+        self.assertGreaterEqual(v[0], 1)
 
 
 if __name__ == '__main__':

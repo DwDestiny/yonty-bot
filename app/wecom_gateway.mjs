@@ -72,7 +72,7 @@ function textOf(body) {
 
 function quoteOf(q) {
   if (!q) return null;
-  return { msgtype: q.msgtype, text: q.text?.content || q.voice?.content || textOf({ msgtype: q.msgtype, ...q }) || '' };
+  return { msgtype: q.msgtype, text: q.text?.content || q.markdown?.content || q.voice?.content || textOf({ msgtype: q.msgtype, ...q }) || '' };
 }
 
 async function saveMedia(body) {

@@ -37,10 +37,14 @@ class RepoDocsTest(unittest.TestCase):
 
     def test_no_real_ids_in_repo(self):
         pat = re.compile(r'\b(ou|oc|cli)_[0-9a-f]{12,}\b')
+        sys.path.insert(0, str(ROOT / 'tests')); from test_accept_static import instance_words
+        words = instance_words()   # 主人名字、用户名、设备名、家目录：整个仓库（含 tests）都不能有
         for f in ROOT.rglob('*'):
             if '.git' in f.parts or '_tmp' in f.parts: continue
             if f.is_file() and f.suffix in ('.md', '.py', '.sh', '.json', '.yaml', '.yml', '.mjs'):
-                self.assertIsNone(pat.search(f.read_text(encoding='utf-8')), f'{f} 含疑似真实 ID')
+                text = f.read_text(encoding='utf-8')
+                self.assertIsNone(pat.search(text), f'{f} 含疑似真实 ID')
+                for w in words: self.assertNotIn(w, text, f'{f.relative_to(ROOT)} 含实例数据')
 
 
 class ScaffoldTest(unittest.TestCase):
@@ -215,12 +219,12 @@ class ScaffoldTest(unittest.TestCase):
         cfg = Path(self.inst) / '_cg.json'
         cfg.write_text(json.dumps({'command_guard': [   # 和实例里的写法一样：mcporter 默认只给主人，用户的 Mac 再收窄到主人私聊
             {'match': r'\bmcporter\b', 'allow': ['owner', 'owner_task']},
-            {'match': r'\bmcporter\b.*\b(lcu|macfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
+            {'match': r'\bmcporter\b.*\b(devmac|devfront)\b(?!-)', 'allow': ['owner_private'], 'why': '用户的 Mac 只给主人私聊用'}]}))
         def run(cmd, **env):
-            e = dict(self.env, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})
+            e = dict({k: v for k, v in self.env.items() if not k.startswith('FCB')}, FCB_CONFIG=str(cfg), **{k: v for k, v in env.items()})   # 在任务里跑测试时不继承外面的 FCB_TASK_ID
             return subprocess.run([sys.executable, str(self.inst / 'hooks' / 'command_guard.py')], capture_output=True, text=True,
                                   input=json.dumps({'tool_name': 'Bash', 'tool_input': {'command': cmd}}), env=e)
-        mac, mini = "mcporter call lcu.js code='1'", "mcporter call lcu-mini.js code='1'"
+        mac, mini = "mcporter call devmac.js code='1'", "mcporter call devmac-mini.js code='1'"
         try:
             self.assertEqual(run(mac, FCB_OWNER='1', FCB_PRIVATE='1').returncode, 0)
             r = run(mac, FCB_OWNER='1', FCB_PRIVATE='0')                           # 主人在群里也不行
@@ -230,10 +234,10 @@ class ScaffoldTest(unittest.TestCase):
             self.assertEqual(run(mini, FCB_OWNER='1', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 0)
             self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
             self.assertEqual(run(mini, FCB_OWNER='0', FCB_PRIVATE='0', FCB_TASK_ID='3').returncode, 2)
-            self.assertEqual(run('ls lcu.txt', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 0)
+            self.assertEqual(run('ls devmac.txt', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 0)
             self.assertEqual(run('mcporter config list', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)   # 会打印 ssh 参数
             self.assertEqual(run('npx mcporter daemon stop', FCB_OWNER='0', FCB_PRIVATE='0').returncode, 2)
-            self.assertEqual(run('mcporter call macfront.frontmost_app', FCB_OWNER='1', FCB_PRIVATE='0').returncode, 2)
+            self.assertEqual(run('mcporter call devfront.frontmost_app', FCB_OWNER='1', FCB_PRIVATE='0').returncode, 2)
         finally: cfg.unlink()
         st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
         self.assertTrue(any(m['matcher'] == 'Bash' and 'command_guard.py' in m['hooks'][0]['command'] for m in st['hooks']['PreToolUse']))
@@ -293,7 +297,7 @@ class AmbientTest(unittest.TestCase):
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT)
         (inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py'):
+        for f in ('bridge.py', 'tasks.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py'):
             (inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         spec = importlib.util.spec_from_file_location('fcb_bridge_test', inst / 'bridge.py')
         b = importlib.util.module_from_spec(spec)
@@ -535,7 +539,7 @@ class TaskTest(unittest.TestCase):
         cfg['channels']['wecom'].update(enabled=True, owner_userid='boss')
         cfg['ambient']['enabled'] = False
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py', 'upgrade.py'):
+        for f in ('bridge.py', 'tasks.py', 'upgrade.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py'):
             (cls.inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         shutil.copytree(TEMPLATES / 'roles', cls.inst / 'roles')
         gh = cls.inst / 'hooks' / 'git'; gh.mkdir(parents=True)
@@ -784,7 +788,7 @@ class TaskTest(unittest.TestCase):
         finally: self.b.CLAUDE_TIMEOUT = old
 
     def test_chat_extra_results_are_replied(self):
-        def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+        def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, **k):
             on_extra('等 CI 中，先报一声'); return '好了'
         orig, self.b.run_claude = self.b.run_claude, fake
         try: self.b.handle(self.ev('干个活', chat='oc_x1', chat_type='p2p'))
@@ -792,7 +796,7 @@ class TaskTest(unittest.TestCase):
         self.assertEqual([s[1] for s in self.sent][-2:], ['等 CI 中，先报一声', '好了'])
         keys = [s[2] for s in self.sent][-2:]
         self.assertNotEqual(keys[0], keys[1])                               # 同一条消息回两次：幂等键不同，飞书才不会丢第二条
-        def fake2(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None):
+        def fake2(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, **k):
             on_extra('全说完了'); return ''                                  # 最后一句中途就发了
         self.sent.clear(); self.b.run_claude = fake2
         try: self.b.handle(self.ev('再干个活', chat='oc_x1', chat_type='p2p'))
@@ -965,7 +969,7 @@ class TaskTest(unittest.TestCase):
         finally: self.t.subprocess.run = orig
         run = [c for c in calls if c and c[0] == 'systemd-run']
         if run:   # 没有 systemd 的机器走直接起进程，不检查
-            self.assertIn('MemoryMax=6G', run[0]); self.assertIn('OOMPolicy=continue', run[0])
+            self.assertTrue(any(a.startswith('MemoryHigh=') for a in run[0]) and any(a.startswith('MemoryMax=') for a in run[0]), run[0]); self.assertIn('OOMPolicy=continue', run[0])
 
     def test_mcp_follows_user_config(self):
         cfg = dict(self.t.CFG)
@@ -983,9 +987,9 @@ class TaskTest(unittest.TestCase):
         env = dict(os.environ, FCB_OWNER='0')
         r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
         self.assertNotEqual(r.returncode, 0)
-        env['FCB_OWNER'] = '1'
+        env['FCB_OWNER'] = '1'   # 环境变量不算主人身份（第二轮复审 1）；主人会话按 bridge 的登记认，见 test_review_round2
         r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('在跑的任务', r.stdout)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
 
     def test_relay_colleague_cannot_steer_others(self):
         other = self.relay_task('done', 'x', owner=True)
@@ -1108,7 +1112,8 @@ class TaskTest(unittest.TestCase):
         self.assertNotEqual(self.t.sibling(t).get('head'), t['accept_session'])   # 验收的会话不当负责人的会话
         # 放开以后负责人可以改
         self.t.inbox_add(n, '同事甲', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'))
-        self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertTrue(self.t.load(n).get('accept_unlocked'))
+        self.t.inbox_add(n, '主控', False, '放开验收测试'); self.assertFalse(self.t.load(n).get('accept_unlocked'), '只写“主控”不算上级')
+        self.t.inbox_add(n, '主控', False, '放开验收测试', upper=True); self.assertTrue(self.t.load(n).get('accept_unlocked'))
         # 派活定的验证命令跑不到验收测试：闸门单独再跑验收命令
         m = self.new_task(accept=True, verify='true')
         os.environ['NOFEATURE'] = '1'

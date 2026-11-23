@@ -17,22 +17,44 @@
   "tasks": {
     "enabled": true,
     "root": "~/work/.bot-tasks",
-    "max_running": 2,
     "approval_hours": 24,
     "heartbeat_min": 30,
-    "models": ["haiku", "sonnet", "opus"],
+    "models": [
+      "haiku",
+      "sonnet",
+      "opus"
+    ],
     "budget_default": 20,
     "budget_factor": 1.5,
-    "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1},
+    "quota_alert": {
+      "five_hour": 0.85,
+      "seven_day_pace": 1.1
+    },
     "sibling_warm_min": 55,
     "sibling_max_ctx": 150000,
-    "compact": {"idle_min": 50, "min_ctx": 120000},
-    "memory_max": "6G",
+    "compact": {
+      "idle_min": 50,
+      "min_ctx": 120000
+    },
     "stuck_min": 40,
     "verify_retries": 2,
     "verify_timeout_min": 20,
-    "cloud": {"environment_id": "", "timeout_min": 180},
-    "project_alias": {}
+    "cloud": {
+      "environment_id": "",
+      "timeout_min": 180
+    },
+    "project_alias": {},
+    "resources": {
+      "floor_gb": 1.5,
+      "floor_pct": 10,
+      "pressure_pct": 20,
+      "max_units": 8,
+      "default_build_gb": 4,
+      "default_light_gb": 1,
+      "freeze_gb": 0.75,
+      "freeze_pressure_pct": 60,
+      "thaw_after_s": 60
+    }
   },
   "persona": "work",
   "style": "veteran",
@@ -86,12 +108,50 @@
   "deny_extra": [],
   "allow_extra": [],
   "chat_max_turns": 60,
-  "credential_paths": ["~/.config/codeup", "~/.git-credentials"],
+  "credential_paths": [
+    "~/.config/codeup",
+    "~/.git-credentials"
+  ],
   "prime": true,
   "mcp_open_to": [],
   "command_guard": [],
   "p2p_idle_hours": 6,
   "group_idle_hours": 2,
   "max_parallel": 3,
-  "claude_timeout_min": 40
+  "claude_timeout_min": 40,
+  "timezone": "Asia/Shanghai",
+  "devices": [],
+  "irreversible": [
+    "\\bgit\\s+push\\b.*(--tags|--follow-tags|\\brefs/tags/)",
+    "\\bgit\\s+push\\b.*[\\s:+](v\\d+(\\.\\d+)*|\\d+\\.\\d+(\\.\\d+)*)[\\w.-]*(\\s|$)",
+    "\\bgh\\s+release\\s+(create|edit|delete|upload)\\b",
+    "\\bgh\\s+api\\b(?=.*\\breleases\\b)(?=.*(-X\\s*(POST|PATCH|PUT|DELETE)|--method[\\s=]+(POST|PATCH|PUT|DELETE)|\\s-[fF]\\s|--(raw-)?field\\b|--input\\b))",
+    "\\bnpm\\s+publish\\b"
+  ],
+  "schedules": {
+    "max_run_min": 120,
+    "fail_pause": 3,
+    "min_wake_min": 5,
+    "probe_timeout_s": 60,
+    "probe_mem_mb": 1024
+  },
+  "routing": {
+    "sticky_min": 30,
+    "fast_path": {
+      "max_chars": 20
+    }
+  },
+  "delivery": {
+    "max_hops": 3,
+    "owner_max_chars": 300,
+    "other_max_chars": 2000,
+    "dedup_min": 30,
+    "progress_gap_min": 10,
+    "progress_max": 5,
+    "owner_per_10min": 4,
+    "owner_per_hour": 12,
+    "pingpong_max": 3,
+    "pingpong_min": 10,
+    "merge_s": 120
+  }
 }
