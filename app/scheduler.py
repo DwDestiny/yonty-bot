@@ -147,11 +147,10 @@ def create(tk, f, creator):
     if spec["kind"] == "once" and spec["at"] < time.time() - 120: return False, "定时任务没建：那个时间已经过了"
     me = bool(creator.get("owner") and creator.get("private"))
     reads = [os.path.realpath(os.path.expanduser(x)) for x in split(f.get("范围-读"))]
-    priv = [os.path.realpath(os.path.expanduser(p)) for p in (cfg.get("private") or {}).get("paths") or [] if p.startswith(("/", "~"))]
     over = []
     for r in reads:
         if r == tk.ROOT or r.startswith(tk.ROOT + os.sep): over.append(f"范围-读 {r} 在机器人自己的目录里，谁都不能给")
-        elif not me and any(r == p or r.startswith(p + os.sep) for p in priv): over.append(f"范围-读 {r} 是私密目录，只有主人私聊里建的定时任务能给")
+        elif not me and tk.is_private(r): over.append(f"范围-读 {r} 是私密目录，只有主人私聊里建的定时任务能给")
     devs, acts, mcp = split(f.get("范围-设备")), split(f.get("范围-动作")), split(f.get("范围-MCP"))
     if devs and not me: over.append("范围-设备 只有主人私聊里建的定时任务能给")
     if not creator.get("owner"):   # MCP 跟聊天里一样：同事只能给 mcp_open_to 里的服务器
@@ -183,7 +182,7 @@ def create(tk, f, creator):
               "next": nxt, "status": "active" if creator.get("owner") else "proposed", "role": f.get("角色", ""),
               "model": f.get("模型", ""), "effort": f.get("思考", ""), "verify": f.get("验证", ""), "probe": f.get("探针", ""),
               "probe_sig": probe_sig(f.get("探针", ""), repo), "probe_every": max(pe, 60) if pe else 0, "probe_next": 0,
-              "to": scope["to"], "private": bool([r for r in reads if any(r == p or r.startswith(p + os.sep) for p in priv)]),
+              "to": scope["to"], "private": bool([r for r in reads if tk.is_private(r)]),
               "creator": creator, "created": time.time(), "fails": 0, "skips": 0, "missing": 0, "runs": 0}
         save(sc)
     tk.decide("建定时任务", schedule=ref, by=creator.get("name"), status=sc["status"])

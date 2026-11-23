@@ -237,7 +237,7 @@ class DeviceRedlineTest(Base):
 
     def test_device_side_wrapper(self):
         w = Path(__file__).resolve().parents[1] / 'scripts' / 'device-wrapper.sh'
-        run = lambda c, argv0=None: subprocess.run([argv0 or str(w)], env={'SSH_ORIGINAL_COMMAND': c, 'PATH': '/usr/bin:/bin'},
+        run = lambda c, argv0=None: subprocess.run([argv0 or str(w)], env={'SSH_ORIGINAL_COMMAND': c, 'PATH': '/usr/bin:/bin', 'HOME': str(self.e.base / 'devhome')},
                                                   capture_output=True, text=True)
         self.assertEqual(run('echo ok').stdout.strip(), 'ok')
         for c in ('claude -p hi', 'open https://claude.ai/login', 'D=claude; echo x | $D'):

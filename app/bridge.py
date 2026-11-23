@@ -960,8 +960,8 @@ def task_tick():
                 try: tasks.cloud_poll(n)
                 except Exception: log.exception("task #%s cloud poll failed", n)
         elif (st == "running" and t.get("schedule") and t.get("launched") and t.get("exec") != "cloud"
-              and now - t["launched"] > float((CFG.get("schedules") or {}).get("max_run_min", 120)) * 60):
-            if tasks.load(n)["status"] == "running":   # 定时任务的一次运行超过 schedules.max_run_min：停掉按失败交回
+              and now - (t.get("started") or t["launched"]) > float((CFG.get("schedules") or {}).get("max_run_min", 120)) * 60):
+            if tasks.load(n)["status"] == "running":   # 定时任务的一次运行（含续跑，从 started 算）超过 schedules.max_run_min：停掉按失败交回
                 tasks.stop(t); tasks.update(n, status="failed")
                 tasks.event(n, "failed", f"结论：BLOCKED（定时运行超过 schedules.max_run_min "
                                          f"{(CFG.get('schedules') or {}).get('max_run_min', 120)} 分钟，已停）")

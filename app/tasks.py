@@ -600,13 +600,18 @@ def thing_busy(t):
                                            "还要它接着干就回答它的问题；不要了就取消。")
     return busy
 
+# 结论里不算失败的说法：“0 失败”“失败 0 个”“没有失败”；“修好了之前失败的测试”“原来失败的现在过了”说的是修好的东西
+ZERO_FAIL = re.compile(r"(?:0|零|无|没有|没)\s*(?:个|项|条|处)?\s*(?:失败|FAIL\w*)|(?:失败|FAIL\w*)\s*[:：=]?\s*(?:0|零)(?!\d)\s*(?:个|项|条|处)?", re.I)
+FIXED_FAIL = re.compile(r"(?:修好|修复|修掉|修了|解决|改好|处理掉|搞定)了?[^，。；,;]*?(?:失败|FAIL\w*)|(?:之前|原来|原先|以前|先前|此前|上次)[^，。；,;]*?(?:失败|FAIL\w*)", re.I)
+
 def handback_verdict(text, readonly=False):
     """交回内容自己写了结局的，按它结束，不留在等回复：写了“按失败交回”或结论是失败、卡住 → failed；结论是通过、完成 → done。
     没写结论返回 None。"""
     if re.search(r"(?<![不别没])按失败交回", text or ""): return "failed"
     m = re.search(r"^[\s*#>]*结论\s*\**\s*[:：]\s*(.+)$", text or "", re.M)
     if not m: return None
-    line = re.sub(r"(0|零|无|没有|没)\s*(个|项|条|处)?\s*(失败|FAIL\w*)", "", m.group(1), flags=re.I)
+    line = ZERO_FAIL.sub("", m.group(1))
+    line = FIXED_FAIL.sub("", line)
     if re.search(r"BLOCKED|做不了|卡住|放弃", line, re.I): return "failed"
     if readonly: return "done"   # 评审的“不通过”是评审结果，评审这件活本身做完了
     return "failed" if re.search(r"FAIL|失败|没过|未通过|不通过", line, re.I) else "done"
@@ -862,16 +867,26 @@ def _scope_reads(sc):
         else: decide("范围-读不放", path=r, why="路径不在了，或解析出的真实路径和建的时候不一样（软链接被换过）")
     return out
 
-def _private_cover(roots, reads, keep_cred=()):
-    """放回的目录里要盖掉的：私密路径（字面路径整机都盖；正则写的在放回的目录树里找）和凭据。
-    范围-读明确列的私密目录（或它下面的子目录）不盖；列了父目录不算放开里面的私密子目录。"""
+def private_rules():
+    """config.json 的 private.paths 拆成（字面路径的真实路径，正则）。字面路径按存在的算，正则照样编进去（字面路径当正则也匹配自己）。"""
     pats = [X(p) for p in (CFG.get("private") or {}).get("paths") or []]
     rx = []
     for p in pats:
         try: rx.append(re.compile(p))
         except re.error: pass
-    lits = [os.path.realpath(p) for p in pats if os.path.lexists(p)]
-    open_ = [r for r in reads if _under(r, lits) or any(x.search(r) or x.search(r + "/") for x in rx)]   # 范围-读明确列的私密目录
+    lits = [os.path.realpath(p) for p in pats if p.startswith("/") and os.path.lexists(p)]
+    return lits, rx
+
+def is_private(p, rules=None):
+    """这个真实路径是不是私密的：在字面私密路径下面，或者被私密正则匹配上。建定时任务的范围检查和沙箱盖哪些目录用同一套。"""
+    lits, rx = rules or private_rules()
+    return _under(p, lits) or any(x.search(p) or x.search(p + "/") for x in rx)
+
+def _private_cover(roots, reads, keep_cred=()):
+    """放回的目录里要盖掉的：私密路径（字面路径整机都盖；正则写的在放回的目录树里找）和凭据。
+    范围-读明确列的私密目录（或它下面的子目录）不盖；列了父目录不算放开里面的私密子目录。"""
+    lits, rx = rules = private_rules()
+    open_ = [r for r in reads if is_private(r, rules)]   # 范围-读明确列的私密目录
     out, seen = [], set()
     def add(p):
         if p in seen or _under(p, open_) or any(r.startswith(p + os.sep) for r in reads): return

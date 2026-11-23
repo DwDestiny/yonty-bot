@@ -11,7 +11,9 @@ import json, os, re, shlex, subprocess, time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "state", "devices")
 CHAT_MAX_CALLS, CHAT_MAX_S, IDLE_CAP_S = 10, 180, 7200
-REDLINE = re.compile(r"(?<![\w.-])claude(?![\w-])|claude\.ai", re.I)   # 运行 claude、打开 claude.ai 都算
+# 运行 claude、npx @anthropic-ai/claude-code、node …/claude-code/cli.js、打开 claude.ai 都算：设备命令里出现 claude 或 anthropic 字样就拦
+REDLINE = re.compile(r"claude|anthropic", re.I)
+DYNAMIC = re.compile(r"\$\(|`|\$\{?[A-Za-z_]|<\(")   # 变量展开、命令替换：最终跑的是什么只有 shell 展开后才知道
 PREFIX = re.compile(r"^(?:(?:env|nohup|exec|time|command|sudo)(?:\s+-\S+)*\s+|[A-Za-z_]\w*=\S*\s+|[({!]\s*)+")
 
 
@@ -157,9 +159,12 @@ def check(cmd, env=None, now=None):
                    "要用设备就直接写设备命令，被拦了不要绕路。")
     if not hits: return 0, ""
     for d, s in hits:
-        if REDLINE.search(s):
+        if REDLINE.search(re.sub(r"[\"'\\]", "", s)):   # 引号、反斜杠拆开的（'cl''aude'、cl\aude）拼回去再查
             return 2, (f"红线：任何设备上都不运行 claude、不打开或登录 claude.ai（{d['name']}）。"
                        "Claude 的登录态只在运行机上，主人来源也一样，被拦了不要绕路。")
+        if DYNAMIC.search(s):
+            return 2, (f"红线：设备命令里不能有变量展开或命令替换（{d['name']}），分不清最终在设备上跑的是什么。"
+                       "把要传的值直接写出来，被拦了不要绕路。")
     holder, label, chat, allow, err = who(env)
     if err: return 2, err
     now = now or time.time()
