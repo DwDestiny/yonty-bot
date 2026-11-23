@@ -37,7 +37,7 @@
 2. 引用回复（`state/posted.json` 记着哪条消息是谁发的）。
 3. 项目名开头。
 4. 粘住：30 分钟内最后说话的项目经理（`routing.sticky_min`）。
-5. 正好一条在等的“动作”，且消息很短（`routing.fast_path.max_chars`）。
+5. 正好一条在等的“动作”，且消息很短（`routing.fast_path.max_chars`），前面没有排着的 `短名#N`。
 6. 主控。
 
 群可以用 `/bind 短名` 绑到项目，之后群里的话直接给该项目的项目经理。

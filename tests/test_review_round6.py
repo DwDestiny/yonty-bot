@@ -149,7 +149,7 @@ class Round6CloseTest(Base):
     def test_round6_task_end_closes(self):
         """复现：同事群任务做完后，主人在群里说一句短话。"""
         for how in ('done', 'failed', 'lost', 'cancel'):
-            for tick in (False, True):
+            for tick in (False, True) if how == 'cancel' else (True,):   # 取消当场关；别的在下一拍（5 秒，报结束的消息也在拍里发）
                 with self.subTest(how=how, tick=tick):
                     self.setUp()
                     t = self.mate(group=True); rec = self.send(t, 'ACT-去登录')
@@ -164,8 +164,8 @@ class Round6CloseTest(Base):
         self.t._append(t['id'], 'marks.jsonl', {'to': '派活人', 'kind': '动作', 'text': 'ACT-LAST', 'reply': None})
         self.t.update(t['id'], status='done'); self.tickd()
         self.assertEqual(len(self.says('ACT-LAST')), 1, '照样发')
+        self.tickd(); rec = self.dl.load(self.tk)[-1]; self.assertEqual(self.st(rec), 'answered', '发完下一拍就关')
         self.say_as('看下今天的报错 NEXT'); self.to_ctrl('NEXT')
-        self.tickd(); rec = self.dl.load(self.tk)[-1]; self.assertEqual(self.st(rec), 'answered')
         self.say_as(f'{self.t.ref(t)} 登录好了'); self.assertEqual(self.texts(t), ['登录好了']); self.assertEqual(self.t.load(t['id'])['status'], 'approved')
 
     def test_round6_numbered_only_by_number(self):
@@ -254,7 +254,6 @@ class Round6OriginGoneTest(Base):
                 self.setUp(); self.gone(); self.b.owner_post = lambda *a, **k: ('feishu', False)
                 t = self.e.task(); rec = self.send(t, 'BODY-1', '节点', need=need)
                 for _ in range(24):
-                    self.assertTrue(True)
                     if self.st(rec) == 'new': self.dl.update(self.tk, rec['id'], send_at=0)
                     self.tickd()
                 self.assertEqual(self.st(rec), end)

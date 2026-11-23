@@ -930,6 +930,8 @@ def task_command(ev):
             if t["status"] not in tasks.ACTIVE + ("pending",): return f"{n} 已经{tasks.LABEL.get(t['status'])}了。"
             tasks.update(t["id"], status="cancelled")
             if t["status"] == "running": tasks.stop(t)
+            try: tasks.dl.close_ended(tasks._me())   # 取消了马上关，不等下一拍
+            except Exception: log.exception("requests of task #%s not closed", t["id"])
             return f"{n} 停了。" + (f"分支 {BT}{t['branch']}{BT} 留着。" if t.get("session_started") else "")
         if not owner: return f"清理只有{OWNER_NAME}能做。"
         if t["status"] in tasks.ACTIVE: return f"{n} 还没结束。"
@@ -1273,7 +1275,6 @@ def route(ev):
     if st and now - st[1] < ROUTING["sticky_min"] * 60 and is_owner(ev):
         sticky[key] = (st[0], now); return ("pm", st[0], pm_key(st[0], key))
     if following.get(key): return None   # 前面还有 短名#N 没处理完，它可能就是答复：这句不抢着当答复
-    if tasks.dl.open_in_chat(tasks._me(), key, ("动作",)): tasks.dl.close_ended(tasks._me())   # 任务刚结束、还没到下一拍
     acts_ = tasks.dl.open_in_chat(tasks._me(), key, ("动作",))
     if len(acts_) == 1 and can_answer(ev, acts_[0]) and len(text) <= ROUTING["fast_path"]["max_chars"] and not tasks.dl.open_in_chat(tasks._me(), key, ("授权", "花钱", "方向", "问题")):
         return ("answer", acts_[0]["id"])
