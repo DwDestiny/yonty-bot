@@ -37,7 +37,8 @@ def _load(tk):
 
 def _save(tk, xs):
     os.makedirs(os.path.dirname(_sp(tk)), exist_ok=True)
-    tk.fsio.write_json(_sp(tk), xs[-500:])
+    old = {id(x) for x in [x for x in xs if x["status"] != "pending"][-500:]}   # 只裁办完的，待批的不丢
+    tk.fsio.write_json(_sp(tk), [x for x in xs if x["status"] == "pending" or id(x) in old])
 
 
 def execute(tk, a, params):
@@ -76,7 +77,8 @@ def request(tk, name, params, sender, scope=None, direct=False):
         return rc == 0, f"动作 {name} 跑完了（退出码 {rc}）" + (f"，撤销用 {a['undo']}" if a.get("undo") else "") + f"：\n{out}"
     with tk._Lock(_sp(tk) + ".lock"):
         xs = _load(tk)
-        aid = f"{sender['ref']}.a{1 + len([x for x in xs if x['by'] == sender['ref']])}"
+        ns = [int(x["id"].rsplit(".a", 1)[1]) for x in xs if x["by"] == sender["ref"]]
+        aid = f"{sender['ref']}.a{tk.fsio.bump(_sp(tk)[:-5] + '.seq.json', sender['ref'], ns)}"   # 编号只增，不随裁剪变
         xs.append({"id": aid, "name": name, "params": params, "by": sender["ref"], "task": sender.get("task"), "status": "pending", "ts": time.time()})
         _save(tk, xs)
     text = f"要做动作 {name}（{cat}）：{json.dumps(params, ensure_ascii=False)}。{a.get('why', '')}回 /approve {aid} 批准，/reject {aid} 不批。"
@@ -101,19 +103,19 @@ def cli(tk, argv):
 
 def approve(tk, aid, yes=True):
     with tk._Lock(_sp(tk) + ".lock"): xs = _load(tk)
-    x = next((x for x in xs if x["id"] == aid), None)
+    x = next((x for x in xs if x["id"] == aid and x["status"] == "pending"), None)   # 升级前可能重过号：认待批的那条
     if not x or x["status"] != "pending": return f"没有待批的动作 {aid}。"
     a = get(tk, x["name"])
     if not a: return f"动作 {x['name']} 已经不在登记里了。"
     if yes:
         rc, out = execute(tk, a, x["params"])
         x.update(status="done", rc=rc)
-        msg = f"主人批了动作 {x['name']}，服务已执行（退出码 {rc}）：{out[-500:]}"
+        msg = f"主人批了动作 {x['name']}，服务已执行（退出码 {rc}）：{tk.cut(out, 500, True)}"
     else:
         x["status"], msg = "rejected", f"主人没批动作 {x['name']}，别做了，按不做的路子接着干。"
     with tk._Lock(_sp(tk) + ".lock"):   # 执行要一会儿，这期间可能又提交了新的审批：重读再改这一条
-        xs = [x if y["id"] == aid else y for y in _load(tk)]
+        xs = [x if y["id"] == aid and y["ts"] == x["ts"] else y for y in _load(tk)]
         _save(tk, xs)
     tk.decide("动作审批", action=x["name"], id=aid, approved=yes)
     if x.get("task"): tk.inbox_add(x["task"], tk.OWNER_NAME, True, msg)
-    return msg[:300]
+    return tk.cut(msg, 600)

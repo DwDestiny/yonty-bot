@@ -4,6 +4,7 @@
 Input:  tasks.py send、任务和项目经理回复里的 [投递 目标 类别] 标记；tk 是调用方按路径加载的 tasks 模块
 Output: state/deliveries/records.json（每条投递和状态：new 待送、queued 排队、handing 交给会话还没处理完、open 等回复、sent 已送、answered 已回、
         held 进展留着到点再发、digest 并进给主人的摘要、dropped 只进记录）；state/deliveries/limits.json（进展和主人私聊的频率）；
+        state/deliveries/seq.json（投递编号和请求编号 qN，只增不减，不随记录裁剪变）；
         决策日志（改投、拦下、去重、排队、限频）；任务收件箱；给发送方的回执文字
 Pos:    tasks.py 和 bridge 共用。本模块只做判断和记账；真正发到 IM、排进会话队列的是 bridge.delivery_tick
 """
@@ -46,6 +47,7 @@ def vouched_owner(rec):
 
 def _dir(tk): return os.path.join(tk.ROOT, "state", "deliveries")
 def _file(tk): return os.path.join(_dir(tk), "records.json")
+def _seq(tk): return os.path.join(_dir(tk), "seq.json")
 def lock(tk): return tk._Lock(os.path.join(_dir(tk), ".lock"))
 
 
@@ -62,6 +64,19 @@ def save(tk, recs):
     old = {id(r) for r in [r for r in recs if not live(r) and time.time() - r["ts"] < 7 * 86400][-2000:]}   # 只裁已经了结的：没送的、等回复的不丢
     keep = [r for r in recs if live(r) or id(r) in old]
     tk.fsio.write_json(_file(tk), keep)
+
+
+def lane(fr):
+    """排队按谁算：任务按任务，会话按会话键（主控、项目经理的会话很多，共用一个名字，不能一条没答就堵住别的会话）。"""
+    return (fr.get("ref"), None if fr.get("task") else fr.get("key"))
+
+
+def _next_id(tk, recs):
+    """投递编号：posted.json 里记着老消息对应的投递，编号不能再用到新投递上，不然引用老消息会答到新请求。"""
+    try:
+        with open(os.path.join(tk.ROOT, "state", "posted.json"), encoding="utf-8") as f: old = [v for v in json.load(f).values() if isinstance(v, int)]
+    except (OSError, ValueError, AttributeError): old = []
+    return tk.fsio.bump(_seq(tk), "id", [r["id"] for r in recs] + old)
 
 
 def origin_key(t):
@@ -175,7 +190,11 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
             reroute("项目经理", f"{tk.ref(t2)} 已经结束，交给它那个项目的项目经理", to="项目经理", project=t2.get("project"))
     full = text
     lim = c["owner_max_chars"] if tg["to"] in ("主人", "聊天", "主控") else c["other_max_chars"]
+    if (extra or {}).get("im"): lim = len(text)   # 人的答复不截，全文送到
     if len(text) > lim:
+        if tg["to"] not in ("任务", "事", "记录"):   # 这三种收的是全文（事另有上限，回执里说）
+            notes.append(f"没送全：正文 {len(full)} 字，只送了前 {lim} 字")
+            tk.decide("截短", sender=sender["ref"], category=kind, why=f"正文 {len(full)} 字，只送前 {lim} 字")
         text = text[:lim] + (f"……（全文：/task {sender['ref']}）" if sender.get("task") else "……（后面截掉了）")
     need = (kind in NEED_REPLY) if need_reply is None else bool(need_reply)
     with lock(tk):
@@ -187,7 +206,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
             if [r for r in recs if r["from"]["ref"] == sender["ref"] and r.get("full") == full and now - r["ts"] < c["dedup_min"] * 60]:
                 tk.decide("去重", sender=sender["ref"], category=kind, why=f"{c['dedup_min']} 分钟内送过一样的话")
                 return "".join(n + "；" for n in notes) + f"去重：{c['dedup_min']} 分钟内已经送过一样的话，这条不再送。"
-        rec = dict(extra or {}, id=1 + max([r["id"] for r in recs] or [0]), ts=now, **{"from": sender}, to=tg, kind=kind,
+        rec = dict(extra or {}, id=_next_id(tk, recs), ts=now, **{"from": sender}, to=tg, kind=kind,
                    text=text, full=full, hop=nh, need=need, status="new")
         if KEY: rec["sig"] = _mac(rec)
         receipt = f"已交给{tg['to']}" + (f" {tg.get('project') or tg.get('ref') or ''}" if tg["to"] in ("项目经理", "任务") else "") + "，下一拍送到。"
@@ -210,16 +229,18 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
         elif tg["to"] == "事":
             ok = tk.thing_note(tg["project"], tg["thing"], sender["label"], full)
             rec["status"] = "sent"
-            receipt = "已写进那件事档案的别处留言，下次谁接这件事都看得到。" if ok else "没有这件事，只记进了运行记录。"
+            receipt = "已写进那件事档案的别处留言，下次谁接这件事都看得到。" + (
+                f"没写全：正文 {len(full)} 字，只留了前 {tk.NOTE_MAX} 字。" if len(full) > tk.NOTE_MAX else "") if ok else "没有这件事，只记进了运行记录。"
         elif tg["to"] == "记录":
             tk.decide("记录", sender=sender["ref"], category=kind, text=full[:500]); rec["status"] = "sent"; receipt = "记进运行记录了。"
         elif tg["to"] == "主人" and need:
             mine = [r for r in recs if r["from"]["ref"] == sender["ref"] and r.get("q")]
-            rec["q"] = len(mine) + 1
-            ahead = [r for r in mine if r["status"] in ("new", "queued", "open")]
+            rec["q"] = tk.fsio.bump(_seq(tk), "q:" + sender["ref"], [r["q"] for r in mine])
+            ahead = [r for r in mine if lane(r["from"]) == lane(sender) and r["status"] in ("new", "queued", "open")]
             if ahead:
                 rec["status"] = "queued"
-                receipt = (f"排在第 {len(ahead) + 1} 条（编号 {qid(sender, rec['q'])}）：每个发送方同一时间只挂一条请求在主人那里，"
+                who = "每个任务" if sender.get("task") else "每个会话"
+                receipt = (f"排在第 {len(ahead) + 1} 条（编号 {qid(sender, rec['q'])}）：{who}同一时间只挂一条请求在主人那里，"
                            "前一条回了再发。先做别的。")
                 tk.decide("排队", sender=sender["ref"], category=kind, why=f"排在第 {len(ahead) + 1}")
             else:
@@ -241,10 +262,11 @@ def find(tk, rid):
 
 
 def by_qid(tk, s):
-    """“proj#12.q2”“proj.q1”这种编号对应的投递。"""
+    """“proj#12.q2”“proj.q1”这种编号对应的投递。升级前重过号的：先认还在等回复的，再认最新的。"""
     m = re.match(r"^(.+)\.q(\d+)$", s or "")
     if not m: return None
-    return next((r for r in load(tk) if r["from"]["ref"] == m.group(1) and r.get("q") == int(m.group(2))), None)
+    hit = [r for r in load(tk) if r["from"]["ref"] == m.group(1) and r.get("q") == int(m.group(2))]
+    return max(hit, key=lambda r: (r["status"] == "open", r["id"]), default=None)
 
 
 def open_in_chat(tk, key, kinds=None):
@@ -253,16 +275,31 @@ def open_in_chat(tk, key, kinds=None):
 
 
 def answered(tk, rid):
-    """一条请求回了：标成已回，同一发送方排队的下一条放出来。"""
+    """一条请求回了：标成已回，同一个任务、同一个会话排队的下一条放出来。"""
     with lock(tk):
         recs = load(tk)
         rec = next((r for r in recs if r["id"] == rid), None)
         if not rec: return None
         rec["status"], rec["answered_at"] = "answered", time.time()
-        nxt = sorted((r for r in recs if r["status"] == "queued" and r["from"]["ref"] == rec["from"]["ref"]), key=lambda r: r["id"])
-        if nxt: nxt[0]["status"] = "new"
+        _release(recs)
         save(tk, recs)
         return rec
+
+
+def _release(recs):
+    """前面没有挂着的、正要发的，排队的第一条就放出来。返回放了几条。"""
+    busy, n = {lane(r["from"]) for r in recs if r.get("q") and r["status"] in ("new", "open")}, 0
+    for r in sorted((r for r in recs if r["status"] == "queued"), key=lambda r: r["id"]):
+        if lane(r["from"]) not in busy: r["status"], n = "new", n + 1; busy.add(lane(r["from"]))
+    return n
+
+
+def release(tk):
+    """每拍看一遍：没人挡着的放出来（升级前按发送方排的队、放行那一下没落盘的，都不会一直卡着）。"""
+    if not any(r["status"] == "queued" for r in load(tk)): return
+    with lock(tk):
+        recs = load(tk)
+        if _release(recs): save(tk, recs)
 
 
 # ---------- 防刷屏（方案 7.5）：进展限频、主人私聊限额。bridge 每拍送投递时调 ----------
@@ -342,9 +379,16 @@ def owner_sent(tk, now=None):
 def digest_add(tk, rec):
     with lock(tk):
         st = limits(tk)
-        st["digest"].append({"head": head(rec), "text": rec["text"][:200], "id": rec["id"]})
+        st["digest"].append({"head": head(rec), "text": tk.cut(rec["text"], 200), "id": rec["id"]})
         limits_save(tk, st)
     tk.decide("合并摘要", sender=rec["from"]["ref"], category=rec["kind"], why="主人私聊这段时间的条数到上限，不用回复的并进下一条摘要")
+
+
+def digest_back(tk, dg):
+    with lock(tk):
+        st = limits(tk)
+        st["digest"] = dg + st["digest"]
+        limits_save(tk, st)
 
 
 def digest_take(tk):

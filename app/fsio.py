@@ -2,7 +2,7 @@
 """写状态文件：随机临时名加 O_EXCL|O_NOFOLLOW，不跟着预先摆好的软链接走。
 
 Input:  目标路径和内容
-Output: write() 原子换掉目标文件；append() 往后加一行；opened() 打开来写（锁文件之类）。路径最后一段是软链接就报错
+Output: write() 原子换掉目标文件；append() 往后加一行；bump() 只增不减的编号；opened() 打开来写（锁文件之类）。路径最后一段是软链接就报错
 Pos:    tasks、delivery、scheduler、devices、actions、bridge、upgrade 和钩子写状态都走这里；按文件路径加载
 """
 import json, os, secrets
@@ -23,6 +23,18 @@ def write(path, text):
 
 def write_json(path, obj, indent=None):
     write(path, json.dumps(obj, ensure_ascii=False, indent=indent))
+
+
+def bump(path, key, seen=()):
+    """只增不减的编号：取 max(计数文件里的, seen) + 1，先写盘再用。计数文件没了、坏了就从 seen 接着。调用方拿着锁。"""
+    try:
+        with open(path, encoding="utf-8") as f: st = json.load(f)
+        n = int(st.get(key) or 0)
+    except (OSError, ValueError, TypeError, AttributeError): st, n = None, 0
+    st = st if isinstance(st, dict) else {}
+    st[key] = 1 + max([n, *seen])
+    write_json(path, st)
+    return st[key]
 
 
 def opened(path, flags=os.O_WRONLY | os.O_CREAT | os.O_APPEND, mode="a"):

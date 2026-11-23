@@ -128,10 +128,15 @@ def reply(ev, text, in_thread, key=None):
     args = ["im", "+messages-reply", "--as", "bot", "--message-id", ev["message_id"], "--markdown", "-",
             "--idempotency-key", ("fcb-" + (key or "") + ev["message_id"])[:50]]
     if in_thread: args.append("--reply-in-thread")
+    return _lark_post(args, text)
+
+def _lark_post(args, text):
+    """发一条飞书消息，返回消息 ID；发出去了但拿不到 ID 返回 None，没发出去返回 False。"""
     r = lark(args, stdin=text)
-    if r.returncode != 0:   # markdown 失败时退回纯文本
-        args[args.index("--markdown")] = "--text"
+    if getattr(r, "returncode", 0) != 0:   # markdown 失败时退回纯文本
+        args = ["--text" if a == "--markdown" else a for a in args]
         r = lark(args, stdin=text)
+        if getattr(r, "returncode", 0) != 0: return False
     try: return json.loads(r.stdout)["data"]["message_id"]
     except Exception: return None
 
@@ -459,6 +464,21 @@ def service_told(used):
             if x in st: st[x]["told"] = True
         save(SVC_FILE, st)
 
+BOOT = time.time()
+
+def service_unfinished():
+    """上次服务停的时候还没结果的动作：私聊告诉主人一次，不自动重跑。没发出去下一拍再发。"""
+    with SVC_LOCK:
+        todo = {k: v for k, v in load(SVC_FILE, {}).items() if v.get("res") is None and v.get("ts", 0) < BOOT and not v.get("noted")}
+    if not todo: return
+    rows = "\n".join(f"- {tasks.bjtime('%m-%d %H:%M', v.get('ts', 0))} {v.get('line') or k}" for k, v in sorted(todo.items(), key=lambda x: x[1].get("ts", 0)))
+    if owner_post("feishu", f"服务上次停的时候，这些动作没等到结果，不知道成没成，没有重跑：\n{rows}\n先核实，确实要再跑就在私聊里重新说一次。")[1] is False: return
+    with SVC_LOCK:
+        st = load(SVC_FILE, {})
+        for k in todo:
+            if k in st: st[k]["noted"] = True
+        save(SVC_FILE, st)
+
 def service_marks(text):
     """(去掉 [服务命令] 行的文字, [命令])。"""
     return SVC_LINE.sub("", text or "").strip() if SVC_LINE.search(text or "") else text, SVC_LINE.findall(text or "")
@@ -685,8 +705,9 @@ def enqueue(key, ev):
     with lock:
         q = workers.get(key)
         if q is None:
-            q = queue.Queue(); workers[key] = q
+            q = queue.Queue()
             threading.Thread(target=worker, args=(key, q), daemon=True).start()
+            workers[key] = q   # 线程起来了才登记：没起来就登记，这个会话再也没人处理
     q.put(ev)
 
 
@@ -720,15 +741,22 @@ def task_say(t, text, key):
 
 def owner_dm(channel, text):
     """私聊主人（同事私聊派的活要主人批）。优先同渠道，没配就换另一个。返回用了哪个渠道。"""
-    order = ["wecom", "feishu"] if channel == "wecom" else ["feishu", "wecom"]
-    for c in order:
-        if c == "wecom" and WECOM["enabled"] and WECOM["owner_userid"]:
-            wecom_send({"op": "send", "chatid": WECOM["owner_userid"], "content": wecom_trim(text), "ref": "approve"})
-            return c
-        if c == "feishu" and FEISHU_ON and OWNER_OPEN_ID:
-            lark(["im", "+messages-send", "--as", "bot", "--user-id", OWNER_OPEN_ID, "--markdown", "-"], stdin=text)
-            return c
-    return None
+    return owner_post(channel, text)[0]
+
+def owner_channel(channel):
+    """私聊主人实际走哪个渠道，一个都没配返回 None。"""
+    on = {"wecom": WECOM["enabled"] and WECOM["owner_userid"], "feishu": FEISHU_ON and OWNER_OPEN_ID}
+    return next((c for c in (["wecom", "feishu"] if channel == "wecom" else ["feishu", "wecom"]) if on[c]), None)
+
+def owner_post(channel, text, key=None):
+    """私聊主人，返回 (渠道, 结果)：结果是消息 ID；True、None 是发出去了但没有 ID；False 是没发出去。key：重发不重复的幂等键。"""
+    c = owner_channel(channel)
+    if c == "wecom":
+        return c, wecom_send({"op": "send", "chatid": WECOM["owner_userid"], "content": wecom_trim(text), "ref": key or "approve"})
+    if c == "feishu":
+        return c, _lark_post(["im", "+messages-send", "--as", "bot", "--user-id", OWNER_OPEN_ID, "--markdown", "-"]
+                             + (["--idempotency-key", ("fcb-" + key)[:50]] if key else []), text)
+    return None, False
 
 def same_chat(t, ev):
     o = t["origin"]
@@ -1163,7 +1191,8 @@ def task_tick():
             if (t["status"] in ("waiting", "failed") and t.get("exec") != "cloud"
                     and tasks.compact_due(t.get("ctx"), t.get("idle_since"), t.get("compacted"), now)):
                 tasks.update(t["id"], compacting=now)
-                threading.Thread(target=tasks.compact_task, args=(t["id"],), daemon=True).start()
+                try: threading.Thread(target=tasks.compact_task, args=(t["id"],), daemon=True).start()
+                except RuntimeError: tasks.update(t["id"], compacting=None); raise
                 continue
         except Exception: log.exception("task #%s compact check failed", t["id"])
         if t["status"] == "approved" and t.get("exec") != "cloud" and upgrading(): continue   # 升级要等本机任务单元都停下：先不开新的
@@ -1191,6 +1220,27 @@ posted, bindings, sticky = load(POSTED_FILE, {}), load(BIND_FILE, {}), {}
 if {"max_running", "memory_max"} & set(CFG.get("tasks", {})):
     log.warning("config.json 的 tasks.max_running、memory_max 是 1.x 的配置，2.0 按资源放行，已不再生效")
 
+def post_note(mid, rid):
+    """记下发出去的消息 ID 对应哪条投递：引用回复靠它认。留最近 500 条，还在等回复的不裁。"""
+    posted[mid] = rid
+    if len(posted) > 500:
+        live = {r["id"] for r in tasks.dl.load(tasks._me()) if r["status"] in ("new", "open")}
+        last = set(list(posted)[-500:])
+        for k in [k for k, v in posted.items() if k not in last and v not in live]: del posted[k]
+    save(POSTED_FILE, posted)
+
+HEAD_RE = re.compile(r"^\s*(?:<@[^>]*>\s*)?\[(\S+) · \S+ · q(\d+)\]")
+
+def quoted_rec(ev):
+    """这条消息引用的是哪条投递。飞书按消息 ID 认；企微的引用里没有消息 ID，只在主人和机器人的私聊里、
+    引用的那条以 [谁 · 类别 · qN] 开头，而且那条还在等回复，才认。"""
+    tk, rid = tasks._me(), posted.get(ev.get("parent_id") or "")
+    if rid: return tasks.dl.find(tk, rid)
+    if ev.get("channel") != "wecom" or ev.get("chat_type") != "p2p" or not is_owner(ev): return None
+    m = HEAD_RE.match((ev.get("quoted") or {}).get("content") or "")
+    rec = tasks.dl.by_qid(tk, f"{m.group(1)}.q{m.group(2)}") if m else None
+    return rec if rec and rec["status"] == "open" else None
+
 def projects():
     return {t.get("project") for t in tasks.all_tasks()} | {x["project"] for x in sch.all_()} - {None, ""}
 
@@ -1201,9 +1251,8 @@ def route(ev):
     if ev.get("no_route"): return None
     text, key, now = plain(ev), session_key(ev), time.time()
     if text.startswith("/") or FOLLOW_RE.match(text): return None
-    rid = posted.get(ev.get("parent_id") or "")
-    rec = tasks.dl.find(tasks._me(), rid) if rid else None
-    if rec and can_answer(ev, rec): return ("answer", rid)   # 别人引用回复审批请求：不算回答，按普通消息交给主控
+    rec = quoted_rec(ev)
+    if rec and can_answer(ev, rec): return ("answer", rec["id"])   # 别人引用回复审批请求：不算回答，按普通消息交给主控
     m = re.match(r"^(\S+\.q\d+)\s+\S", text)
     rec = tasks.dl.by_qid(tasks._me(), m.group(1)) if m else None
     if rec and rec["status"] == "open" and can_answer(ev, rec): return ("answer", rec["id"])
@@ -1245,7 +1294,7 @@ def answer(ev, rid):
         # 主人身份只给一种：请求是主人自己的私聊会话发的（bridge 写的，签名对得上），又在同一个私聊里答复。别的会话只收答复文字
         me = {"type": "im", "ref": f"答复:{tasks.dl.head(cur)}:{ev.get('message_id')}", "label": who, "key": fr.get("key") or session_key(ev),
               "owner": tasks.dl.signed(cur) and own_private(ev, fr.get("key")), "hop": 0}
-        im = {k: ev[k] for k in ("channel", "chat_id", "chat_type", "message_id", "sender_id", "thread_id", "root_id") if ev.get(k)}
+        im = {k: ev[k] for k in ("channel", "chat_id", "chat_type", "message_id", "sender_id", "thread_id", "root_id", "content", "create_time") if ev.get(k)}
         try:
             tasks.dl.submit(tk, me, f"项目经理 {fr['project']}" if fr.get("type") == "pm" else "主控", "留言",
                             f"{who} 回复了你的 {tasks.dl.head(cur)}：{text}", None, False, {"im": im, "auto": True, "idem": idem or f"im-{time.time()}"})
@@ -1285,6 +1334,8 @@ def base_key(k):
     """会话键去掉项目经理前缀：proj:<项目>:p2p:xx -> p2p:xx（投递给主控、别的项目经理时按它找会话）。"""
     return k.split(":", 2)[2] if (k or "").startswith("proj:") and k.count(":") >= 2 else (k or "")
 
+HANDED = set()   # 已经转交过的（这一轮的幂等键, 项目）
+
 def handover(ev, result):
     """主控写 [转交] 项目名 备注：…：把这条人发的原话原样交给那个项目的项目经理，备注单独标出。"""
     m = re.search(r"^\s*\[转交\]\s*(\S+)\s*(?:备注\s*[:：]\s*(.*))?$", result or "", re.M)
@@ -1292,8 +1343,11 @@ def handover(ev, result):
     proj = m.group(1)
     if proj not in projects(): return result.replace(m.group(0), f"（没有项目 {proj}，没转交）")
     k = pm_key(proj, session_key(ev))
+    if ev.get("idem"):   # 投递那一轮重送：转过的不再转
+        if (ev["idem"], proj) in HANDED: return (result[:m.start()] + result[m.end():]).strip()
     if is_owner(ev): sticky[session_key(ev)] = (proj, time.time())
     enqueue(k, dict(ev, pm=proj, pm_key=k, handover_note=(m.group(2) or "").strip(), no_route=True))
+    if ev.get("idem"): HANDED.add((ev["idem"], proj))
     return (result[:m.start()] + result[m.end():]).strip()
 
 def schedule_directive(ev, result):
@@ -1358,7 +1412,7 @@ def _delivery_turn(ev):
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid, idem)
     if im and not t and len(batch) == 1 and result.strip() and result.strip() != AMB_SILENT:   # 人答复请求叫起来的那一轮：回在人答复的那个聊天里
         if session_key(im) == bk or (tasks.dl.signed(rec) and im.get("chat_type") == "p2p"):   # 本会话自己的聊天，或者主人的私聊
-            ev2 = dict(im, idem=idem, hop=hop, **({} if o_owner else {"sender_id": ""}))   # 不带主人身份的那一轮：里面的 [派活]、[任务指令] 也不算主人的
+            ev2 = dict(im, idem=idem, hop=hop, **({} if o_owner else {"sender_id": "", "sender_name": f"{fr.get('label')}（答复请求，按非主人）"}))   # 不带主人身份的那一轮：里面的 [派活]、[任务指令] 也不算主人的
             deliver(ev2, key, (f"【{pm}】" if pm else "") + result, in_topic(ev2), [1])
         else:   # 在群里答复了别的会话的请求：那个会话的话不发进群，改发主人私聊；里面的派活、指令不执行
             said = talk_only(result)
@@ -1402,6 +1456,13 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
 
 OUTBOX_BUSY = threading.Lock()
 
+def start_locked(fn, lk):
+    """起线程跑 fn，fn 跑完自己放 lk。线程没起来就在这儿放，不然这把锁再也没人放。"""
+    try:
+        th = threading.Thread(target=fn, daemon=True); th.start(); return th
+    except BaseException:
+        lk.release(); raise
+
 def outbox_tick():
     """定时运行在沙箱里写进发件箱的请求，按范围校验后在箱外执行。放在单独线程里分批办，每个任务一拍最多办 tasks.outbox_batch_s 秒，
     没办完的下一拍接着（不丢，箱里等到回执才算数）；投递、放行最多等它 1 秒。"""
@@ -1413,8 +1474,14 @@ def outbox_tick():
                 try: tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start(), budget=float(tasks.T.get("outbox_batch_s", 3)))
                 except Exception: log.exception("outbox of task #%s failed", t["id"])
         finally: OUTBOX_BUSY.release()
-    th = threading.Thread(target=go, daemon=True); th.start()
-    th.join(1)
+    start_locked(go, OUTBOX_BUSY).join(1)
+
+def how_to_answer(r, channel):
+    """要回复的请求末尾写明怎么回：飞书引用或写编号；企微发出去的消息拿不到 ID，写编号。"""
+    if not r.get("need"): return ""
+    code = tasks.dl.qid(r["from"], r["q"]) if r.get("q") else r["from"].get("ref") if r["from"].get("task") else None
+    if not code: return ""
+    return f"\n（{'引用这条回，或者' if channel == 'feishu' else '回这条就'}发：{code} 你的答复）"
 
 def delivery_tick():
     """把新投递送出去（方案 7.5 防刷屏）：主人、派活人、聊天发到来源聊天（带编号），主控、项目经理排进会话队列。
@@ -1431,6 +1498,7 @@ def delivery_tick():
         if t:
             try: task_say(t, task_event_text(t, {"kind": "progress", "text": text}), f"pg{tid}_{int(now)}")
             except Exception: log.exception("held progress for task #%s failed", tid)
+    dl.release(tk)
     groups = {}
     for r in dl.load(tk):
         if r["status"] == "handing" and r["id"] not in DL_INFLIGHT:   # 交给会话后服务重启了或那一轮出错：重新送，最多 3 次
@@ -1439,7 +1507,7 @@ def delivery_tick():
                 dl.update(tk, r["id"], status="dropped"); tasks.decide("投递放弃", sender=r["from"].get("ref"), why="交给会话 3 次都没处理完")
                 continue
             dl.update(tk, r["id"], status="new", retried=n); r = dict(r, status="new", retried=n)
-        if r["status"] != "new": continue
+        if r["status"] != "new" or r.get("send_at", 0) > now: continue
         to, fr = r["to"]["to"], r["from"]
         t = tasks.load(fr.get("task") or r.get("about")) if (fr.get("task") or r.get("about")) else None
         if to in ("主人", "派活人", "聊天"):
@@ -1477,15 +1545,23 @@ def delivery_tick():
                     else:
                         for x in rs: dl.digest_add(tk, x); dl.update(tk, x["id"], status="digest")
                     continue
+                ch = t["origin"]["channel"] if t else owner_channel("feishu") or "feishu"
                 if len(rs) == 1: text = f"{dl.head(r)} {r['text']}"
                 else:
                     text = "\n".join(f"{dl.head(x)} {x['text']}" for x in rs)
                     tasks.decide("合并", sender=fr["ref"], why=f"{len(rs)} 条不用回复的合成一条")
-                if r["to"]["to"] == "主人" and not (t and t["requester"].get("owner")): text = owner_ref(t["origin"]["channel"] if t else "feishu") + " " + text
+                if r["to"]["to"] == "主人" and not (t and t["requester"].get("owner")): text = owner_ref(ch) + " " + text
+                text += how_to_answer(r, ch)
                 if t: out = task_say(t, text, f"dl{r['id']}")
-                else: out = None; owner_dm("feishu", text)
+                else: out = owner_post("feishu", text, f"dl{r['id']}-{int(r['ts'])}")[1]
+                if out is False:   # 没发出去：留着下一拍重发（幂等键不变）。要回复的一直试，不用回复的试 20 次
+                    n = (r.get("send_fail") or 0) + 1
+                    if n == 1 or n == 20: tasks.decide("没发出去", sender=fr["ref"], category=r["kind"], why=f"第 {n} 次，" + ("下一拍重发" if r.get("need") or n < 20 else "不再发"))
+                    wait = 0 if n < 3 else min(600, 5 * 2 ** min(n, 7))   # 连着失败的放慢，最慢 10 分钟一次
+                    for x in rs: dl.update(tk, x["id"], send_fail=n, send_at=now + wait, **({} if x.get("need") or n < 20 else {"status": "dropped"}))
+                    continue
                 if to_owner: dl.owner_sent(tk, now)
-                if isinstance(out, str): posted[out] = r["id"]; save(POSTED_FILE, dict(list(posted.items())[-500:]))
+                if isinstance(out, str): post_note(out, r["id"])
                 for x in rs: dl.update(tk, x["id"], status="open" if x.get("need") else "sent", chat=dl.origin_key(t) if t else "p2p:" + OWNER_OPEN_ID)
             with dl.lock(tk):
                 st2 = dl.limits(tk); st2.setdefault("merge", {})[gk] = now
@@ -1495,15 +1571,16 @@ def delivery_tick():
     dg = dl.limits(tk).get("digest")
     if dg and dl.owner_room(tk, now):   # 攒着的不用回复的，合成一条摘要发给主人
         dg = dl.digest_take(tk)
-        owner_dm("feishu", f"攒了 {len(dg)} 条不用回复的消息：\n" + "\n".join(f"{x['head']} {x['text']}" for x in dg))
-        dl.owner_sent(tk, now)
+        if owner_post("feishu", f"攒了 {len(dg)} 条不用回复的消息：\n" + "\n".join(f"{x['head']} {x['text']}" for x in dg))[1] is False:
+            dl.digest_back(tk, dg)   # 没发出去：放回去，下一拍再发
+        else: dl.owner_sent(tk, now)
 
 def v2_tick():
     try:
         os.makedirs(os.path.join(ROOT, "state"), exist_ok=True)
         tasks.fsio.write(os.path.join(ROOT, "state", "heartbeat"), str(int(time.time())))   # 看门狗读它
     except OSError: pass
-    for name, fn in (("freeze", freeze_tick), ("delivery", delivery_tick),
+    for name, fn in (("service acts", service_unfinished), ("freeze", freeze_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
                      ("schedules", schedules_tick)):
         try: fn()
@@ -1519,8 +1596,7 @@ def schedules_tick():
         try: [owner_dm("feishu", a) for a in sch.tick(tasks._me(), upgrading=upgrading())]
         except Exception: log.exception("schedules tick failed")
         finally: SCH_BUSY.release()
-    th = threading.Thread(target=go, daemon=True); th.start()
-    th.join(float((CFG.get("schedules") or {}).get("tick_wait_s", 3)))
+    start_locked(go, SCH_BUSY).join(float((CFG.get("schedules") or {}).get("tick_wait_s", 3)))
 
 def freeze_tick():
     """内存紧时冻结任务单元、缓过来解冻（方案 5.4），都私聊告诉主人。这是服务告警，不占主人私聊的限额。"""
@@ -1792,6 +1868,9 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False):
 def task_loop(stopping):
     while not stopping.wait(5):
         try:
+            if not TASKS_ON: service_unfinished()   # 任务开着的由 v2_tick 调
+        except Exception: log.exception("service acts check failed")
+        try:
             if TASKS_ON: task_tick()
         except Exception: log.exception("task tick failed")
         try: compact_sweep(time.time())
@@ -1966,15 +2045,15 @@ wecom_proc = None
 wecom_lock = threading.Lock()
 
 def wecom_send(cmd):
-    """给网关发一条指令（thinking / reply / send）。网关没在跑时记日志，不抛异常。"""
+    """给网关发一条指令（thinking / reply / send）。网关没在跑时记日志返回 False，不抛异常。"""
     with wecom_lock:
         p = wecom_proc
         if not p or p.poll() is not None:
-            log.warning("wecom gateway not running, drop %s", cmd.get("op")); return None
+            log.warning("wecom gateway not running, drop %s", cmd.get("op")); return False
         try:
             p.stdin.write(json.dumps(cmd, ensure_ascii=False) + "\n"); p.stdin.flush()
         except Exception as e:
-            log.warning("wecom send failed: %s", e); return None
+            log.warning("wecom send failed: %s", e); return False
     return True   # 交给网关了；真正发没发出去看日志 wecom sent 行
 
 def wecom_trim(text):
