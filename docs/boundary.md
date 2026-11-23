@@ -171,7 +171,8 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - 实例目录里的状态文件（任务记录、投递记录等）同一用户写得进去，`private_guard` 按文字拦，`cd 实例目录` 后用相对路径挡不住。身份和投递的主人身份不再信这些文件，任务记录本身（派活人是不是主人）仍是信任基础。
 - 设备红线：包装脚本只在 PATH 里放了 `claude`、`node`、`npx`、`npm`、`pnpm`、`yarn`、`bun`、`bunx`、`deno` 的同名链接。写绝对路径（`/usr/local/bin/claude`、`/opt/homebrew/bin/node …`）或用别的解释器（`python -c` 起子进程）能绕过“按最终程序查”这一遍，只剩命令文字那一遍。在远程命令里先改 `PATH=…`（同名链接就找不到了），或者绝对路径加命令替换拼出程序名（`/usr/local/bin/$(printf cla)ude`），两遍都绕得过：命令文字里没有 claude 字样，也不经过同名链接。钩子那一道会把算不出的替换拦下，直接登录设备跑的拦不住。
 - 设备钩子漏的：花括号和通配符拼的命令名（`d{e,}vcli`、`devc?i`）、`python -c`、写脚本再执行。会误拦的：heredoc 正文里当文字写的设备命令（例如用 `cat <<EOF` 写说明）、`cp`、`vim` 这类提到设备名的参数。命令超过 64 KB、或者套得太绕 10 秒查不完，按拦处理并说明原因。
-- 不可逆闸门漏的：`uv publish`、`git send-pack`、`gh workflow run`（触发的流水线会发版）、`make release` 这类包在脚本和目标里的、`env -S '…'`。会误拦的：heredoc 里只是打印的 `npm publish` 等文字。
+- 不可逆闸门漏的：`uv publish`、`git send-pack`、`gh workflow run`（触发的流水线会发版）、`make release` 这类包在脚本和目标里的、`env -S '…'`。会误拦的：heredoc 里只是打印的 `npm publish` 等文字。闸门没有设备钩子那样的长度和时间上限。
+- 服务重启后签名钥匙换新：重启前写下的会话请求，答复按非主人跑。服务命令、动作执行到一半时服务停了，不会自动重跑。
 
 ## 5. 私密资料（config.json 的 private）
 
