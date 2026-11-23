@@ -58,7 +58,9 @@ def load(tk):
 
 def save(tk, recs):
     os.makedirs(_dir(tk), exist_ok=True)
-    keep = [r for r in recs if r["status"] in ("new", "queued", "handing", "open") or time.time() - r["ts"] < 7 * 86400][-2000:]
+    live = lambda r: r["status"] in ("new", "queued", "handing", "open")
+    old = {id(r) for r in [r for r in recs if not live(r) and time.time() - r["ts"] < 7 * 86400][-2000:]}   # 只裁已经了结的：没送的、等回复的不丢
+    keep = [r for r in recs if live(r) or id(r) in old]
     tk.fsio.write_json(_file(tk), keep)
 
 

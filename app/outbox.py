@@ -22,7 +22,7 @@ def in_box(root):
 
 def _rows(path):
     try:
-        with open(path, encoding="utf-8", errors="replace") as f: lines = f.read().splitlines()
+        with open(path, encoding="utf-8", errors="replace") as f: lines = f.read().split("\n")   # 只按换行切：文字里的 U+2028 之类也会被 splitlines() 切开
     except OSError: return []
     out = []
     for l in lines:
@@ -34,6 +34,15 @@ def _rows(path):
 
 def acked(tdir, rid):
     return next((r for r in _rows(os.path.join(tdir, "outbox.ack.jsonl")) if rid and r.get("rid") == rid), None)
+
+
+def handled(tdir):
+    """办过的（有回执）和认领了的（动作还在跑）请求编号。"""
+    out = {r.get("rid") for r in _rows(os.path.join(tdir, "outbox.ack.jsonl"))}
+    try:
+        with open(os.path.join(tdir, "outbox.claim"), encoding="utf-8") as f: out |= set(f.read().split())
+    except OSError: pass
+    return out
 
 
 def request(tdir, req, wait=30):

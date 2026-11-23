@@ -852,7 +852,7 @@ def admit(cands):
 CRED = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube", "~/.lark-cli",
         "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc")
 CLAUDE_STATE = ("todos", "shell-snapshots", "statsig", "session-env", "debug", "file-history", "plans", "paste-cache", "ide", "telemetry")
-WALK_SKIP, WALK_MAX = {".git", "node_modules", "__pycache__", ".venv"}, int(T.get("walk_max") or 200000)
+WALK_MAX = int(T.get("walk_max") or 200000)
 BOX_WHY = {}   # 任务号 -> 沙箱为什么没搭成
 
 def _rp(p): return os.path.realpath(X(p))
@@ -905,34 +905,38 @@ def is_private(p, rules=None):
 
 def _private_cover(roots, reads, keep_cred=(), skip=()):
     """放回的目录里要盖掉的：私密路径（字面路径整机都盖；正则写的在放回的目录树里找）和凭据。
-    范围-读明确列的私密目录（或它下面的子目录）不盖；列了父目录不算放开里面的私密子目录。
+    范围-读明确列的私密目录不盖；只列了私密目录下面的子目录，就盖整个目录、只绑回列的那个；列了父目录不算放开里面的私密子目录。
     一个目录超过 tasks.walk_max 条、看不全，抛 BoxTooBig：看不全就不能说盖全了，不能放回。"""
     lits, rx = rules = private_rules()
     open_ = [r for r in reads if is_private(r, rules)]   # 范围-读明确列的私密目录
-    out, seen = [], set()
+    cover = set()
     def add(p):
-        if p in seen or _under(p, open_) or any(r.startswith(p + os.sep) for r in reads): return
-        seen.add(p); out.extend(_cover(p))
+        if not _under(p, open_): cover.add(p)
     for p in lits: add(p)
     for root in dict.fromkeys(roots) if rx else ():
-        if not os.path.isdir(root): continue
-        n = 0
-        for d, subs, files in os.walk(root):
-            n += 1 + len(files)
+        n, stack = 0, [root] if os.path.isdir(root) else []
+        while stack:   # node_modules、.venv、.git 也找：里面一样能放私密目录
+            try: es = list(os.scandir(stack.pop()))
+            except OSError: continue
+            n += 1
+            for e in es:
+                q, isdir = e.path, e.is_dir()
+                if isdir:
+                    if e.is_symlink() or q in skip: continue
+                    if any(x.search(q) or x.search(q + "/") for x in rx): add(q)
+                    else: stack.append(q)
+                else:
+                    n += 1
+                    if any(x.search(q) for x in rx): add(q)
             if n > WALK_MAX: raise BoxTooBig(root)
-            for name in list(subs):
-                q = os.path.join(d, name)
-                if os.path.islink(q) or q in skip: subs.remove(name); continue
-                if any(x.search(q) or x.search(q + "/") for x in rx): add(q); subs.remove(name)
-                elif name in WALK_SKIP: subs.remove(name)
-            for name in files:
-                q = os.path.join(d, name)
-                if any(x.search(q) for x in rx): add(q)
     for c in CRED:
         p = _rp(c)
         if p in keep_cred or not os.path.lexists(p) or not _under(p, roots): continue
         add(p)
-    return out
+    # 先盖整个私密目录，再只绑回范围-读明确列的子目录。按深浅排：父目录先盖，绑回来的子目录里该盖的后盖
+    back = [r for r in dict.fromkeys(reads) if any(r != p and _under(r, [p]) for p in cover)]
+    steps = [(p.count(os.sep), p, _cover(p)) for p in cover] + [(r.count(os.sep), r, ["--ro-bind", r, r]) for r in back]
+    return sum((a for _, _, a in sorted(steps, key=lambda x: x[:2])), [])
 
 def transcript_dir(path):
     """Claude 存这个工作目录会话记录的地方（Claude 配置目录的 projects 下，按路径把非字母数字换成横线）。"""
@@ -1059,10 +1063,13 @@ def _outbox_do(t, r):
         return "租约给了"
     raise ValueError(f"不认识的请求 {op}")
 
-def outbox_drain(tid, slow=None):
+ACTING, ACT_MAX = {}, 4   # 任务号 -> 正在后台跑的动作数；到上限就先不往后读，下一拍再来
+
+def outbox_drain(tid, slow=None, budget=None):
     """定时运行在沙箱里写不了状态：请求写进本任务的发件箱，服务在箱外校验、执行，把回执写进 outbox.ack.jsonl。
-    一行坏的只记它自己，不影响别的行。slow：执行动作可能要几分钟，bridge 传一个起线程的函数。返回处理了几行。"""
-    d, n = tdir(tid), 0
+    一行坏的只记它自己，不影响别的行。slow：执行动作可能要几分钟，bridge 传一个起线程的函数。
+    budget：这一批最多办几秒，没办完的留在发件箱里，下一次从没办的那行接着。返回处理了几行。"""
+    d, n, stop, t0 = tdir(tid), 0, False, time.time()
     def offset():
         try:
             with open(os.path.join(d, "outbox.off")) as f: return int(f.read() or 0)
@@ -1073,20 +1080,32 @@ def outbox_drain(tid, slow=None):
     with _Lock(os.path.join(d, ".outbox.lock")):
         off = offset()
         rows, end = outbox.tail(os.path.join(d, "outbox.jsonl"), off)
+        done = outbox.handled(d)   # 办过的、认领了还在跑的
         for line, pos in rows:
+            if budget and n and time.time() - t0 > budget: break
             n += 1
             r = {}
             try:
                 r = outbox.parse(line)
-                if r.get("rid") and outbox.acked(d, r["rid"]): continue
-                if slow and r.get("op") == "act":
-                    slow(lambda r=r: _outbox_one(tid, r)); continue
+                rid, act = r.get("rid"), r.get("op") == "act"
+                if rid and rid in done: continue
+                if act and slow and ACTING.get(tid, 0) >= ACT_MAX: stop = True; break
+                if rid: done.add(rid)
+                if rid and act: fsio.append(os.path.join(d, "outbox.claim"), rid + "\n")   # 先认领再跑：跑的时候服务重启了，重放也不跑第二次
+                if act and slow:
+                    ACTING[tid] = ACTING.get(tid, 0) + 1
+                    slow(lambda r=r: _outbox_bg(tid, r)); continue
                 _outbox_one(tid, r)
             except ValueError as e:
                 decide("发件箱坏行", task=tid, why=str(e)[:200])
-            finally: fsio.write(os.path.join(d, "outbox.off"), str(pos))
+            finally:
+                if not stop: fsio.write(os.path.join(d, "outbox.off"), str(pos))
         if end != off and not rows: fsio.write(os.path.join(d, "outbox.off"), str(end))
     return n
+
+def _outbox_bg(tid, r):
+    try: _outbox_one(tid, r)
+    finally: ACTING[tid] = max(0, ACTING.get(tid, 1) - 1)
 
 def _outbox_one(tid, r):
     try: ok, msg = True, _outbox_do(load(tid), r)
@@ -1479,7 +1498,8 @@ def run(tid):
                         final = obj
                 p.wait(); p.stdout.close()
             if t.get("schedule"):
-                outbox_drain(tid)
+                end = time.time() + 20   # 收尾：没办完的 bridge 接着办
+                while time.time() < end and outbox_drain(tid, budget=2): pass
                 why = clone_fetch(load(tid))
                 if why: decide("定时运行的分支没拉回主仓库", task=tid, branch=t["branch"], why=why)
             if final is None:
