@@ -6,7 +6,7 @@ Input:  实例 config.json 的 devices：[{"name", "match"（调用命令的正�
 Output: check() 给 hooks/device_guard.py 用；租约文件 state/devices/<名字>.json（存在即被占）；tick() 释放过期租约
 Pos:    钩子按文件路径 import 本模块；bridge 每拍调 tick()，聊天一轮结束调 release_holder()。设备侧包装脚本是红线的主防线，这里是第二道
 """
-import json, os, re, subprocess, time
+import json, os, re, shlex, subprocess, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 DIR = os.path.join(ROOT, "state", "devices")
@@ -43,10 +43,33 @@ def segments(cmd):
     return [PREFIX.sub("", s.strip()) for s in out if s.strip()]
 
 
-def calls(cmd, devs):
-    """命令里哪几段是在调用设备：段首匹配设备的调用正则才算，只是搜索设备名的不算。"""
+WRAP = re.compile(r"^(?:(?:ba|z|da|k)?sh|env\s+(?:ba|z|da)?sh)\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*c[a-zA-Z]*\s+(.+)$|^eval\s+(.+)$", re.S)
+ASSIGN = re.compile(r"(?:^|[;&|\s(])(?:export\s+|local\s+|readonly\s+)?([A-Za-z_]\w*)=(\"[^\"]*\"|'[^']*'|[^\s;&|]*)")
+INDIRECT = re.compile(r"^(?:\$|`)")
+
+
+def expand(cmd, depth=0):
+    """把命令展开成要检查的几段：先代入同一条命令里赋过值的变量（D=devcli; $D …），再拆开 sh -c '…'、bash -c、eval 包的那一层。"""
+    vs = {k: v.strip("\"'") for k, v in ASSIGN.findall(cmd or "")}
+    for k, v in sorted(vs.items(), key=lambda kv: -len(kv[0])):
+        cmd = re.sub(r"\$\{" + k + r"\}|\$" + k + r"(?!\w)", lambda m: v, cmd)
     out = []
     for s in segments(cmd):
+        m = WRAP.match(s)
+        if m and depth < 4:
+            inner = m.group(1) or m.group(2)
+            try: inner = " ".join(shlex.split(inner)) if inner.strip()[:1] in "'\"" else inner
+            except ValueError: pass
+            out += expand(inner, depth + 1)
+        else:
+            out.append(s)
+    return out
+
+
+def calls(cmd, devs):
+    """命令里哪几段是在调用设备：段首匹配设备的调用正则才算，只是搜索设备名的不算。sh -c、eval、变量包一层的照样拆开看。"""
+    out = []
+    for s in expand(cmd):
         for d in devs:
             try:
                 if d.get("match") and re.match(d["match"], s): out.append((d, s))
@@ -127,7 +150,11 @@ def check(cmd, env=None, now=None):
     """返回 (0, "") 放行，或 (2, 理由)。"""
     env = os.environ if env is None else env
     cfg = config()
-    hits = calls(cmd or "", cfg.get("devices") or [])
+    devs = cfg.get("devices") or []
+    hits = calls(cmd or "", devs)
+    if devs and REDLINE.search(cmd or "") and any(INDIRECT.match(s) for s in expand(cmd or "")):
+        return 2, ("红线：命令里有 claude，又用变量或命令替换间接调用别的命令，分不清是不是在设备上跑，按红线拦下。"
+                   "要用设备就直接写设备命令，被拦了不要绕路。")
     if not hits: return 0, ""
     for d, s in hits:
         if REDLINE.search(s):
@@ -156,6 +183,14 @@ def check(cmd, env=None, now=None):
         if chat and (l["count"] > CHAT_MAX_CALLS or now - l["since"] > CHAT_MAX_S):
             return 2, (f"聊天里一轮最多用设备 {CHAT_MAX_CALLS} 次、{CHAT_MAX_S // 60} 分钟。剩下的派成任务（[派活]），"
                        "任务能独占设备、等人时不占资源。")
+    return 0, ""
+
+
+def mcp_check(server, tool_input):
+    """设备的 MCP 路径（devices[].mcp 写的服务器名）：参数里有 claude 或 claude.ai 一律拦。返回 (0, "") 或 (2, 理由)。"""
+    for d in config().get("devices") or []:
+        if d.get("mcp") and d["mcp"] == server and REDLINE.search(json.dumps(tool_input, ensure_ascii=False)):
+            return 2, (f"红线：任何设备上都不运行 claude、不打开或登录 claude.ai（{d['name']} 的 MCP）。被拦了不要绕路。")
     return 0, ""
 
 

@@ -213,6 +213,39 @@ class ScheduleScopeTest(Base):
         self.assertNotIn(str(key / 'id'), box or [], '探针沙箱不放回范围外的文件')
 
 
+class DeviceRedlineTest(Base):
+    """第 6 项：sh -c、变量展开、eval 包一层照样拦；MCP 路径查参数；设备侧包装脚本拒绝 claude。"""
+
+    def g(self, cmd):
+        return self.e.bash('device_guard.py', cmd, FCB_OWNER=1, FCB_PRIVATE=1, FCB_CHAT_ID='oc_p').returncode
+
+    def test_wrapped_and_expanded_forms_blocked(self):
+        for cmd in ('sh -c "devcli run claude"', "bash -lc 'devcli run claude -p hi'", 'D=devcli; $D run claude',
+                    'export D=devcli && ${D} run claude', 'eval "devcli run claude"', 'X=claude; devcli run $X',
+                    '$(echo devcli) run claude'):
+            self.assertEqual(self.g(cmd), 2, cmd)
+        self.assertEqual(self.g('devcli list'), 0)
+        self.assertEqual(self.g('grep claude notes.md'), 0, '不碰设备的命令照常')
+
+    def test_mcp_path_checked(self):
+        import importlib.util
+        cfg = json.loads((self.e.inst / 'config.json').read_text()); cfg['devices'][0]['mcp'] = 'devmcp'
+        (self.e.inst / 'config.json').write_text(json.dumps(cfg))
+        r = self.e.hook('mcp_guard.py', 'mcp__devmcp__run', {'command': 'open https://claude.ai'}, FCB_OWNER=1)
+        self.assertEqual(r.returncode, 2, r.stderr); self.assertIn('红线', r.stderr)
+        self.assertEqual(self.e.hook('mcp_guard.py', 'mcp__devmcp__run', {'command': 'ls'}, FCB_OWNER=1).returncode, 0)
+
+    def test_device_side_wrapper(self):
+        w = Path(__file__).resolve().parents[1] / 'scripts' / 'device-wrapper.sh'
+        run = lambda c, argv0=None: subprocess.run([argv0 or str(w)], env={'SSH_ORIGINAL_COMMAND': c, 'PATH': '/usr/bin:/bin'},
+                                                  capture_output=True, text=True)
+        self.assertEqual(run('echo ok').stdout.strip(), 'ok')
+        for c in ('claude -p hi', 'open https://claude.ai/login', 'D=claude; echo x | $D'):
+            self.assertEqual(run(c).returncode, 126, c)
+        link = self.e.base / 'shim' / 'claude'; link.parent.mkdir(); link.symlink_to(w)
+        self.assertEqual(run('', str(link)).returncode, 126, 'PATH 最前面的 claude 链接直接拒绝')
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'
