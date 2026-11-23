@@ -20,20 +20,23 @@ TARGETS = "主人、派活人、聊天、主控、项目经理 短名、短名#N
 
 KEY = None   # bridge 进程启动时生成，只在它内存里：它写的投递记录带签名，送的时候只有签名对得上的才带主人身份
 
+USED = set()   # 已经处理完的签名（bridge 内存里）：状态不在签名里，送完的记录改回 new 再送不带主人身份
+
 
 def conf(cfg): return dict(DEFAULTS, **(cfg.get("delivery") or {}))
 
 
 def _mac(rec):
-    body = json.dumps([rec["id"], rec["ts"], rec["from"], rec["to"], rec["kind"], rec.get("full"), rec.get("hop")],
+    body = json.dumps([rec["id"], rec["ts"], rec["from"], rec["to"], rec["kind"], rec.get("text"), rec.get("full"),
+                       rec.get("hop"), rec.get("need"), rec.get("about")],
                       ensure_ascii=False, sort_keys=True)
     return hmac.new(KEY, body.encode(), hashlib.sha256).hexdigest()
 
 
 def vouched_owner(rec):
     """这条投递送的时候能不能带主人身份：发送方是主人，而且是 bridge 自己写的（签名对得上）。
-    命令行、任务进程在 bridge 外写的，手写进 records.json 的，bridge 重启前写的，一律不带。"""
-    return bool(KEY and rec["from"].get("owner") and rec.get("sig") and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
+    命令行、任务进程在 bridge 外写的，手写进 records.json 的，改过字的，送完又改回 new 的，bridge 重启前写的，一律不带。"""
+    return bool(KEY and rec["from"].get("owner") and rec.get("sig") and rec["sig"] not in USED and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
 def _dir(tk): return os.path.join(tk.ROOT, "state", "deliveries")
 def _file(tk): return os.path.join(_dir(tk), "records.json")
 def lock(tk): return tk._Lock(os.path.join(_dir(tk), ".lock"))

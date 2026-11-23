@@ -8,7 +8,7 @@ Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（�
 Pos:    bridge.py 的任务层。bridge 管收消息、审批、往聊天里发；本文件管任务存储和后台运行。
         后台任务跑在独立的 systemd 用户单元里（macOS 用独立进程组），bridge 重启不影响任务，重启后接着看事件。
 """
-import json, os, re, subprocess, sys, time, uuid, shutil, platform, signal, fcntl, socket
+import json, os, re, subprocess, sys, time, uuid, shutil, shlex, platform, signal, fcntl, socket
 
 import importlib.util, types
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -602,7 +602,8 @@ def thing_busy(t):
 
 # 结论里不算失败的说法：“0 失败”“失败 0 个”“没有失败”；“修好了之前失败的测试”“原来失败的现在过了”说的是修好的东西
 ZERO_FAIL = re.compile(r"(?:0|零|无|没有|没)\s*(?:个|项|条|处)?\s*(?:失败|FAIL\w*)|(?:失败|FAIL\w*)\s*[:：=]?\s*(?:0|零)(?!\d)\s*(?:个|项|条|处)?", re.I)
-FIXED_FAIL = re.compile(r"(?:修好|修复|修掉|修了|解决|改好|处理掉|搞定)了?[^，。；,;]*?(?:失败|FAIL\w*)|(?:之前|原来|原先|以前|先前|此前|上次)[^，。；,;]*?(?:失败|FAIL\w*)", re.I)
+_GAP = r"[^，。；,;仍还剩没未不有]*?"   # “修复后仍有 2 个失败”“修好 2 个剩 1 个失败”不算修好的
+FIXED_FAIL = re.compile(rf"(?:(?:修好|修复|修掉|修了|解决|改好|处理掉|搞定)了?|之前|原来|原先|以前|先前|此前|上次){_GAP}(?:失败|FAIL\w*)(?![^，。；,;]*[仍还没未不])", re.I)
 
 def handback_verdict(text, readonly=False):
     """交回内容自己写了结局的，按它结束，不留在等回复：写了“按失败交回”或结论是失败、卡住 → failed；结论是通过、完成 → done。
@@ -651,7 +652,10 @@ def role_check(t):
     deny = roles().get(t.get("role") or "", {}).get("deny") or []
     if "Edit" not in deny or not os.path.isdir(t.get("worktree", "")): return ""
     base = t.get("base") or "HEAD"
-    out = git(t["worktree"], "diff", "--name-status", base + "...HEAD").stdout + git(t["worktree"], "status", "--porcelain", "--untracked-files=no").stdout
+    if t.get("clone"):
+        out = clone_git(t, "diff", "--name-status", t["base_sha"] + "...HEAD") + clone_git(t, "status", "--porcelain", "--untracked-files=no")
+    else:
+        out = git(t["worktree"], "diff", "--name-status", base + "...HEAD").stdout + git(t["worktree"], "status", "--porcelain", "--untracked-files=no").stdout
     rows = [l.split(None, 1) for l in out.splitlines() if l.strip()]
     bad = [p for s, p in rows if "Write" in deny or not s.startswith(("A", "??"))]
     return f"（角色检查：{t['role']}不该改已有文件，但这些有改动：{'、'.join(sorted(set(bad))[:8])}）" if bad else ""
@@ -686,8 +690,10 @@ def compact_task(tid):
         if t["status"] not in ("waiting", "failed") or not t.get("session_started"): return
         cmd = session_cmd(t) + ["--output-format", "json", "--resume", t["session_id"]]
         o = t["origin"]
-        r = subprocess.run(cmd, input=COMPACT_KEEP, capture_output=True, text=True, timeout=900, cwd=t["worktree"],
-                           env=hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid))
+        box = sandbox(t)   # 定时运行的会话压缩也在沙箱里：Claude 一启动就会在工作树里跑 git、读项目设置
+        if box is None: return
+        r = subprocess.run(box + cmd, input=COMPACT_KEEP, capture_output=True, text=True, timeout=900, cwd=t["worktree"],
+                           env=run_env(t) if t.get("schedule") else hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid))
         out = json.loads(r.stdout or "{}")
         # 压缩的钱记进总花费，但不算进任务花费：会话累计里多出来的部分加到底数上，检查点不受影响
         extra = max(0.0, (out.get("total_cost_usd") or 0) - (t.get("cost_base") or 0) - (t.get("cost") or 0))
@@ -916,6 +922,13 @@ def transcript_dir(path):
     """Claude 存这个工作目录会话记录的地方（Claude 配置目录的 projects 下，按路径把非字母数字换成横线）。"""
     return os.path.join(_rp("~/.claude"), "projects", re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(path)))
 
+INST_KEEP = ("hooks", "roles", "actions", "config.json", "claude-settings.json", "yonty-bot.json")
+
+def _inst_files():
+    """沙箱里放回的实例文件（白名单）：新加的文件默认看不到，要放回就写进 INST_KEEP。"""
+    ps = [os.path.join(ROOT, n) for n in sorted(os.listdir(ROOT)) if n.endswith(".py")] + [os.path.join(ROOT, n) for n in INST_KEEP] + [RULES]
+    return [p for p in ps if os.path.exists(p)]
+
 def box_files(t):
     """沙箱里可写的本任务文件：收件箱回执、发件箱、锁、~/.claude.json 的副本（Claude 会写它，写进副本，不碰真的）。"""
     d = tdir(t["id"])
@@ -930,9 +943,9 @@ def box_files(t):
     return fs
 
 def sandbox(t):
-    """定时运行的沙箱，验证命令也在里面跑：整机只读，家目录、/tmp、/run/user 盖掉，只放回该看的（实例代码、仓库、范围-读、
-    PATH、Claude 自己），只把该写的挂成可写（工作树、仓库的 .git 但不含 hooks 和 config、本任务的收件箱回执和发件箱、决策日志、
-    设备租约、本任务自己的会话记录目录）。私密路径和凭据最后盖。不是定时任务返回 []；要沙箱却做不到返回 None。"""
+    """定时运行的沙箱，验证命令也在里面跑：整机只读，家目录、/tmp、/run/user 盖掉，只放回该看的（实例目录按白名单、仓库、
+    范围-读、PATH、Claude 自己），只把该写的挂成可写（工作树，是独立的 clone；本任务的收件箱回执和发件箱、决策日志、设备租约、
+    本任务自己的会话记录目录）。私密路径和凭据最后盖。不是定时任务返回 []；要沙箱却做不到返回 None。"""
     if not t.get("scope"): return []
     bw = shutil.which("bwrap")
     try:
@@ -943,16 +956,16 @@ def sandbox(t):
     hidden = [d for d in (home, _rp("/tmp"), "/run/user") if os.path.isdir(d)]
     reads = _scope_reads(sc)
     wt, repo = _rp(t["worktree"]), _rp(t["repo"])
-    gd = git(wt, "rev-parse", "--git-common-dir").stdout.strip()
-    gd = os.path.realpath(os.path.join(wt, gd)) if gd else ""
     path = [_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
     cls = [os.path.dirname(os.path.realpath(os.path.join(d, "claude"))) for d in path if os.path.exists(os.path.join(d, "claude"))]
-    ro = [ROOT, repo, cdir, _rp("~/.gitconfig"), _rp("~/.config/git")] + reads + path + cls + [os.path.realpath(sys.prefix)] + \
+    ro = [repo, cdir, _rp("~/.gitconfig"), _rp("~/.config/git")] + reads + path + cls + [os.path.realpath(sys.prefix)] + \
          [_rp(x) for x in T.get("sandbox_read") or []]   # 实例配置里额外只读放回的（装在家目录里的 MCP 服务器、工具链）
     ro = [p for p in dict.fromkeys(ro) if os.path.exists(p) and _under(p, hidden)]
     a = _box_base(bw, hidden) + sum((["--ro-bind", p, p] for p in ro), [])
-    a += ["--bind", wt, wt] + (["--bind", gd, gd] if gd and os.path.isdir(gd) else [])
-    a += sum((["--ro-bind", p, p] for p in (os.path.join(gd, "hooks"), os.path.join(gd, "config")) if gd and os.path.exists(p)), [])
+    # 实例目录盖掉，按白名单放回：代码、钩子、角色、动作定义、守则、配置；别的（inbox 里的附件、logs、旁听名单、_tmp……）都看不到
+    inside = [p for p in (repo if _rp(ROOT) != repo else os.path.join(repo, ".git"), ) if _under(p, [_rp(ROOT)]) and os.path.exists(p)]
+    a += ["--tmpfs", ROOT] + sum((["--ro-bind", p, p] for p in _inst_files() + inside), [])
+    a += ["--bind", wt, wt]   # 工作树是独立的 clone：只写它自己的 .git，主仓库的 .git 随仓库整个只读
     st = os.path.join(ROOT, "state")
     devs = os.path.join(st, "devices"); os.makedirs(devs, exist_ok=True); open(DECISIONS, "a").close()
     fs = box_files(t)
@@ -967,7 +980,8 @@ def sandbox(t):
     prior = [transcript_dir(x["worktree"]) for x in all_tasks()
              if x["id"] != t["id"] and x.get("schedule") == t.get("schedule") and x.get("worktree")]
     a += sum((["--ro-bind", p, p] for p in dict.fromkeys(prior) if os.path.isdir(p)), [])   # 同一个定时任务之前的运行：分叉、续接要读
-    return a + ["--bind", own, own]
+    # 最后把盖在实例目录上的 tmpfs 变只读：里面放不进假的模块文件让钩子导入
+    return a + ["--bind", own, own, "--remount-ro", ROOT]
 
 def probe_box(scope_path, repo=None, files=()):
     """探针的沙箱（方案 6.6“探针也在范围里”）：探针不经过钩子，所以默认什么都看不到，只放回该看的。
@@ -1116,9 +1130,44 @@ def make_worktree(t):
         if tg and git(repo, "rev-parse", "--verify", "--quiet", "origin/" + tg).returncode == 0: base = "origin/" + tg
         elif r.returncode == 0: base = r.stdout.strip()
         elif git(repo, "rev-parse", "--verify", "--quiet", "origin/main").returncode == 0: base = "origin/main"
+    if t.get("schedule"):
+        sha = git(repo, "rev-parse", "--verify", "--quiet", base + "^{commit}").stdout.strip()
+        r = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", repo, wt], capture_output=True, text=True)
+        if r.returncode == 0: r = git(wt, "checkout", "-q", "-b", t["branch"], sha)
+        if r.returncode != 0:
+            shutil.rmtree(wt, ignore_errors=True)
+            raise RuntimeError("建工作树失败：" + r.stderr.strip()[-300:])
+        # 远端分支和地址照主仓库的样子摆好（这时里面还没跑过任何任务）
+        git(wt, "fetch", "-q", "--no-tags", repo, "+refs/remotes/origin/*:refs/remotes/origin/*")
+        url = git(repo, "remote", "get-url", "origin").stdout.strip()
+        if url: git(wt, "remote", "set-url", "origin", url)
+        update(t["id"], _touch=False, clone=True, base_sha=sha)
+        return base
     r = git(repo, "worktree", "add", "--quiet", "-b", t["branch"], wt, base)
     if r.returncode != 0: raise RuntimeError("建工作树失败：" + r.stderr.strip()[-300:])
     return base
+
+# 定时运行的工作树是独立的 clone --shared，它的 .git 归沙箱里的人写：配置能藏要执行的命令（fsmonitor、filter、sshCommand），
+# objects、refs 能换成指向别的仓库的软链接。所以沙箱外一条 git 都不对它跑：看改动在沙箱里看；把分支拉回主仓库时，
+# 对面的 upload-pack 也在沙箱里跑，它读得到什么、执行什么都出不了沙箱。
+GIT_SAFE = ["-c", "core.fsmonitor=", "-c", "core.sshCommand=false", "-c", "protocol.allow=never", "-c", "protocol.file.allow=always"]
+
+def clone_git(t, *a):
+    """在定时运行的工作树里跑 git：在沙箱里跑（读到的可能被改过，只当参考）。没有沙箱返回空。"""
+    box = sandbox(t)
+    if not box: return ""
+    return subprocess.run(box + ["git", "-C", t["worktree"], *a], capture_output=True, text=True, env=run_env(t)).stdout
+
+def clone_fetch(t):
+    """定时运行的分支拉回主仓库。返回出错原因，成功（或没有工作树）返回空。"""
+    if not t.get("clone") or not os.path.isdir(t.get("worktree") or ""): return ""
+    box = sandbox(t)
+    if not box: return "本机没有 bwrap 或范围文件读不了"
+    b = t["branch"]
+    r = subprocess.run(["git", *GIT_SAFE, "-C", t["repo"], "fetch", "--quiet", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules",
+                        "--upload-pack", shlex.join(box + ["git", "upload-pack"]), t["worktree"], f"+refs/heads/{b}:refs/heads/{b}"],
+                       capture_output=True, text=True, env=run_env(t))
+    return "" if r.returncode == 0 else r.stderr.strip()[-200:] or "fetch 失败"
 
 # ---------- 独立验收：负责人开工前，先由验收角色按任务书写测试；负责人不许改，验证闸门会查 ----------
 ACCEPT_ROLE = "验收"
@@ -1275,7 +1324,7 @@ def run(tid):
             base = make_worktree(t)
             update(tid, base=base)
             if t["turn"] == 1 and not t.get("accept_commit"): event(tid, "start", "")
-            if t.get("accept") and not t.get("accept_commit"): run_accept(tid)   # 验收做完才定分叉：验收跑得久，缓存可能已经凉了
+            if t.get("accept") and not t.get("accept_commit") and not t.get("schedule"): run_accept(tid)   # 验收做完才定分叉：验收跑得久，缓存可能已经凉了
             if load(tid).get("status") != "running": return
             t = load(tid)
             fork = sibling_fork(t)
@@ -1330,7 +1379,10 @@ def run(tid):
                     elif obj.get("type") == "result":
                         final = obj
                 p.wait(); p.stdout.close()
-            if t.get("schedule"): outbox_drain(tid)
+            if t.get("schedule"):
+                outbox_drain(tid)
+                why = clone_fetch(load(tid))
+                if why: decide("定时运行的分支没拉回主仓库", task=tid, branch=t["branch"], why=why)
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
                 oom = "killed by the OOM killer" in unit_journal(load(tid) or {})
@@ -1448,7 +1500,7 @@ def guard_check(cmd, t):
             except re.error: hit = None
             if not hit: continue
         for h in g.get("hooks", []):
-            r = subprocess.run(h["command"], shell=True, input=data, capture_output=True, text=True, env=env, cwd=t["worktree"])
+            r = subprocess.run(h["command"], shell=True, input=data, capture_output=True, text=True, env=env, cwd=ROOT if t.get("clone") else t["worktree"])
             if r.returncode == 2: return (r.stderr or "被护栏拦下").strip()[-300:]
     return None
 
@@ -1605,6 +1657,11 @@ def cloud_verify(t):
     return run_verify(t)
 
 def remove_worktree(t):
+    if t.get("clone"):   # 独立的 clone：先把分支拉回主仓库，再直接删目录（不在它里面跑 git）
+        why = clone_fetch(t)
+        if why: return False, "分支没拉回主仓库，先不删：" + why
+        shutil.rmtree(t["worktree"], ignore_errors=True)
+        return not os.path.isdir(t["worktree"]), "目录删不掉"
     r = git(t["repo"], "worktree", "remove", t["worktree"])
     return r.returncode == 0, r.stderr.strip()[-200:]
 
@@ -1612,9 +1669,9 @@ def remove_worktree(t):
 CODEUP_TOKEN = T.get("codeup_token", "~/.config/codeup/token")
 CODEUP_API = "https://openapi-rdc.aliyuncs.com/oapi/v1/codeup/organizations"
 
-def mr_cmd(t, base=""):
+def mr_cmd(t, base="", relay=False):
     tg = t.get("target") or (base.split("/", 1)[1] if base.startswith("origin/") else "")
-    return f"python3 {os.path.abspath(__file__)} mr --title '<标题>' --body-file <说明文件>" + (f" --target {tg}" if tg else "")
+    return (f"cd {t['repo']} && git push -u origin {t['branch']} && " if relay and t.get("clone") else "") + f"python3 {os.path.abspath(__file__)} mr --title '<标题>' --body-file <说明文件>" + (f" --target {tg}" if tg else "") + (f" --branch {t['branch']}" if relay and t.get("clone") else "")
 
 def _api(method, url, body=None):
     import urllib.request
@@ -1634,6 +1691,8 @@ def create_mr(argv):
     ap.add_argument("--branch", help="源分支，默认当前分支（云端任务没有本机工作树时用）")
     a = ap.parse_args(argv)
     body = open(a.body_file).read() if a.body_file else a.body
+    ct = next((x for x in all_tasks() if x.get("clone") and _under(os.path.realpath("."), [_rp(x["worktree"])])), None)
+    if ct: os.chdir(ct["repo"]); a.branch = a.branch or ct["branch"]   # 定时运行的 clone 里不跑 git，到主仓库里用拉回来的分支
     branch = a.branch or git(".", "branch", "--show-current").stdout.strip()
     if not branch: sys.exit("当前不在分支上")
     if not owner_cli() and not branch.startswith("bot/"):
@@ -1733,7 +1792,7 @@ def fallback_on():
 
 def unit_sender(cg):
     """cgroup 文字里是不是本实例的任务单元：(是不是, 发送方或 None)。任务在跑、轮次对得上才认。"""
-    m = re.search(r"/" + re.escape(SLUG) + r"-task-(\d+)-(\d+)\.service", cg or "")
+    m = re.search(r"/" + re.escape(SLUG) + r"-task-(\d+)-(\d+)\.service(?:/|$)", cg or "", re.M)
     if not m: return False, None
     t = load(int(m.group(1)))
     ok = t and t.get("status") == "running" and str(t.get("turn")) == m.group(2)

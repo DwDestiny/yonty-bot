@@ -966,7 +966,7 @@ def task_event_text(t, e):
     if k == "question": return f"{at}{n} 有事要你定：\n{e['text']}\n\n@我 回复「{n} 你的意见」。"
     if k == "done":
         extra = ""
-        if r.get("owner") and o["chat_type"] == "p2p":   # 只在主人私聊里给接手命令
+        if r.get("owner") and o["chat_type"] == "p2p" and not t.get("clone"):   # 只在主人私聊里给接手命令
             extra = f"\n\n要在终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}"
         return f"{at}{n} 完成：\n{e['text']}{extra}"
     return f"{at}{n} {'挂了' if k == 'failed' else '中断了'}：{e['text']}\n@我 回复「{n} 继续」接着干。"
@@ -1211,7 +1211,9 @@ def delivery_turn(ev):
         for x in batch:
             r = tasks.dl.find(tk, x["id"]) or {}
             if r.get("status") != "handing": continue
-            if ok: tasks.dl.update(tk, x["id"], status="sent"); continue
+            if ok:
+                if x.get("sig"): tasks.dl.USED.add(x["sig"])
+                tasks.dl.update(tk, x["id"], status="sent"); continue
             n = (r.get("retried") or 0) + 1   # 这一轮没成（Claude 报错、出异常）：退回 new 重送，最多 3 次；不留在 handing，免得下一拍再加一次
             if n > 3:
                 tasks.dl.update(tk, x["id"], status="dropped", retried=n)
@@ -1459,7 +1461,8 @@ def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一�
             f"会话：{'私聊' if o['chat_type'] == 'p2p' else '群聊'}\n"
             f"仓库 {t['repo']}，工作树 {t['worktree']}，分支 {t['branch']}"
             + (f"，基于 {base}" if base else "") + f"；{tasks.model_label(t)}\n"
-            f"建草稿合并请求：在工作树里跑 {BT}{tasks.mr_cmd(t, t.get('base', ''))}{BT}\n"
+            + ("定时运行的工作树是独立 clone，里面的 git 配置归任务写：别在它里面跑 git 或 Claude，分支已拉回主仓库，看改动、推送都在主仓库做\n" if t.get("clone") else "") +
+            f"建草稿合并请求：{'跑' if t.get('clone') else '在工作树里跑'} {BT}{tasks.mr_cmd(t, t.get('base', ''), relay=True)}{BT}\n"
             f"本任务已自动追加指令 {t.get('auto_follow', 0)} 次（上限 {RELAY_MAX}，加预算不算）\n"
             f"花费：已用 {t.get('cost') or 0} 美元当量，检查点 {t.get('budget') or tasks.T['budget_default']}（{t.get('budget_why', '')}）；"
             f"同类参考：{tasks.budget_basis(t.get('role'), t.get('model'))[1]}\n"
@@ -1596,7 +1599,7 @@ def relay_text(t, e, result, rev):
     r, o = t["requester"], t["origin"]
     at = (mention(o["channel"], r["id"], r["name"]) + " ") if o["chat_type"] != "p2p" else ""
     text = f"{at}{ref} {RELAY_HEAD[e['kind']]}：\n{text}"
-    if e["kind"] == "done" and r.get("owner") and o["chat_type"] == "p2p":
+    if e["kind"] == "done" and r.get("owner") and o["chat_type"] == "p2p" and not t.get("clone"):
         text += f"\n\n要在终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}"
     return text
 

@@ -108,7 +108,7 @@
 ## 4. 存储
 
 - `<实例>/state/tasks/<id>/`（内部 id，不是 `短名#N`）：`task.json` 状态（含 `project`、`num`，迁移来的还有 `legacy`），`events.jsonl` 要发回聊天的事件，`inbox.jsonl` 补充指令（`inbox.off` 记已交出的条数），`stream.log` Claude 原始输出。
-- 工作树：`<tasks.root>/<服务名>/<id>`，默认 `~/work/.bot-tasks/`。从远端默认分支最新代码切出。
+- 工作树：`<tasks.root>/<服务名>/<id>`，默认 `~/work/.bot-tasks/`。从远端默认分支最新代码切出。定时运行的是独立的 `git clone --shared`，每轮结束把 `bot/` 分支拉回主仓库，原因见 boundary.md“定时运行的沙箱”。
 - bridge 记已发到第几条事件（`posted`），发完再记，重启后不丢不重。飞书每条用不同的幂等键。
 - 单元没了但状态还是“进行中”：标成“中断”并通知，不自动重跑；回 `短名#N 继续` 接着干。
 

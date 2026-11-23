@@ -75,7 +75,7 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 ### 设备（hooks/device_guard.py）
 
 - 调用设备的命令用正则匹配（`devices[].match`），锚定命令开头。复合命令按 `&&`、`;`、`|` 和 `env` 前缀拆段，逐段查。
-- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量再查；命令头是 `$变量` 或反引号、同时带 `claude` 字样的，一律拦。
+- 任何设备上都不运行 `claude`，不打开 claude.ai。命令先拆开 `sh -c`、`bash -c`、`eval` 和本命令里赋值的变量，再去掉引号和反斜杠查：带 `claude`、`anthropic` 字样的（含 `claude-code`、`@anthropic-ai/…`）一律拦；给设备的命令段里有 `$变量`、`$(…)`、反引号、`<(…)` 的，看不出最终跑什么，也一律拦。正常命令里碰巧带这些的会被误拦，改写成不带变量的。
 - 设备的 MCP 工具按 `devices[].mcp`（MCP 服务器名）认，参数里带 `claude` 或 claude.ai 的拦。
 - 钩子只看得到命令文字，挡不住写脚本再执行。设备上要装 `scripts/device-wrapper.sh` 做主防线：设成 SSH 的 `command=` 或设备上远程命令的入口，它拒绝以 `claude` 名义运行、拒绝命令或参数里带 `claude`、claude.ai 的（退出码 126），其余照常执行。
 - 身份：主人私聊会话短时可用（一轮 10 次、3 分钟）；主人派的任务独占租约；同事来源一律拦；项目经理不用设备。
@@ -91,14 +91,14 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 
 ### 不可逆闸门（hooks/irreversible_gate.py）
 
-命令匹配 `irreversible` 里的正则，而任务还有没取的追加指令时，闸门拦下，先取指令再动手。模板列了：推标签（`--tags`、`--follow-tags`、`refs/tags/`、`git push origin v1.2.3` 这种按版本号推）、`gh release create|edit|delete|upload`、`gh api` 写 `releases`（带 `-X POST` 之类或 `-f`）、`npm publish`。
+命令不可逆、而任务还有没取的追加指令时，闸门拦下，先取指令再动手。内置的判断按参数解析（拆 `;`、`&&`、管道、`sh -c`、`eval`，跳过 `env`、`sudo`、`git -C` 这类前缀和全局选项）：`git push` 推标签、`--mirror`、`--all`、推到版本号或发布分支（stable、release、release/*、production、prod）；`gh release` 的改动类子命令；`gh api` 对 `releases`、`git/refs`、`git/tags` 发非 GET 请求（方法不分大小写）；npm、pnpm、yarn、bun、cargo、poetry、flit、hatch、twine、gem 发包。命令拆不开时按文字扫。`config.json` 的 `irreversible` 里的正则照样合并进来。
 
 ### 沙箱实测（2026-11-22）
 
 目标：定时运行只能读范围内的目录。
 
 - 用户级 systemd 单元（systemd 255）里，`ProtectHome=tmpfs`、`BindReadOnlyPaths=`、`InaccessiblePaths=` 不生效：单元照样读得到被藏的文件，systemd 不报错。
-- 所以读范围改用 bwrap 落实：Claude 进程外包一层 bwrap，`--tmpfs` 盖住范围外的私密目录和 `/run/user`，实例目录只读，只把这次运行的 `state/tasks/<id>`、投递、设备和范围目录挂成可写。
+- 所以读范围改用 bwrap 落实：Claude 进程外包一层 bwrap，盖住范围外的目录和 `/run/user`，只放回该看的（现在的清单见下一节）。
 - `/run/user` 必须盖：没盖时，沙箱里用 `XDG_RUNTIME_DIR=/run/user/<uid> systemd-run --user --pipe --wait cat <范围外的文件>` 读得到（2026-11-22 实测），用户级 systemd 在沙箱外替它跑命令。
 - 探针比定时运行收得更紧（探针不经过钩子）：家目录、`/tmp` 整个盖掉，只读放回该看的，见 schedules.md 第 4 节。测试 `test_probe_sees_only_scope_and_no_credentials` 用真的 bwrap 验证范围外的文件、凭据目录、实例目录和用户级 systemd 这条路都走不通。
 - 机器上没有 bwrap 时，带读范围的定时运行不跑，不降级成只靠提示。
@@ -106,9 +106,11 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 ### 定时运行的沙箱（评审修复 2、3，2026-11-23）
 
 - 整机只读（`--ro-bind / /`）。家目录、`/tmp`、`/run/user` 盖成空目录，`docker.sock` 盖掉。
-- 只读放回：实例代码、仓库、范围-读、`~/.claude`、git 配置、PATH 里的目录、每个 `claude` 的真实目录、Python 前缀、`tasks.sandbox_read`。
-- 可写：工作树；仓库的 git 目录（其中 `hooks` 和 `config` 再挂回只读）；本任务的收件箱回执、发件箱、锁；决策日志；设备租约；`tasks.sandbox_write`。`~/.claude.json` 换成本任务的副本。
-- 实例的 `state` 盖成空目录，只放回本任务目录、范围目录和身份登记目录（只读）。投递写进本任务的 `outbox.jsonl`，服务在沙箱外按任务记录的身份送出。
+- 只读放回：仓库（连同它的 `.git`）、范围-读、`~/.claude`、git 配置、PATH 里的目录、每个 `claude` 的真实目录、Python 前缀、`tasks.sandbox_read`。
+- 实例目录盖成空目录，按白名单只读放回（`tasks.py` 的 `INST_KEEP`）：`*.py`、`hooks/`、`roles/`、`actions/`、守则、`config.json`、`claude-settings.json`、`yonty-bot.json`。`inbox/`（主人私聊的附件）、`logs/`、旁听名单、`_tmp/` 和以后新加的文件都看不到。`state` 只放回本任务目录和范围目录。盖上的目录最后变只读，放不进假模块。写在实例目录下的范围-读不放。
+- 可写：工作树；本任务的收件箱回执、发件箱、锁；决策日志；设备租约；`tasks.sandbox_write`。`~/.claude.json` 换成本任务的副本。投递写进本任务的 `outbox.jsonl`，服务在沙箱外按任务记录的身份送出。
+- 工作树是独立的 `git clone --shared`，主仓库整个只读，沙箱里改不了主仓库的分支、配置和对象。clone 的 `.git` 归任务写，里面能藏要执行的命令，也能把 `objects`、`refs` 换成指向别的仓库的软链接，所以沙箱外一条 git 都不对它跑：角色检查的 git 在沙箱里跑；每轮结束服务把 `bot/` 分支 fetch 回主仓库，对面的 `upload-pack` 也在沙箱里跑；在 clone 里跑 `tasks.py mr` 会先切到主仓库；清理直接删目录，分支没拉回来就不删。
+- 等人回话时的会话压缩也在沙箱里跑。定时运行不做独立验收。任务回报里写明看改动、推送都到主仓库做，也不给“终端接手”命令：别在 clone 里直接跑 git 或 Claude。
 - 私密路径最后盖：字面路径整机盖；正则在放回的目录树里找（解析软链接）。范围-读明确列的私密目录放开。范围-读的软链接被换过（真实路径和建的时候不一样）就不放。凭据目录（`~/.ssh`、`~/.config` 等）在放回的目录下也盖掉。
 - 会话记录：只把这次运行自己的会话目录挂成可写，同一个定时任务之前运行的会话目录只读（分叉、续接要读），别的项目的看不到。每个定时任务单独一件事。
 - 验证命令和运行在同一个沙箱里跑。
@@ -118,7 +120,7 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - `tasks.py send/act/inbox/diag/mr` 不信环境变量里的身份，也不信实例目录里的任何文件（会话自己写得进去）。
 - 命令行先问 bridge：bridge 开 unix 套接字 `state/ident.sock`（只给本用户），用 `SO_PEERCRED` 拿来访进程号。本实例的任务单元按来访进程的 cgroup 认（任务要在跑、轮次对得上）；聊天、项目经理那一轮的 claude 和 popen 起的任务 runner，由 bridge 起进程时登记在自己内存里（进程号加启动时间），沿父进程找。都对不上就不认。
 - bridge 不在时，命令行按自己的 cgroup 认任务单元。在服务单元里、或者 Linux 上有 systemd，认不出就拒绝，不按环境变量兜底。只有实例配置 `tasks.identity_fallback` 开着（默认 `auto`：没有 systemd 的机器才开，测试实例写 `true`）才兜底，兜底的一律不带主人身份，只认在跑的任务。
-- 投递记录由 bridge 写的才带签名（钥匙在 bridge 内存里，启动时生成）。主控、项目经理的投递轮只有签名对得上、发送方是主人，才按主人身份跑。命令行在 bridge 外写的、任务进程直接写的、手写进 `records.json` 的、bridge 重启前写的，一律按非主人送。
+- 投递记录由 bridge 写的才带签名（钥匙在 bridge 内存里，启动时生成）。主控、项目经理的投递轮只有签名对得上、发送方是主人，才按主人身份跑。命令行在 bridge 外写的、任务进程直接写的、手写进 `records.json` 的、改过字的、送完又改回 new 的、bridge 重启前写的，一律按非主人送。签名盖住编号、时间、发送方、目标、类别、正文、跳数、要不要回复和关联的任务。
 - `diag`、`mr` 的主人身份只认 bridge 或 cgroup 认出来的，`FCB_OWNER=1` 不算。
 - CLI 发给任务的一律算留言。指令只来自服务解析的 `[任务指令]`。主人派的任务，这一轮不是主人触发的，只收留言。加预算、放开验收只认指令。
 
@@ -128,7 +130,9 @@ wecom-cli 带着主人的企微授权（读邮件、文档、日程、微盘）�
 - Claude 自己的登录凭据在沙箱里读得到（不然 Claude 跑不起来）。
 - 装在家目录里的 MCP 服务器要写进 `tasks.sandbox_read` 才看得到。
 - 没有 systemd 的机器（macOS）和测试实例按环境变量兜底认身份，主人身份一律不认。bridge 重启后，popen 起的任务 runner 的登记没了，这些任务的命令行只能走兜底。
-- 任务单元按 cgroup 认。同一用户能不能把进程写进别的单元的 `cgroup.procs` 冒充那个任务，没有实测。
+- 任务单元按 cgroup 认。同一用户能不能把进程写进别的单元的 `cgroup.procs`、或建同名的子 cgroup 冒充那个任务，没有实测。冒充得了也只得到那个任务的身份。
+- 沙箱里读得到 `config.json`（钩子要用）：里面没有密钥，但有主人和群的编号、私密路径的名字。
+- 定时运行的 clone 读得到主仓库 `.git` 里的全部历史。
 - 实例目录里的状态文件（任务记录、投递记录等）同一用户写得进去，`private_guard` 按文字拦，`cd 实例目录` 后用相对路径挡不住。身份和投递的主人身份不再信这些文件，任务记录本身（派活人是不是主人）仍是信任基础。
 - 设备红线：包装脚本只在 PATH 里放了 `claude`、`node`、`npx`、`npm`、`pnpm`、`yarn`、`bun`、`bunx`、`deno` 的同名链接。写绝对路径（`/usr/local/bin/claude`、`/opt/homebrew/bin/node …`）或用别的解释器（`python -c` 起子进程）能绕过“按最终程序查”这一遍，只剩命令文字那一遍。
 

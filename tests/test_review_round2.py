@@ -29,7 +29,9 @@ class VerdictTest(unittest.TestCase):
         for text, want in (('结论：失败 0 个', 'done'), ('结论：PASS，修好了之前失败的测试', 'done'), ('结论：修好了之前失败的测试', 'done'),
                            ('结论：原来失败的 3 个现在都过了', 'done'), ('结论：失败：0', 'done'), ('结论：失败 10 个', 'failed'),
                            ('结论：失败 2 个', 'failed'), ('结论：修了一半，还有 1 个失败', 'failed'), ('结论：0 失败', 'done'),
-                           ('结论：3 个失败', 'failed'), ('结论：没有失败', 'done'), ('结论：不通过', 'failed')):
+                           ('结论：3 个失败', 'failed'), ('结论：没有失败', 'done'), ('结论：不通过', 'failed'),
+                           ('结论：修复后仍有 2 个失败', 'failed'), ('结论：之前的 3 个失败还在', 'failed'), ('结论：修好 2 个剩 1 个失败', 'failed'),
+                           ('结论：修复后有 2 个失败', 'failed'), ('结论：之前失败的用例没修好', 'failed')):
             self.assertEqual(v(text), want, text)
 
 
@@ -167,7 +169,7 @@ class IdentityTest(unittest.TestCase):
         return [x for x in e.t.dl.load(e.t._me()) if x['text'] == tag]
 
     def test_escaped_process_gets_nothing_without_fallback(self):
-        e = Inst(self, cfg_patch=lambda c: c['tasks'].update(identity_fallback='auto'))   # 这台机器是 Linux + systemd
+        e = Inst(self, cfg_patch=lambda c: c['tasks'].update(identity_fallback=False))
         t = e.task()   # 主人派的、在跑
         r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'ESC-1', FCB_TASK_ID=t['id'], FCB_OWNER=1)
         self.assertNotEqual(r.returncode, 0, r.stdout); self.assertFalse(self.rec(e, 'ESC-1'))
@@ -202,8 +204,18 @@ class IdentityTest(unittest.TestCase):
         self.tickd(e)
         s = [x for x in e.streams if 'GENUINE' in x['prompt']]
         self.assertTrue(s); self.assertEqual(s[-1]['env'].get('FCB_OWNER'), '1')
-        r = self.rec(e, 'GENUINE')[0]; r['text'] = r['full'] = 'GENUINE-改过'
-        self.assertFalse(dl.vouched_owner(r), '改过正文签名就对不上')
+        recs = dl.load(tk); r = [x for x in recs if x['text'] == 'GENUINE'][0]; r['status'] = 'new'; dl.save(tk, recs)
+        n = len(e.streams); self.tickd(e)   # 送完的真记录改回 new 重放
+        self.assertEqual([x['env'].get('FCB_OWNER') for x in e.streams[n:] if 'GENUINE' in x['prompt']], ['0'], '重放不带主人身份')
+        dl.submit(tk, me, '主控', '问题', 'TRUE-2')
+        recs = dl.load(tk); r = [x for x in recs if x['text'] == 'TRUE-2'][0]
+        self.assertTrue(dl.vouched_owner(r))
+        for k, v in (('text', 'EDITED'), ('full', 'EDITED'), ('about', 1), ('need', False)):
+            self.assertFalse(dl.vouched_owner(dict(r, **{k: v})), f'只改 {k}，签名也对不上')
+        r['text'] = 'EDITED'; dl.save(tk, recs)   # 送的是 text，只改它
+        self.tickd(e)
+        s = [x for x in e.streams if 'EDITED' in x['prompt']]
+        self.assertTrue(s); self.assertEqual(s[-1]['env'].get('FCB_OWNER'), '0')
 
     def test_socket_grants_and_forged_grant_file(self):
         e = Inst(self, cfg_patch=lambda c: c['tasks'].update(identity_fallback=False))
