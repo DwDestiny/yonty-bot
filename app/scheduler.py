@@ -149,11 +149,12 @@ def create(tk, f, creator):
     if not spec: return False, "定时任务没建：时间表看不懂（写“每 30 分钟”“cron 0 9 * * *”“一次 2026-12-01 09:00”或“自定 最短 10 分钟 最长 1 天”）"
     if spec["kind"] == "once" and spec["at"] < time.time() - 120: return False, "定时任务没建：那个时间已经过了"
     me = bool(creator.get("owner") and creator.get("private"))
-    reads = [os.path.realpath(os.path.expanduser(x)) for x in split(f.get("范围-读"))]
+    raw = [os.path.expanduser(x) for x in split(f.get("范围-读"))]
+    reads, secret = [os.path.realpath(x) for x in raw], {os.path.realpath(x) for x in raw if tk.named_private(x)}   # 先看写法再解析：私密名字的软链接，落点的名字看不出来
     over = []
     for r in reads:
         if r == tk.ROOT or r.startswith(tk.ROOT + os.sep): over.append(f"范围-读 {r} 在机器人自己的目录里，谁都不能给")
-        elif not me and tk.is_private(r): over.append(f"范围-读 {r} 是私密目录，只有主人私聊里建的定时任务能给")
+        elif not me and r in secret: over.append(f"范围-读 {r} 是私密目录，只有主人私聊里建的定时任务能给")
     devs, acts, mcp = split(f.get("范围-设备")), split(f.get("范围-动作")), split(f.get("范围-MCP"))
     if devs and not me: over.append("范围-设备 只有主人私聊里建的定时任务能给")
     if not creator.get("owner"):   # MCP 跟聊天里一样：同事只能给 mcp_open_to 里的服务器
@@ -172,9 +173,9 @@ def create(tk, f, creator):
     os.makedirs(DIR, exist_ok=True)
     with tk._Lock(os.path.join(DIR, ".lock")):
         allx = all_()
-        sid = 1 + max([x["id"] for x in allx] or [0])
+        sid = 1 + max([int(x.split(".")[0]) for x in os.listdir(DIR) if x.split(".")[0].isdigit()] or [0])   # 按文件名算：读不出来的也占着号
         proj = tk.project_of(repo, tk.all_tasks())
-        ref = f"{proj}#S{1 + len([x for x in allx if x['project'] == proj])}"
+        ref = f"{proj}#S{1 + max([int(x['ref'].rsplit('#S', 1)[1]) for x in allx if x['project'] == proj] or [0])}"
         scope = {"schedule": ref, "read": reads, "tools": split(f.get("范围-工具")) or ["Read", "Grep", "Glob"],
                  "mcp": mcp, "devices": devs, "actions": acts, "to": to}
         os.makedirs(os.path.join(DIR, str(sid)), exist_ok=True)
@@ -185,7 +186,7 @@ def create(tk, f, creator):
               "next": nxt, "status": "active" if creator.get("owner") else "proposed", "role": f.get("角色", ""),
               "model": f.get("模型", ""), "effort": f.get("思考", ""), "verify": f.get("验证", ""), "probe": f.get("探针", ""),
               "probe_sig": probe_sig(f.get("探针", ""), repo), "probe_every": max(pe, 60) if pe else 0, "probe_next": 0,
-              "to": scope["to"], "private": bool([r for r in reads if tk.is_private(r)]),
+              "to": scope["to"], "private": bool(secret),
               "creator": creator, "created": time.time(), "fails": 0, "skips": 0, "missing": 0, "runs": 0}
         save(sc)
     tk.decide("建定时任务", schedule=ref, by=creator.get("name"), status=sc["status"])

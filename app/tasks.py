@@ -8,7 +8,7 @@ Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（�
 Pos:    bridge.py 的任务层。bridge 管收消息、审批、往聊天里发；本文件管任务存储和后台运行。
         后台任务跑在独立的 systemd 用户单元里（macOS 用独立进程组），bridge 重启不影响任务，重启后接着看事件。
 """
-import json, os, re, subprocess, sys, time, uuid, shutil, shlex, platform, signal, fcntl, socket
+import json, os, re, subprocess, sys, threading, time, uuid, shutil, shlex, platform, signal, fcntl, socket
 
 import importlib.util, types
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -243,6 +243,11 @@ def _read(tid, name):
         with open(os.path.join(tdir(tid), name)) as f: return [json.loads(l) for l in f if l.strip()]
     except FileNotFoundError: return []
 
+def cut(s, n, tail=False):
+    """太长就截，截了在文字里写明（tail：留后面那段）。"""
+    if len(s) <= n: return s
+    return f"（前面截掉 {len(s) - n} 字）……" + s[-n:] if tail else s[:n] + f"……（后面截掉 {len(s) - n} 字）"
+
 def event(tid, kind, text=""):
     """kind: start / progress / question / done / failed / lost。bridge 按顺序发回原聊天。"""
     _append(tid, "events.jsonl", {"kind": kind, "text": text, "ts": time.time()})
@@ -349,6 +354,8 @@ def inbox_acks(tid, text):
     for m in ACK_RE.finditer(text or ""):
         inbox_mark(tid, [int(m.group(2))], "ack", (m.group(1) + " " + m.group(3).strip())[:100])
 
+NOTE_MAX = 300   # 给别的事的留言最多留多少字
+
 def thing_note(project, thing, who, text):
     """投递给“事”：写进那件事档案的别处留言，下次谁接这件事都看得到。没有这件事返回 False。"""
     o = next((x for x in all_tasks() if x.get("project") == project and (x.get("thing") or MAIN_THING) == thing), None)
@@ -356,7 +363,7 @@ def thing_note(project, thing, who, text):
     q = _sib_path(o, ".json")
     with _Lock(os.path.join(os.path.dirname(q), ".lock")):
         s2 = sibling(o)
-        s2["inbound"] = ((s2.get("inbound") or []) + [{"from": who, "task": 0, "text": text[:300], "at": time.time()}])[-20:]
+        s2["inbound"] = ((s2.get("inbound") or []) + [{"from": who, "task": 0, "text": cut(text, NOTE_MAX), "at": time.time()}])[-20:]
         _sib_write(q, s2)
     return True
 
@@ -521,10 +528,10 @@ def sibling_save(t, ctx, notes, total=0):
             heads[t.get("model") or ""] = {"head": t["session_id"], "ctx": ctx, "last_used": time.time(), "total": total, "task": t["id"]}
             s.update(heads=heads, head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time())
         for key in ("now", "todo"):
-            if h.get(key): s[key] = "\n".join(h[key])[:1500]
+            if h.get(key): s[key] = cut("\n".join(h[key]), 1500)
         if h.get("decisions"):
             seen = {d["text"] for d in s.get("decisions") or []}
-            new = [dict({"text": x.lstrip("-· ").strip()[:300], "task": t["id"], "at": time.time()}, **({} if by_owner(t) else {"guest": t["requester"].get("name", "")}))
+            new = [dict({"text": cut(x.lstrip("-· ").strip(), 300), "task": t["id"], "at": time.time()}, **({} if by_owner(t) else {"guest": t["requester"].get("name", "")}))
                    for x in h["decisions"]]
             s["decisions"] = ((s.get("decisions") or []) + [d for d in new if d["text"] and d["text"] not in seen])[-40:]
         _sib_write(p, s)
@@ -543,7 +550,7 @@ def sibling_save(t, ctx, notes, total=0):
             continue
         with _Lock(os.path.join(os.path.dirname(q), ".lock")):
             s2 = sibling(o)
-            s2["inbound"] = ((s2.get("inbound") or []) + [{"from": t.get("thing") or MAIN_THING, "task": t["id"], "text": text[:300], "at": time.time()}])[-20:]
+            s2["inbound"] = ((s2.get("inbound") or []) + [{"from": t.get("thing") or MAIN_THING, "task": t["id"], "text": cut(text, NOTE_MAX), "at": time.time()}])[-20:]
             _sib_write(q, s2)
 
 def record_text(t, limit=6000):
@@ -730,6 +737,7 @@ def check_repo(path):
             try:
                 if re.search(pat, p): return None, "这个目录是私密的"
             except re.error: pass
+    if named_private(X(path.strip().strip(chr(96)))): return None, "这个目录是私密的"   # 经私密名字的软链接过来的
     r = subprocess.run(["git", "-C", p, "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if r.returncode != 0:
         return None, "不是 git 仓库（长任务要在独立分支上干）"
@@ -756,7 +764,7 @@ def parse_directive(text):
         return hit.pop() if len(hit) == 1 else ""
     target = field("目标分支").split()[0] if field("目标分支") else ""
     if not re.fullmatch(r"[\w./-]{1,100}", target) or ".." in target: target = ""
-    verify = field("验证")[:300]
+    verify = field("验证")
     if verify in ("无", "没有", "不用", "-", "—") or verify.startswith("<") or "命令，" in verify: verify = ""   # 没写或照抄了模板
     ex = field("执行")
     ex = "cloud" if ("云" in ex and "本机" not in ex) else ""
@@ -852,7 +860,7 @@ def admit(cands):
 CRED = ("~/.claude", "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.docker", "~/.kube", "~/.lark-cli",
         "~/.netrc", "~/.git-credentials", "~/.npmrc", "~/.pypirc")
 CLAUDE_STATE = ("todos", "shell-snapshots", "statsig", "session-env", "debug", "file-history", "plans", "paste-cache", "ide", "telemetry")
-WALK_MAX = int(T.get("walk_max") or 200000)
+WALK_MAX = int(T.get("walk_max") or 1000000)
 BOX_WHY = {}   # 任务号 -> 沙箱为什么没搭成
 
 def _rp(p): return os.path.realpath(X(p))
@@ -869,16 +877,21 @@ def _box_base(bw, hidden):
 class BoxTooBig(Exception):
     """放回的目录太大，看不全里面有没有私密的。"""
 
+class BoxCantCover(Exception):
+    """放回的目录里有盖不住的私密软链接：args 是（目录, 原因）。"""
+
 def _fit(roots, must, reads, keep_cred=(), skip=()):
-    """算要盖掉的。太大看不全的目录：必须有的（仓库、工作树、范围-读……）就按失败交回，可有可无的（PATH 里别的目录、sandbox_read）不放回。"""
+    """算要盖掉的。太大看不全的、里面有盖不住的私密软链接的目录：必须有的（仓库、工作树、范围-读……）就按失败交回，可有可无的（PATH 里别的目录、sandbox_read）不放回。"""
     roots = list(roots)
     while True:
         try: return roots, _private_cover(roots, reads, keep_cred, skip)
-        except BoxTooBig as e:
-            why = f"{e} 超过 {WALK_MAX} 个文件和目录（tasks.walk_max），看不全里面有没有私密的"
-            if str(e) in must: raise RuntimeError(why + "，没法放进沙箱：收窄范围，或在实例配置里调大 tasks.walk_max") from None
-            decide("沙箱不放回", path=str(e), why=why)
-            roots.remove(str(e))
+        except (BoxTooBig, BoxCantCover) as e:
+            root, how = e.args[0], "收窄范围，或在实例配置里调大 tasks.walk_max"
+            why = f"{root} 超过 {WALK_MAX} 个文件和目录（tasks.walk_max），看不全里面有没有私密的"
+            if isinstance(e, BoxCantCover): why, how = e.args[1], "删掉这个软链接，或收窄范围"
+            if root in must: raise RuntimeError(f"{why}，没法放进沙箱：{how}") from None
+            decide("沙箱不放回", path=root, why=why)
+            roots.remove(root)
 
 def _scope_reads(sc):
     """范围-读：建的时候存的是解析过软链接的真实路径。现在解析出来对不上（软链接被换了），这条不放。"""
@@ -903,16 +916,53 @@ def is_private(p, rules=None):
     lits, rx = rules or private_rules()
     return _under(p, lits) or any(x.search(p) or x.search(p + "/") for x in rx)
 
+def link_hops(p, hops=40):
+    """软链接一环一环指到哪（每一环的路径和最后的真实路径）。绕圈的、断的走到哪算哪。"""
+    out = []
+    while len(out) < hops:
+        try: to = os.readlink(p)
+        except OSError: break
+        p = os.path.normpath(os.path.join(os.path.dirname(p), to)); out.append(p)
+        if not os.path.islink(p): p = os.path.join(os.path.realpath(os.path.dirname(p)), os.path.basename(p))   # 中间的目录也可能是链接
+        if out[-1] != p: out.append(p)
+    return list(dict.fromkeys(out + [os.path.realpath(p)]))
+
+def named_private(p, rules=None):
+    """按写法（不解析软链接）看是不是私密的：自己和每一级上级里有软链接时，链接的名字、链上每一环也算。
+    先解析再看，私密名字的链接就看不出来了。"""
+    rules = rules or private_rules()
+    p = os.path.normpath(os.path.abspath(p))
+    if is_private(os.path.realpath(p), rules) or any(x.search(p) or x.search(p + "/") for x in rules[1]): return True
+    parts = p.split(os.sep)
+    for i in range(2, len(parts) + 1):
+        q = os.sep.join(parts[:i])
+        if os.path.islink(q) and any(is_private(h, rules) for h in link_hops(q)): return True
+    return False
+
 def _private_cover(roots, reads, keep_cred=(), skip=()):
     """放回的目录里要盖掉的：私密路径（字面路径整机都盖；正则写的在放回的目录树里找）和凭据。
     范围-读明确列的私密目录不盖；只列了私密目录下面的子目录，就盖整个目录、只绑回列的那个；列了父目录不算放开里面的私密子目录。
+    软链接：名字（或链上哪一环）算私密，就盖它的真实路径，从链接、从真实路径都看不到；断的没东西可看，不管；
+    真实路径里有沙箱少不了的（指向仓库自己、上级目录、实例目录、系统目录），盖了就没法跑，抛 BoxCantCover。
     一个目录超过 tasks.walk_max 条、看不全，抛 BoxTooBig：看不全就不能说盖全了，不能放回。"""
     lits, rx = rules = private_rules()
     open_ = [r for r in reads if is_private(r, rules)]   # 范围-读明确列的私密目录
     cover = set()
+    need = list(dict.fromkeys([*roots, ROOT, os.path.realpath(sys.prefix), "/usr/lib", "/proc", "/dev", "/etc",
+                               *(_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d)]))
     def add(p):
         if not _under(p, open_): cover.add(p)
-    for p in lits: add(p)
+    def add_link(q, root):
+        hops = [q] + link_hops(q)
+        if not any(x.search(h) or x.search(h + "/") for h in hops if not _under(h, open_) for x in rx): return   # 放开的私密目录里面的链接，路径都带着私密名字，不算
+        p = hops[-1]
+        if p in reads or not os.path.exists(p) or _under(p, ["/proc", "/dev"]): return   # 明确列了落点的；断的、绕圈的；箱里的 /proc、/dev 是新挂的
+        hit = next((n for n in need if n not in reads and _under(n, [p])), None)
+        if not hit and _under(p, [ROOT]) and not _under(p, roots): hit = p   # 实例目录里放回的就是沙箱要用的
+        if hit: raise BoxCantCover(root, f"{q} 是私密名字的软链接，指向 {p}，盖掉它沙箱就没法跑（里面有 {hit}），盖不住")
+        add(p)
+    for p in lits:
+        if os.path.exists(p): add(p)
     for root in dict.fromkeys(roots) if rx else ():
         n, stack = 0, [root] if os.path.isdir(root) else []
         while stack:   # node_modules、.venv、.git 也找：里面一样能放私密目录
@@ -921,10 +971,11 @@ def _private_cover(roots, reads, keep_cred=(), skip=()):
             n += 1
             for e in es:
                 q = e.path
+                if e.is_symlink(): n += 1; add_link(q, root); continue
                 try: isdir = e.is_dir()
-                except OSError: isdir = False   # 指向自己的软链接之类
+                except OSError: isdir = False
                 if isdir:
-                    if e.is_symlink() or q in skip: continue
+                    if q in skip: continue
                     if any(x.search(q) or x.search(q + "/") for x in rx): add(q)
                     else: stack.append(q)
                 else:
@@ -1065,13 +1116,14 @@ def _outbox_do(t, r):
         return "租约给了"
     raise ValueError(f"不认识的请求 {op}")
 
-ACTING, ACT_MAX = {}, 4   # 任务号 -> 正在后台跑的动作数；到上限就先不往后读，下一拍再来
+ACTING, ACT_LOCK, ACT_MAX = {}, threading.Lock(), 4   # 任务号 -> 正在后台跑的动作数；到上限就先不往后读，下一拍再来
 
 def outbox_drain(tid, slow=None, budget=None):
     """定时运行在沙箱里写不了状态：请求写进本任务的发件箱，服务在箱外校验、执行，把回执写进 outbox.ack.jsonl。
     一行坏的只记它自己，不影响别的行。slow：执行动作可能要几分钟，bridge 传一个起线程的函数。
+    没传 slow 的（runner 收尾）等放了锁再在原地跑：动作可能要几分钟，不能拿着锁让 bridge 干等。
     budget：这一批最多办几秒，没办完的留在发件箱里，下一次从没办的那行接着。返回处理了几行。"""
-    d, n, stop, t0 = tdir(tid), 0, False, time.time()
+    d, n, stop, t0, later = tdir(tid), 0, False, time.time(), []
     def offset():
         try:
             with open(os.path.join(d, "outbox.off")) as f: return int(f.read() or 0)
@@ -1079,39 +1131,57 @@ def outbox_drain(tid, slow=None, budget=None):
     try: size = os.lstat(os.path.join(d, "outbox.jsonl")).st_size
     except OSError: return 0
     if size == offset(): return 0   # 每一拍都来问：没有新行就不拿锁
-    with _Lock(os.path.join(d, ".outbox.lock")):
-        off = offset()
-        rows, end = outbox.tail(os.path.join(d, "outbox.jsonl"), off)
-        done = outbox.handled(d)   # 办过的、认领了还在跑的
-        for line, pos in rows:
-            if budget and n and time.time() - t0 > budget: break
-            n += 1
-            r = {}
-            try:
-                r = outbox.parse(line)
-                rid, act = r.get("rid"), r.get("op") == "act"
-                if rid and rid in done: continue
-                if act and slow and ACTING.get(tid, 0) >= ACT_MAX: stop = True; break
-                if rid: done.add(rid)
-                if rid and act: fsio.append(os.path.join(d, "outbox.claim"), rid + "\n")   # 先认领再跑：跑的时候服务重启了，重放也不跑第二次
-                if act and slow:
-                    ACTING[tid] = ACTING.get(tid, 0) + 1
-                    slow(lambda r=r: _outbox_bg(tid, r)); continue
-                _outbox_one(tid, r)
-            except ValueError as e:
-                decide("发件箱坏行", task=tid, why=str(e)[:200])
-            finally:
-                if not stop: fsio.write(os.path.join(d, "outbox.off"), str(pos))
-        if end != off and not rows: fsio.write(os.path.join(d, "outbox.off"), str(end))
+    try:
+        with _Lock(os.path.join(d, ".outbox.lock")):
+            off = offset()
+            rows, end = outbox.tail(os.path.join(d, "outbox.jsonl"), off)
+            done = outbox.handled(d)   # 办过的、认领了还在跑的
+            for line, pos in rows:
+                if budget and n and time.time() - t0 > budget: break
+                n += 1
+                r = {}
+                try:
+                    r = outbox.parse(line)
+                    rid, act = r.get("rid"), r.get("op") == "act"
+                    if rid and rid in done: continue
+                    if act and not _acting(tid, 1): stop = True; break
+                    if rid: done.add(rid)
+                    if rid and act:
+                        try: fsio.append(os.path.join(d, "outbox.claim"), rid + "\n")   # 先认领再跑：跑的时候服务重启了，重放也不跑第二次
+                        except OSError: _acting(tid, -1); raise
+                    if not act: _outbox_one(tid, r); continue
+                    fn = lambda r=r: _outbox_bg(tid, r)
+                    if not slow: later.append(fn); continue
+                    try: slow(fn)
+                    except RuntimeError as e:   # 线程起不来：没跑，计数还回去，回执说清楚
+                        _acting(tid, -1); _outbox_ack(tid, r, False, f"没跑：服务起不了线程（{e}），过一会儿再提交一次")
+                except ValueError as e:
+                    decide("发件箱坏行", task=tid, why=str(e)[:200])
+                finally:
+                    if not stop: fsio.write(os.path.join(d, "outbox.off"), str(pos))
+            if end != off and not rows: fsio.write(os.path.join(d, "outbox.off"), str(end))
+    finally:
+        for fn in later: fn()   # 锁放了再跑
     return n
+
+def _acting(tid, d):
+    """正在跑的动作数加减一；加的时候到了上限就不加，返回 False。"""
+    with ACT_LOCK:
+        k = ACTING.get(tid, 0)
+        if d > 0 and k >= ACT_MAX: return False
+        ACTING[tid] = max(0, k + d)
+        return True
 
 def _outbox_bg(tid, r):
     try: _outbox_one(tid, r)
-    finally: ACTING[tid] = max(0, ACTING.get(tid, 1) - 1)
+    finally: _acting(tid, -1)
 
 def _outbox_one(tid, r):
     try: ok, msg = True, _outbox_do(load(tid), r)
     except Exception as e: ok, msg = False, str(e)[:500] or type(e).__name__
+    _outbox_ack(tid, r, ok, msg)
+
+def _outbox_ack(tid, r, ok, msg):
     if not ok: decide("发件箱没办", task=tid, op=r.get("op"), why=msg)
     if r.get("rid"): fsio.append(os.path.join(tdir(tid), "outbox.ack.jsonl"),
                                  json.dumps({"rid": r["rid"], "op": r.get("op"), "device": r.get("device"), "turn": (load(tid) or {}).get("turn"),
@@ -1345,7 +1415,7 @@ def run_accept(tid):
     other = [l for l in git(wt, "diff", "--name-only", "--diff-filter=a", *rng).stdout.splitlines() if l.strip()]
     text = (final or {}).get("result") or ""
     m = re.search(r"^\s*\[验收命令\]\s*(.+)$", text, re.M)
-    acmd = m.group(1).strip()[:300] if m else ""
+    acmd = m.group(1).strip() if m else ""
     if not added or not final or final.get("is_error"):
         git(wt, "reset", "--hard", "-q", t["accept_from"]); git(wt, "clean", "-fdq")   # 半截的验收不留在分支上
         return give_up("验收没写出新的测试文件" if final else "验收会话异常退出")
@@ -1360,7 +1430,7 @@ def run_accept(tid):
                            + f"这些测试文件不许改、不许删；验证时服务会查，改了就退回"
                            + (f"，还会单独跑验收命令 {acmd}" if acmd else "") + "。"
                            f"觉得测试本身写错了，用 [提问] 说明哪条、为什么，等{OWNER_NAME}或主控回“放开验收测试”。\n"
-                           f"验收的说明：\n{text.strip()[-1500:]}\n")
+                           f"验收的说明：\n{cut(text.strip(), 1500, True)}\n")
     update(tid, **kv)
 
 def accept_note(t):
@@ -1743,22 +1813,22 @@ def _cloud_poll(tid):
     body = re.sub(r"(?m)^(Cloud-Run:.*|Co-Authored-By:.*)$", "", msg).strip()
     if "Cloud-Run: stopped" in msg:
         update(tid, status="waiting", cloud=dict(c, after=head, closed=True))
-        event(tid, "question", "云端做不下去，交回来了：\n" + body[-2500:])
+        event(tid, "question", "云端做不下去，交回来了：\n" + cut(body, 2500, True))
         return True
     verdict = "结论：云端做完（没定验证命令，本机没复跑）"
     if t.get("verify"):   # 云端自己说过了不算：本机把分支拉下来复跑一遍验证命令
         ok, out = cloud_verify(t)
         if not ok:
             update(tid, status="failed", cloud=dict(c, after=head, closed=True))
-            event(tid, "failed", f"结论：BLOCKED（云端说做完了，本机复跑验证命令没过：{t['verify']}）\n{out}\n\n云端的报告：\n{body[-2500:]}")
+            event(tid, "failed", f"结论：BLOCKED（云端说做完了，本机复跑验证命令没过：{t['verify']}）\n{out}\n\n云端的报告：\n{cut(body, 2500, True)}")
             return True
         verdict = f"结论：PASS（云端做完，本机复跑验证命令通过：{t['verify']}）"
-    r = subprocess.run([sys.executable, os.path.abspath(__file__), "mr", "--title", t["title"], "--body", body[:6000] or t["title"],
+    r = subprocess.run([sys.executable, os.path.abspath(__file__), "mr", "--title", t["title"], "--body", cut(body, 6000) or t["title"],
                         "--branch", br] + (["--target", t["target"]] if t.get("target") else []),
                        cwd=repo, capture_output=True, text=True)
     mr = (r.stdout + r.stderr).strip()[-400:]
     update(tid, status="done", finished=time.time(), cloud=dict(c, after=head, closed=True))
-    event(tid, "done", f"{verdict}\n\n{body[-3000:]}\n\n合并请求：{mr}")
+    event(tid, "done", f"{verdict}\n\n{cut(body, 3000, True)}\n\n合并请求：{mr}")
     return True
 
 def cloud_verify(t):

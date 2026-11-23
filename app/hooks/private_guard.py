@@ -39,6 +39,8 @@ if PRIVATE:
     sys.exit(0)
 X = lambda p: HOME + p[1:] if p.startswith("~") else p
 text = " ".join(str(v) for v in ti.values() if isinstance(v, (str, int)))
+for k in ("file_path", "path", "notebook_path"):   # 名字看不出来的软链接，落点也要看
+    if isinstance(ti.get(k), str) and ti[k]: text += " " + os.path.realpath(os.path.expanduser(ti[k]))
 text = text.replace("${HOME}", HOME).replace("$HOME", HOME)
 text = re.sub(r"(?<![\w/])~(?=/|\s|$)", HOME, text)
 # 定时任务的一次运行（FCB_SCOPE）：“范围-读”里明确列的私密目录放行，别的私密路径照拦（方案 6.6）
