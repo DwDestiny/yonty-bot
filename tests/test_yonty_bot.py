@@ -1203,8 +1203,8 @@ class TaskTest(unittest.TestCase):
         pm = self.t.pick_model
         self.assertEqual(pm('开发', 'npm test', '', 'opus', 'xhigh'), {'model': 'sonnet', 'effort': 'high', 'auto_model': True})
         self.assertEqual(pm('', 'npm test', '')['model'], 'sonnet')
-        self.assertEqual(pm('开发', '', '')['model'], 'opus'); self.assertEqual(pm('开发', 'x', 'cloud')['model'], 'opus')
-        self.assertEqual(pm('评审', 'x', '', 'haiku')['model'], '')                 # 角色模板的默认
+        self.assertEqual(pm('开发', '', '', 'opus')['model'], 'opus'); self.assertEqual(pm('开发', 'x', 'cloud')['model'], '')   # 照原来的
+        self.assertEqual(pm('评审', 'x', '')['model'], '')                 # 角色模板的默认
         self.assertEqual(pm('开发', 'x', '', 'opus', 'max', True), {'model': 'opus', 'effort': 'max', 'auto_model': False})
         d = self.t.parse_directive("x\n[派活]\n仓库: ~/w\n标题: t\n模型: opus（主人指定）\n任务书:\nb\n")[1]
         self.assertEqual((d['model'], d['forced']), ('opus', True))

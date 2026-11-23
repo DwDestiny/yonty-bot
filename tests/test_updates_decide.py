@@ -161,10 +161,10 @@ class DecideTest(Base):
         self.msgs = [dict(self.msgs[0], content='今天食堂不错')]
         self.mode('on'); self.d.random.random = lambda: 0.5
         try:
-            self.flush(); self.assertEqual(len(self.e.streams), 0, '低于 0.2，攒着')
+            self.flush(); self.assertEqual(len(self.e.streams), 0, '低于 0.19，攒着')
             self.p = 0.25; self.msgs = [dict(self.msgs[0], message_id='om_a2', content='后来的')]; self.flush()
             p = self.e.streams[-1]['prompt']; self.assertLess(p.index('om_a1'), p.index('om_a2')); self.assertEqual(self.b.amb_held, {})
-            self.p = 0.05; self.d.random.random = lambda: 0.01; self.flush(); self.assertEqual(len(self.e.streams), 2, '抽中 5% 照常叫醒')
+            self.assertEqual(self.d.sample_rate('ambient'), 0.2); self.p = 0.05; self.d.random.random = lambda: 0.01; self.flush(); self.assertEqual(len(self.e.streams), 2, '抽中 5% 照常叫醒')
             self.assertTrue(self.d.rows('ambient')[-1]['sampled'])
             self.d.random.random = lambda: 0.5; self.mode('off'); self.flush(); self.assertEqual(len(self.e.streams), 3)
         finally: import importlib; importlib.reload(self.d.random)
@@ -178,7 +178,7 @@ class DecideTest(Base):
     def test_drift_turns_skipping_off(self):
         r = {'p': 0.05, 'error': ''}; c = {'mode': 'on'}
         for i in range(20): self.d.record('ambient', p=0.05, actual=i < 3, sampled=True)
-        self.assertTrue(self.d.below('ambient', r, c))
+        self.assertTrue(self.d.below('ambient', r, c)); self.assertEqual(self.d.sample_rate('ambient'), 0.05)
         self.d.record('ambient', p=0.05, actual=True, sampled=True); self.d.record('ambient', p=0.05, actual=True, sampled=True)
         self.assertFalse(self.d.below('ambient', r, c)); self.assertIn('自动停用', self.d.report('ambient', c))
 

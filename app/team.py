@@ -108,6 +108,7 @@ def gate(tk, project, d, c):
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
     if len(mine) >= c["max_tasks"] * 2: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口或换一个方案"
+    if d.get("role") == "开发" and not d.get("verify") and not d.get("verify_said"): return f"“{d['title']}”没写“验证:”：写一条能判断做没做成的命令，实在没有写 无"
     fs = d.get("files") or []
     if not d.get("closing") and d.get("role") != "评审":
         if not fs: return f"“{d['title']}”没写“文件:”：写它独占改的文件或目录"

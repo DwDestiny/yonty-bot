@@ -21,7 +21,7 @@
 | `tasks.outbox_batch_s` | `3` | 发件箱每个任务一拍最多办多少秒，没办完的下一拍接着 |
 | `tasks.outbox_wait_s` | `60` | 沙箱里的命令等服务回执多少秒，等不到不算办成 |
 | `tasks.sandbox_read` / `tasks.sandbox_write` | `[]` | 定时运行的沙箱里额外只读放回、可写挂载的目录（家目录里的 MCP 服务器、构建缓存之类）。见 boundary.md |
-| `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活时主控能挑的模型别名；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
+| `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活能用的模型别名（有验证命令的开发活由服务定）；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
 | `tasks.relay` | `true` | 任务的完成、提问、失败先交给派活的那个会话（主控）处理，再由主控对人汇报；`false` 就原话直发 |
 | `tasks.codeup_token` | `~/.config/codeup/token` | `tasks.py mr` 给 Codeup 建合并请求用的个人令牌文件 |
 | `tasks.heartbeat_min` | `30` | 飞书任务多久没动静发一次心跳；`0` 关闭。企微不发 |
@@ -33,7 +33,7 @@
 | `tasks.sibling_max_ctx` | `150000` | 上个会话的上下文超过这么多 token 就不再接着，新开会话读档案 |
 | `tasks.compact` | `{"idle_min": 50}` | 缓存过期前压缩：上下文到 `min_ctx`（不写就按“省下的冷启动重写大于压缩花费”算，约 8.9 万）、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务、还没到换新时间的聊天会话和旁听会话。`min_ctx` 写 0 关掉。别的时候交给 CLI 自己的自动压缩 |
 | `updates.enabled` | `true` | 每天查新版；补丁版空闲时自动装，别的问主人。主人私聊 `/updates` 看和控制 |
-| `decide` | 关 | 决策点。`backend`：`jev`、`openai`（要 `url`）、`haiku`、`rules`；`points.ambient`：`off`、`shadow`（只记录）、`on`（低于 `skip_below`，默认 0.2，不叫醒；点到机器人、主人名字或 `wake` 里的词一定叫醒；5% 抽查，抽查 20 批以上、漏超过 15% 自动停用；不写 `skip_below` 时满 200 条样本改用算出来的阈值）；`points.task`：`off`、`shadow`（先用 sonnet 的任务打分，只记，`/decide` 里和验证结果对照）。开了会把旁听群的消息和守则“群聊旁听”一节去掉密钥后发给后端；`task` 开了还会发新任务的标题和任务书 |
+| `decide` | 关 | 决策点。`backend`：`jev`、`openai`（要 `url`）、`haiku`、`rules`；`points.ambient`：`off`、`shadow`（只记录）、`on`（低于 `skip_below`，默认 0.19，不叫醒；点到机器人、主人名字或 `wake` 里的词一定叫醒；头 20 次抽查按 20% 抽，之后 5%；抽查满 5 批、漏超过 15% 自动停用）；`points.task`：`off`、`shadow`（先用 sonnet 的任务打分，只记，`/decide` 里和验证结果对照）。开了会把旁听群的消息和守则“群聊旁听”一节去掉密钥后发给后端；`task` 开了还会发新任务的标题和任务书 |
 | `tasks.stuck_min` | `40` | 本机任务多少分钟没有任何动作（没调工具、没输出、进程 CPU 平均不到 5%）算卡住：停掉并交回主控；`0` 关闭 |
 | `tasks.verify_retries` | `2` | `[派活]` 写了验证命令时，验证没过最多退回返工几次 |
 | `tasks.verify_timeout_min` | `20` | 验证命令最长跑多久 |

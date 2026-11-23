@@ -1298,7 +1298,7 @@ def dispatch_one(ev, d):
     if ex == "cloud":
         why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
-    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced"))
+    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced") and owner)
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
@@ -2418,7 +2418,7 @@ def ambient_flush(chat_id, msgs):
     if got and dc["mode"] == "on" and not named:   # 影子阶段不等它；切换后才等，判不用叫醒的攒着，下次叫醒时按原样排在前面
         got["th"].join(dc.get("timeout", 5) + 1)
         low = bool(got.get("r") and dm.below("ambient", got["r"], dc))
-        sampled = low and random.random() < dm.SAMPLE
+        sampled = low and random.random() < dm.sample_rate("ambient")
         if low and not sampled and len(amb_held.get(chat_id, [])) + len(msgs) < AMB["max_batch"]:
             amb_held[chat_id] = amb_held.get(chat_id, []) + msgs
             with lock: save(HELD_FILE, amb_held)

@@ -145,13 +145,11 @@ def update(tid, _force=False, _touch=True, **kv):
 
 AUTO_ROLES = ("", "开发")   # 这些角色的模型由服务定：有验证命令、在本机跑的先用 sonnet，验证过不了再换 opus
 def pick_model(role, verify, ex, model="", effort="", forced=False):
-    """派活时定模型和思考档，返回 {model, effort, auto_model}。不听会话写的（历史上 37 个任务 29 个写了 opus），除非写明“主人指定”。
-    没有验证命令、云端跑的没有自动换人的机会，直接 opus；别的角色用角色模板的默认。"""
-    if forced and model: return {"model": model, "effort": effort, "auto_model": False}
-    if role not in AUTO_ROLES: return {"model": "", "effort": "", "auto_model": False}
-    first = "sonnet" if verify and ex != "cloud" else "opus"
-    if first not in MODELS: return {"model": model, "effort": effort, "auto_model": False}
-    return {"model": first, "effort": "high", "auto_model": first == "sonnet" and "opus" in MODELS}
+    """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
+    除非主人的话派的、写明“主人指定”。没有验证命令或云端跑的没有自动换人的机会，照原来的：写了听写的，没写用角色模板。"""
+    if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
+        return {"model": model, "effort": effort, "auto_model": False}
+    return {"model": "sonnet", "effort": "high", "auto_model": True}
 
 def sibling_drop(t, model):
     """验证没过、换了人的会话不再拿来分叉。"""
@@ -872,7 +870,7 @@ def _directive(block):
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
-                  "verify": verify, "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
+                  "verify": verify, "verify_said": bool(field("验证")), "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
