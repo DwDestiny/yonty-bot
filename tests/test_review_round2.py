@@ -112,3 +112,48 @@ class PrivateRegexScopeTest(unittest.TestCase):
         ok, msg = e.b.sch.create(e.t._me(), dict(f), {'owner': True, 'private': True, 'name': '小王', 'origin': {}})
         self.assertTrue(ok, msg); self.assertTrue(e.b.sch.all_()[-1]['private'])
         self.assertTrue(e.t.is_private(str(e.repo / PV / 'k'))); self.assertFalse(e.t.is_private(str(e.repo / 'src')))
+
+
+class DeliveryRetryTest(unittest.TestCase):
+    """第 7、8 项：Claude 那一轮失败（没结果、is_error 带报错文字）时投递退回重送，最多 3 次；重送不重复派活。"""
+
+    def setUp(self):
+        self.e = Inst(self); self.tk, self.dl = self.e.t._me(), self.e.t.dl
+
+    def send(self, tag, kind='留言'):
+        t = self.e.task()
+        self.dl.submit(self.tk, self.dl.task_sender(self.tk, t), '主控', kind, tag)
+        return [x for x in self.dl.load(self.tk) if x['text'] == tag][0], t
+
+    def tickd(self):
+        st = self.dl.limits(self.tk); st['merge'] = {}; self.dl.limits_save(self.tk, st)
+        self.e.b.delivery_tick(); self.e.drain()
+
+    def test_failed_turn_goes_back_to_new(self):
+        for shape in ('none', '529'):
+            def stream(cmd, prompt, env, on_extra=None, shape=shape):
+                if shape == 'none': return None, '', 1, 'boom'
+                return {'is_error': True, 'result': 'API Error: 529 Overloaded', 'session_id': 's', 'usage': {}}, 'API Error: 529', 0, ''
+            self.e.b.stream_claude = stream
+            rec, _ = self.send(f'FAIL-{shape}')
+            self.tickd()
+            r = self.dl.find(self.tk, rec['id'])
+            self.assertEqual((r['status'], r.get('retried')), ('new', 1), shape)
+            self.assertFalse([x for x in self.e.sent if '529' in x[2]], '报错文字不能当回复发出去')
+            for _ in range(3): self.tickd()
+            r = self.dl.find(self.tk, rec['id'])
+            self.assertEqual((r['status'], r.get('retried')), ('dropped', 4), shape)
+
+    def test_redelivery_does_not_dispatch_twice(self):
+        e = self.e
+        e.respond = lambda p, env, cmd: f"派一个。\n\n[派活]\n仓库: {e.repo}\n标题: IDEM-修个东西\n任务书:\n做 X\n"
+        self.send('IDEM-问题', kind='问题')
+        orig = e.b.task_say
+        def crash(*a, **k): raise RuntimeError('派活之后、标已送之前出错')
+        e.b.task_say = crash
+        self.tickd()
+        self.assertEqual(len([x for x in e.t.all_tasks() if x['title'] == 'IDEM-修个东西']), 1)
+        e.b.task_say = orig
+        self.tickd()
+        self.assertEqual(len([x for x in e.t.all_tasks() if x['title'] == 'IDEM-修个东西']), 1, '重送的那一轮不再派一次')
+        self.assertIn('不重复派', e.out())

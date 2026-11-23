@@ -352,6 +352,9 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
         with lock:   # 丢掉会话映射，下一条消息开新会话；同一个 --session-id 不能重用
             sessions.pop(key, None); save(SESS_FILE, sessions)
         return None if quiet else "我这边卡壳了，再发一次我会开个新会话接着来。"
+    if quiet and out.get("is_error"):   # 529 之类：这一轮没成，结果是报错文字，不能当回复发出去；会话留着，调用方按失败重送
+        log.error("claude %s quiet turn errored: %s", key, (out.get("result") or "")[:300])
+        return None
     u = out.get("usage") or {}
     log.info("cost %s session_total=$%.3f in=%s cache_read=%s cache_write=%s out=%s", key, out.get("total_cost_usd") or 0,
              u.get("input_tokens"), u.get("cache_read_input_tokens"), u.get("cache_creation_input_tokens"), u.get("output_tokens"))
@@ -817,6 +820,11 @@ def task_directive(ev, result):
     """回复里有 [派活] 块就建任务，把块换成排期或审批的说明。"""
     head, d = tasks.parse_directive(result)
     if not d: return result
+    idem = ev.get("idem")   # 投递轮重送（出错、重启）时同一条投递再出一次 [派活]：同一个键只建一次
+    done = [x for x in tasks.all_tasks() if idem and x.get("idem") == idem]
+    if done:
+        tasks.decide("派活去重", task=tasks.ref(done[0]), why=f"投递 {idem} 重送，这条投递已经派过")
+        return (head + f"\n\n（这条已经派过 {tasks.ref(done[0])}，不重复派。）").strip()
     owner = is_owner(ev)
     repo, err = tasks.check_repo(d["repo"]) if d["repo"] else (None, "没写仓库")
     if not err and not d["brief"]: err = "任务书是空的"
@@ -830,7 +838,7 @@ def task_directive(ev, result):
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=d.get("thing", ""), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
-                     status="approved" if owner else "pending",
+                     status="approved" if owner else "pending", **({"idem": idem} if idem else {}),
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
                              "message_id": ev["message_id"], "thread": in_topic(ev), "key": session_key(ev),
@@ -1113,13 +1121,20 @@ DL_INFLIGHT = set()   # 这个进程交给会话、还没处理完的投递；�
 
 def delivery_turn(ev):
     """投递排进主控或项目经理的会话：一轮处理完才标“已送”；中途服务重启或出错，记录停在 handing，下一拍重新送。"""
-    batch = ev.get("batch") or [ev["deliver"]]
+    batch, ok = ev.get("batch") or [ev["deliver"]], False
     try:
-        _delivery_turn(ev)
+        ok = _delivery_turn(ev) is not False
+    finally:
         tk = tasks._me()
         for x in batch:
-            if (tasks.dl.find(tk, x["id"]) or {}).get("status") == "handing": tasks.dl.update(tk, x["id"], status="sent")
-    finally:
+            r = tasks.dl.find(tk, x["id"]) or {}
+            if r.get("status") != "handing": continue
+            if ok: tasks.dl.update(tk, x["id"], status="sent"); continue
+            n = (r.get("retried") or 0) + 1   # 这一轮没成（Claude 报错、出异常）：退回 new 重送，最多 3 次；不留在 handing，免得下一拍再加一次
+            if n > 3:
+                tasks.dl.update(tk, x["id"], status="dropped", retried=n)
+                tasks.decide("投递放弃", sender=r["from"].get("ref"), why="交给会话 3 次都没处理成")
+            else: tasks.dl.update(tk, x["id"], status="new", retried=n)
         DL_INFLIGHT.difference_update(x["id"] for x in batch)
 
 def _delivery_turn(ev):
@@ -1140,17 +1155,18 @@ def _delivery_turn(ev):
         + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
            if fr.get("task") else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）")
     with sem:
-        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop) or ""
+        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop)
+    if result is None: return False   # 这一轮没成：调用方退回重送
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid)
     if t and result.strip() and result.strip() != AMB_SILENT:
-        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控")
+        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=f"dl{rec['id']}-{int(rec['ts'])}")
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dl{rec['id']}")
 
 def reply_target(fr):
     return {"pm": f"项目经理 {fr.get('project')}", "ctrl": "主控"}.get(fr.get("type"), fr.get("ref"))
 
-def turn_directives(t, result, hop, who):
+def turn_directives(t, result, hop, who, idem=None):
     """投递轮回复里的 [任务指令]、[派活]：按任务回报的规矩转（派活人的权限、每个任务最多自动追加 RELAY_MAX 次）。
     这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。"""
     mx = tasks.dl.conf(CFG)["max_hops"]
@@ -1165,7 +1181,7 @@ def turn_directives(t, result, hop, who):
             text = tasks.parse_directive(text)[0] + f"\n\n（{tasks.ref(t)} 已经自动追加 {RELAY_MAX} 次，新活儿请人来派。）"
         else:
             tasks.update(t["id"], auto_follow=tasks.load(t["id"]).get("auto_follow", 0) + 1)
-            text = task_directive(relay_ev(t), text)
+            text = task_directive(dict(relay_ev(t), idem=idem) if idem else relay_ev(t), text)
     return text
 
 def delivery_tick():
