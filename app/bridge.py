@@ -13,7 +13,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
         python3 bridge.py --cache-check 3 # 用服务同款参数开 3 个新会话，检查缓存是否跨会话命中
 来源:   feishu-claude-bot skill 的 assets/templates/bridge.py
 """
-import json, os, re, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal
+import json, os, re, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
@@ -269,6 +269,88 @@ TURNS_NUDGE = (f"[系统] 这一轮已经用满 {CHAT_MAX_TURNS} 步，聊天里
 
 hook_env = tasks.hook_env
 
+# ---------- 身份套接字：命令行和任务进程问“我是谁”、交投递，都走这里（评审第二轮 1、2） ----------
+tasks.dl.KEY = secrets.token_bytes(32)   # 投递记录的签名钥匙，只在内存里；重启后旧记录一律按非主人送
+GRANTS, GRANTS_LOCK = {}, threading.Lock()
+
+def grant(pid, info):
+    """登记 bridge 自己起的进程（聊天、项目经理那一轮的 claude；popen 起的任务 runner）。带启动时间，进程号复用了不认。"""
+    st = tasks._stat(pid)
+    with GRANTS_LOCK: GRANTS[pid] = (st[19] if len(st) > 19 else "", dict(info))
+
+def ungrant(pid):
+    with GRANTS_LOCK: GRANTS.pop(pid, None)
+
+tasks.ON_LAUNCH = lambda pid, tid: grant(pid, {"task": tid})
+
+def ident_of(pid):
+    """来访进程是谁：本实例的任务单元按 cgroup 认；否则沿父进程在登记表里找。都没有返回 None，不看环境变量。"""
+    try:
+        with open(f"/proc/{pid}/cgroup") as f: cg = f.read()
+    except OSError: cg = ""
+    hit, s = tasks.unit_sender(cg)
+    if hit: return s
+    for a in [pid] + tasks._ancestors(pid):
+        with GRANTS_LOCK: g = GRANTS.get(a)
+        st = tasks._stat(a) if g else []
+        if not g or len(st) <= 19 or st[19] != g[0]: continue
+        info = g[1]
+        if info.get("task"):
+            t = tasks.load(int(info["task"]))
+            return tasks.dl.task_sender(tasks._me(), t) if t and t.get("status") == "running" else None
+        return tasks._sess_sender(info, bool(info.get("owner")))
+    return None
+
+def peer_pid(conn):
+    if hasattr(socket, "SO_PEERCRED"):
+        pid, uid, _ = struct.unpack("3i", conn.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))
+        return pid if uid == os.getuid() else None
+    if sys.platform == "darwin":   # LOCAL_PEERPID
+        try: return struct.unpack("i", conn.getsockopt(0, 0x002, 4))[0]
+        except OSError: return None
+    return None
+
+def ident_serve(conn):
+    try:
+        conn.settimeout(10)
+        pid, buf = peer_pid(conn), b""
+        while not buf.endswith(b"\n") and len(buf) < 1 << 20:
+            x = conn.recv(65536)
+            if not x: break
+            buf += x
+        req = json.loads(buf.decode() or "{}")
+        me = ident_of(pid) if pid else None
+        if req.get("op") == "whoami": out = {"sender": me}
+        elif req.get("op") == "send":
+            if not me: out = {"err": "认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。"}
+            else:
+                try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
+                                                  str(req.get("text") or ""), None, req.get("reply"))}
+                except ValueError as e: out = {"err": str(e)}
+        else: out = {"err": "不认识的请求"}
+        conn.sendall((json.dumps(out, ensure_ascii=False) + "\n").encode())
+    except Exception: log.exception("ident request failed")
+    finally: conn.close()
+
+def ident_start():
+    """开身份套接字（state/ident.sock，只给本用户）。返回监听的 socket，测试里关掉它就停。"""
+    path = tasks.SOCK
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    try: os.unlink(path)
+    except FileNotFoundError: pass
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    old = os.umask(0o177)
+    try: srv.bind(path)
+    finally: os.umask(old)
+    srv.listen(32)
+    def loop():
+        while True:
+            try: c, _ = srv.accept()
+            except OSError: return
+            threading.Thread(target=ident_serve, args=(c,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    return srv
+
 inflight = 0   # 正在跑的聊天类会话数：/upgrade 重启前等它归零
 
 def stream_claude(cmd, prompt, env, on_extra=None):
@@ -278,8 +360,8 @@ def stream_claude(cmd, prompt, env, on_extra=None):
     global inflight
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          cwd=WORKDIR, env=env)
-    # 命令行（tasks.py send/act）按这份授权认出是哪个会话、带不带主人身份；环境变量 Claude 自己能改，不算数
-    tasks.grant_write(p.pid, {"owner": env.get("FCB_OWNER") == "1", "private": env.get("FCB_PRIVATE") == "1",
+    # 命令行（tasks.py send/act）问 bridge 认出是哪个会话、带不带主人身份：登记只在本进程内存里，环境变量、文件都不算数
+    grant(p.pid, {"owner": env.get("FCB_OWNER") == "1", "private": env.get("FCB_PRIVATE") == "1",
                               "key": env.get("FCB_SESSION_KEY", ""), "hop": int(env.get("FCB_HOP") or 0),
                               "layer": env.get("FCB_LAYER", ""), "project": env.get("FCB_PROJECT", "")})
     q, err = queue.Queue(), []
@@ -316,7 +398,7 @@ def stream_claude(cmd, prompt, env, on_extra=None):
                 flush()                        # 又开了一轮：上一个结果不是最后一个
         rc = p.wait()
     finally:
-        tasks.grant_drop(p.pid)
+        ungrant(p.pid)
         with lock: inflight -= 1
     h = st["held"]
     return st["last"], (h.get("result") or "") if h else "", rc, "".join(tail) + "".join(err)[-1500:]
@@ -1146,7 +1228,7 @@ def _delivery_turn(ev):
     tid = fr.get("task") or rec.get("about")
     t = tasks.load(tid) if tid else None
     # 身份按投递记录定，不按这个会话上一个说话的人：群里同事的任务回报不能带着主人的权限跑
-    o_owner, bk = all(bool(r["from"].get("owner")) for r in batch), base_key(key)
+    o_owner, bk = all(tasks.dl.vouched_owner(r) for r in batch), base_key(key)   # 主人身份只认 bridge 自己写的记录（签名），不信记录里的字
     o_priv, chat_id = o_owner and bk.startswith("p2p:"), (t["origin"].get("chat_id", "") if t else bk.split(":", 1)[-1])
     hop = max(r.get("hop") or 0 for r in batch)
     prompt = (pm_intro(pm) if pm and not s["started"] else "") + "\n\n".join(
@@ -1842,6 +1924,7 @@ def main():
         threading.Thread(target=ambient_loop, daemon=True).start()
     # 定时检查：长任务的状态和进度回报（任务本身在独立单元里跑，不随本进程退出）、聊天会话快过期时压缩
     threading.Thread(target=task_loop, args=(stopping,), daemon=True).start()
+    ident_start()
     log.info("bridge started: %s v%s (%s)", NAME, META.get("version", "?"), "+".join(f.__name__.split("_")[0] for f in loops))
     save(STARTED_FILE, {"version": META.get("version"), "at": time.time(), "pid": os.getpid()})   # 升级单元靠它判断新服务起来了
     while not stopping.wait(3600): pass

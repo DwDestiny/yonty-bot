@@ -69,8 +69,9 @@ class AuthTest(Base):
         self.assertEqual(self.t.whoami(), (None, True), '在服务单元里却没有授权：不按环境变量认')
 
     def test_grant_from_parent_process(self):
-        self.t.grant_write(os.getpid(), {'owner': False, 'key': 'grp:oc_g', 'hop': 2})
-        self.addCleanup(self.t.grant_drop, os.getpid())
+        srv = self.e.b.ident_start(); self.addCleanup(srv.close)   # 登记在 bridge 内存里，命令行走套接字问（第二轮复审 2）
+        self.e.b.grant(os.getpid(), {'owner': False, 'key': 'grp:oc_g', 'hop': 2})
+        self.addCleanup(self.e.b.ungrant, os.getpid())
         r = self.e.cli('send', '--to', '主控', '--kind', '节点', '--text', 'GRANT-节点', FCB_OWNER=1, FCB_HOP=0)
         self.assertEqual(r.returncode, 0, r.stderr)
         rec = [x for x in self.t.dl.load(self.t._me()) if x['text'] == 'GRANT-节点'][-1]

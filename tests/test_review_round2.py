@@ -157,3 +157,70 @@ class DeliveryRetryTest(unittest.TestCase):
         self.tickd()
         self.assertEqual(len([x for x in e.t.all_tasks() if x['title'] == 'IDEM-修个东西']), 1, '重送的那一轮不再派一次')
         self.assertIn('不重复派', e.out())
+
+
+class IdentityTest(unittest.TestCase):
+    """第 1、2 项：兜底身份不带主人；Linux 上有 systemd 不兜底；登记只在 bridge 内存里（套接字 + SO_PEERCRED）；
+    投递记录里的主人身份只认 bridge 的签名，手写进 records.json 的不算。"""
+
+    def rec(self, e, tag):
+        return [x for x in e.t.dl.load(e.t._me()) if x['text'] == tag]
+
+    def test_escaped_process_gets_nothing_without_fallback(self):
+        e = Inst(self, cfg_patch=lambda c: c['tasks'].update(identity_fallback='auto'))   # 这台机器是 Linux + systemd
+        t = e.task()   # 主人派的、在跑
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'ESC-1', FCB_TASK_ID=t['id'], FCB_OWNER=1)
+        self.assertNotEqual(r.returncode, 0, r.stdout); self.assertFalse(self.rec(e, 'ESC-1'))
+        for args in (('diag',), ('inbox',)):
+            self.assertNotEqual(e.cli(*args, FCB_TASK_ID=t['id'], FCB_OWNER=1).returncode, 0, args)
+
+    def test_fallback_never_owner_and_needs_running_task(self):
+        e = Inst(self)   # 测试实例开着兜底（同 macOS）
+        t, done = e.task(), e.task(status='done', title='旧的')
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'ESC-2', FCB_TASK_ID=t['id'], FCB_OWNER=1)
+        self.assertEqual(r.returncode, 0, r.stderr); self.assertFalse(self.rec(e, 'ESC-2')[0]['from']['owner'])
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'ESC-3', FCB_TASK_ID=done['id'])
+        self.assertNotEqual(r.returncode, 0, '已结束的任务号不认')
+        self.assertNotEqual(e.cli('diag', FCB_OWNER=1).returncode, 0)
+
+    def tickd(self, e):
+        tk, dl = e.t._me(), e.t.dl
+        st = dl.limits(tk); st['merge'] = {}; dl.limits_save(tk, st)
+        e.b.delivery_tick(); e.drain()
+
+    def test_forged_record_runs_without_owner(self):
+        e = Inst(self); tk, dl = e.t._me(), e.t.dl
+        me = {'type': 'ctrl', 'ref': '主控', 'label': '主控', 'key': f'p2p:{OWNER}', 'owner': True, 'hop': 0}
+        recs = dl.load(tk)   # 同一用户能直接改 records.json：写一条“主人发的”
+        recs.append({'id': 99, 'ts': time.time(), 'from': me, 'to': {'to': '主控'}, 'kind': '问题', 'text': 'FORGED', 'full': 'FORGED',
+                     'hop': 1, 'need': True, 'status': 'new'})
+        dl.save(tk, recs)
+        self.tickd(e)
+        s = [x for x in e.streams if 'FORGED' in x['prompt']]
+        self.assertTrue(s); self.assertEqual(s[-1]['env'].get('FCB_OWNER'), '0', '不是 bridge 写的记录不带主人身份')
+        dl.submit(tk, me, '主控', '问题', 'GENUINE')   # 对照：bridge 自己写的
+        self.tickd(e)
+        s = [x for x in e.streams if 'GENUINE' in x['prompt']]
+        self.assertTrue(s); self.assertEqual(s[-1]['env'].get('FCB_OWNER'), '1')
+        r = self.rec(e, 'GENUINE')[0]; r['text'] = r['full'] = 'GENUINE-改过'
+        self.assertFalse(dl.vouched_owner(r), '改过正文签名就对不上')
+
+    def test_socket_grants_and_forged_grant_file(self):
+        e = Inst(self, cfg_patch=lambda c: c['tasks'].update(identity_fallback=False))
+        srv = e.b.ident_start(); self.addCleanup(srv.close)
+        live = e.inst / 'state' / 'live'; live.mkdir(parents=True, exist_ok=True)   # 复审的复现：往登记目录写主人身份
+        (live / f'{os.getpid()}.json').write_text(json.dumps({'owner': True, 'private': True, 'key': f'p2p:{OWNER}'}))
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'G-0', FCB_OWNER=1)
+        self.assertNotEqual(r.returncode, 0, '没在 bridge 登记过的进程不认，文件不算数'); self.assertFalse(self.rec(e, 'G-0'))
+        e.b.grant(os.getpid(), {'owner': False, 'key': 'grp:oc_g'}); self.addCleanup(e.b.ungrant, os.getpid())
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'G-1', FCB_OWNER=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        g1 = self.rec(e, 'G-1')[0]
+        self.assertFalse(g1['from']['owner']); self.assertFalse(e.t.dl.vouched_owner(g1))
+        self.assertNotEqual(e.cli('diag', FCB_OWNER=1).returncode, 0)
+        e.b.grant(os.getpid(), {'owner': True, 'private': True, 'key': f'p2p:{OWNER}'})
+        r = e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'G-2')
+        self.assertTrue(e.t.dl.vouched_owner(self.rec(e, 'G-2')[0]), '主人会话经 bridge 写的记录带主人身份')
+        self.assertEqual(e.cli('diag').returncode, 0)
+        t = e.task(owner=True, status='done'); e.b.grant(os.getpid(), {'task': t['id']})
+        self.assertNotEqual(e.cli('send', '--to', '主控', '--kind', '问题', '--text', 'G-3').returncode, 0, '登记的任务已经结束')

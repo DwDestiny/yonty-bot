@@ -7,7 +7,7 @@ Output: state/deliveries/records.json（每条投递和状态：new 待送、que
         决策日志（改投、拦下、去重、排队、限频）；任务收件箱；给发送方的回执文字
 Pos:    tasks.py 和 bridge 共用。本模块只做判断和记账；真正发到 IM、排进会话队列的是 bridge.delivery_tick
 """
-import json, os, re, time
+import hashlib, hmac, json, os, re, time
 
 CATS = ("授权", "花钱", "方向", "动作", "进展", "节点", "完成", "问题", "留言")
 OWNER_CATS = ("授权", "花钱", "方向")
@@ -18,7 +18,22 @@ MARK = re.compile(r"^\s*\[投递\s+(.+?)\s+(\S+?)\]\s*$")
 TARGETS = "主人、派活人、聊天、主控、项目经理 短名、短名#N、事 项目/事名、记录"
 
 
+KEY = None   # bridge 进程启动时生成，只在它内存里：它写的投递记录带签名，送的时候只有签名对得上的才带主人身份
+
+
 def conf(cfg): return dict(DEFAULTS, **(cfg.get("delivery") or {}))
+
+
+def _mac(rec):
+    body = json.dumps([rec["id"], rec["ts"], rec["from"], rec["to"], rec["kind"], rec.get("full"), rec.get("hop")],
+                      ensure_ascii=False, sort_keys=True)
+    return hmac.new(KEY, body.encode(), hashlib.sha256).hexdigest()
+
+
+def vouched_owner(rec):
+    """这条投递送的时候能不能带主人身份：发送方是主人，而且是 bridge 自己写的（签名对得上）。
+    命令行、任务进程在 bridge 外写的，手写进 records.json 的，bridge 重启前写的，一律不带。"""
+    return bool(KEY and rec["from"].get("owner") and rec.get("sig") and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
 def _dir(tk): return os.path.join(tk.ROOT, "state", "deliveries")
 def _file(tk): return os.path.join(_dir(tk), "records.json")
 def lock(tk): return tk._Lock(os.path.join(_dir(tk), ".lock"))
@@ -161,6 +176,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
                 return "".join(n + "；" for n in notes) + f"去重：{c['dedup_min']} 分钟内已经送过一样的话，这条不再送。"
         rec = dict(extra or {}, id=1 + max([r["id"] for r in recs] or [0]), ts=now, **{"from": sender}, to=tg, kind=kind,
                    text=text, full=full, hop=nh, need=need, status="new")
+        if KEY: rec["sig"] = _mac(rec)
         receipt = f"已交给{tg['to']}" + (f" {tg.get('project') or tg.get('ref') or ''}" if tg["to"] in ("项目经理", "任务") else "") + "，下一拍送到。"
         if tg["to"] == "任务":
             t2, _ = tk.resolve(tg["ref"])

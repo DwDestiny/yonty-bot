@@ -972,9 +972,9 @@ class TaskTest(unittest.TestCase):
         env = dict(os.environ, FCB_OWNER='0')
         r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
         self.assertNotEqual(r.returncode, 0)
-        env['FCB_OWNER'] = '1'
+        env['FCB_OWNER'] = '1'   # 环境变量不算主人身份（第二轮复审 1）；主人会话按 bridge 的登记认，见 test_review_round2
         r = subprocess.run([sys.executable, str(self.inst / 'tasks.py'), 'diag'], capture_output=True, text=True, env=env)
-        self.assertEqual(r.returncode, 0, r.stderr); self.assertIn('在跑的任务', r.stdout)
+        self.assertNotEqual(r.returncode, 0, r.stdout)
 
     def test_relay_colleague_cannot_steer_others(self):
         other = self.relay_task('done', 'x', owner=True)

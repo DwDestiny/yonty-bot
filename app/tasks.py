@@ -8,7 +8,7 @@ Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（�
 Pos:    bridge.py 的任务层。bridge 管收消息、审批、往聊天里发；本文件管任务存储和后台运行。
         后台任务跑在独立的 systemd 用户单元里（macOS 用独立进程组），bridge 重启不影响任务，重启后接着看事件。
 """
-import json, os, re, subprocess, sys, time, uuid, shutil, platform, signal, fcntl
+import json, os, re, subprocess, sys, time, uuid, shutil, platform, signal, fcntl, socket
 
 import importlib.util, types
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -804,6 +804,7 @@ def launch(tid):
         p = subprocess.Popen([sys.executable, os.path.abspath(__file__), "run", str(tid)], cwd=ROOT,
                              stdout=log, stderr=log, stdin=subprocess.DEVNULL, start_new_session=True)
         update(tid, unit=None, pid=p.pid)
+        if ON_LAUNCH: ON_LAUNCH(p.pid, tid)   # 没有单元：bridge 在内存里登记 runner，命令行沿父进程找到它
     return True
 
 def own_peak(unit=None):
@@ -955,7 +956,7 @@ def sandbox(t):
     st = os.path.join(ROOT, "state")
     devs = os.path.join(st, "devices"); os.makedirs(devs, exist_ok=True); open(DECISIONS, "a").close()
     fs = box_files(t)
-    a += ["--tmpfs", st] + sum((["--ro-bind", p, p] for p in (tdir(t["id"]), os.path.dirname(t["scope"]), LIVE) if os.path.isdir(p)), [])
+    a += ["--tmpfs", st] + sum((["--ro-bind", p, p] for p in (tdir(t["id"]), os.path.dirname(t["scope"])) if os.path.isdir(p)), [])
     a += sum((["--bind", f, f] for n, f in fs.items() if n != "claude.json"), []) + ["--bind", DECISIONS, DECISIONS, "--bind", devs, devs]
     a += ["--bind", fs["claude.json"], os.path.join(home, ".claude.json")]
     for w in T.get("sandbox_write") or []:   # 实例配置里额外给定时运行写的目录（构建缓存之类）
@@ -1303,7 +1304,6 @@ def run(tid):
             with open(os.path.join(tdir(tid), "stream.log"), "a") as raw:
                 p = subprocess.Popen(box + cmd, cwd=t["worktree"], env=env, text=True,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
-                grant_write(p.pid, {"task": tid})   # popen 起的任务没有单元：命令行往上找父进程按这份授权认
                 p.stdin.write(prompt); p.stdin.close()
                 for line in p.stdout:
                     raw.write(line)
@@ -1329,7 +1329,7 @@ def run(tid):
                         quota_note(obj.get("rate_limit_info"))
                     elif obj.get("type") == "result":
                         final = obj
-                p.wait(); p.stdout.close(); grant_drop(p.pid)
+                p.wait(); p.stdout.close()
             if t.get("schedule"): outbox_drain(tid)
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
@@ -1345,6 +1345,10 @@ def run(tid):
             inbox_acks(tid, text)
             text, marks = dl.parse_marks(text)
             for to, kind, body, need in marks:
+                r = None if t.get("schedule") else ask_bridge({"op": "send", "to": to, "kind": kind, "text": body, "reply": need})
+                if r is not None:   # 交给 bridge 写：它按本进程的 cgroup 认任务，记录带它的签名
+                    if r.get("err"): event(tid, "progress", f"投递没送出：{r['err']}")
+                    continue
                 try: dl.submit(_me(), dl.task_sender(_me(), load(tid)), to, kind, body, None, need)
                 except ValueError as e: event(tid, "progress", f"投递没送出：{e}")
             pk = own_peak(load(tid).get("unit"))
@@ -1583,7 +1587,7 @@ def _cloud_poll(tid):
         verdict = f"结论：PASS（云端做完，本机复跑验证命令通过：{t['verify']}）"
     r = subprocess.run([sys.executable, os.path.abspath(__file__), "mr", "--title", t["title"], "--body", body[:6000] or t["title"],
                         "--branch", br] + (["--target", t["target"]] if t.get("target") else []),
-                       cwd=repo, capture_output=True, text=True, env=dict(os.environ, FCB_OWNER="1"))
+                       cwd=repo, capture_output=True, text=True)
     mr = (r.stdout + r.stderr).strip()[-400:]
     update(tid, status="done", finished=time.time(), cloud=dict(c, after=head, closed=True))
     event(tid, "done", f"{verdict}\n\n{body[-3000:]}\n\n合并请求：{mr}")
@@ -1694,39 +1698,54 @@ def diag_text(s=""):
     return "\n".join(out)
 
 # ---------- 任务和各层会话里用的子命令（方案 4.6、5.2、7.2、8 节） ----------
-LIVE = os.path.join(ROOT, "state", "live")
+# 身份：任务按 cgroup 里本实例的单元名认；聊天、项目经理和 popen 起的任务由 bridge 认：bridge 开 unix 套接字，
+# 用 SO_PEERCRED 拿来访进程号，沿父进程在它内存里的登记表里找（进程号加启动时间）。登记只在 bridge 内存里，会话写不进去
+SOCK = os.path.join(ROOT, "state", "ident.sock")
+ON_LAUNCH = None   # bridge 设：popen 起任务时登记 runner 的进程号
 
 def _stat(pid):
     try:
         with open(f"/proc/{pid}/stat") as f: return f.read().rsplit(")", 1)[1].split()
     except (OSError, IndexError): return []
 
-def grant_write(pid, info):
-    """bridge 和 run() 起 claude 后给这个进程写授权：命令行往上找父进程认出调用方。带进程启动时间，进程号复用了不认。"""
+def ask_bridge(req, timeout=30):
+    """问 bridge（身份、投递）。返回回复；bridge 没在跑、连不上返回 None。"""
+    if not hasattr(socket, "AF_UNIX") or not os.path.exists(SOCK): return None
     try:
-        os.makedirs(LIVE, exist_ok=True)
-        st = _stat(pid)
-        with open(os.path.join(LIVE, f"{pid}.json"), "w") as f: json.dump(dict(info, start=st[19] if len(st) > 19 else ""), f)
-    except OSError: pass
-
-def grant_drop(pid):
-    try: os.remove(os.path.join(LIVE, f"{pid}.json"))
-    except OSError: pass
-
-def _grant(pid):
-    try:
-        with open(os.path.join(LIVE, f"{pid}.json")) as f: g = json.load(f)
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as c:
+            c.settimeout(timeout); c.connect(SOCK)
+            c.sendall((json.dumps(req, ensure_ascii=False) + "\n").encode())
+            buf = b""
+            while not buf.endswith(b"\n"):
+                x = c.recv(65536)
+                if not x: break
+                buf += x
+        r = json.loads(buf.decode() or "null")
+        return r if isinstance(r, dict) else None
     except (OSError, ValueError): return None
-    st = _stat(pid)
-    return g if st and len(st) > 19 and g.get("start") == st[19] else None
+
+def fallback_on():
+    """按环境变量兜底认身份（兜底的一律不带主人身份）：只给没有 systemd 的机器（macOS）和测试。
+    tasks.identity_fallback：auto（默认，Linux 上有 systemd 就不兜底）、true、false。写在实例配置里，环境变量改不了。"""
+    v = T.get("identity_fallback", "auto")
+    if v == "auto": return not (platform.system() == "Linux" and os.path.isdir("/run/systemd/system"))
+    return v is True
+
+def unit_sender(cg):
+    """cgroup 文字里是不是本实例的任务单元：(是不是, 发送方或 None)。任务在跑、轮次对得上才认。"""
+    m = re.search(r"/" + re.escape(SLUG) + r"-task-(\d+)-(\d+)\.service", cg or "")
+    if not m: return False, None
+    t = load(int(m.group(1)))
+    ok = t and t.get("status") == "running" and str(t.get("turn")) == m.group(2)
+    return True, (dl.task_sender(_me(), t) if ok else None)
 
 def _cgroup():
     try:
         with open("/proc/self/cgroup") as f: return f.read()
     except OSError: return ""
 
-def _ancestors(limit=64):
-    pid, out = os.getpid(), []
+def _ancestors(pid=None, limit=64):
+    pid, out = pid or os.getpid(), []
     for _ in range(limit):
         st = _stat(pid)
         pid = int(st[1]) if len(st) > 1 else 0
@@ -1740,27 +1759,19 @@ def _sess_sender(g, owner):
 
 def whoami():
     """命令行（send、act、inbox、diag、mr）认调用方，返回 (发送方或 None, 是否可信)。
-    任务按 cgroup 里本实例的单元名认（任务在跑、轮次对得上才算）；聊天和项目经理按 bridge 给这一轮 claude 写的授权认（往上找父进程）；
-    popen 起的任务同样有授权。在本实例的单元里却对不上的，一律不认。两样都没有、也不在本实例的单元里（测试、macOS），
-    才按环境变量兜底：兜底的不可信，不带主人身份，任务的身份、范围、跳数照样从任务记录取。"""
+    先问 bridge（套接字，按来访进程认）；bridge 不在时按本进程的 cgroup 认任务单元。都认不出：在本实例的服务单元里、
+    或者 Linux 上有 systemd（同一用户能用 systemd-run --scope 逃出单元），一律不认；只有 tasks.identity_fallback 开着
+    （macOS、测试）才按环境变量兜底，兜底的不可信、不带主人身份、只认在跑的任务。"""
+    r = ask_bridge({"op": "whoami"})
+    if r is not None: return r.get("sender"), True
     cg = _cgroup()
-    m = re.search(r"/" + re.escape(SLUG) + r"-task-(\d+)-(\d+)\.service", cg)
-    if m:
-        t = load(int(m.group(1)))
-        ok = t and t.get("status") == "running" and str(t.get("turn")) == m.group(2)
-        return (dl.task_sender(_me(), t) if ok else None), True
-    for pid in _ancestors():
-        g = _grant(pid)
-        if not g: continue
-        if g.get("task"):
-            t = load(int(g["task"]))
-            return (dl.task_sender(_me(), t) if t and t.get("status") == "running" else None), True
-        return _sess_sender(g, bool(g.get("owner"))), True
-    if re.search(r"/" + re.escape(SLUG) + r"\.service(/|$)", cg, re.M): return None, True
+    hit, s = unit_sender(cg)
+    if hit: return s, True
+    if re.search(r"/" + re.escape(SLUG) + r"\.service(/|$)", cg, re.M) or not fallback_on(): return None, True
     tid = os.environ.get("FCB_TASK_ID")
     if tid and tid.isdigit():
         t = load(int(tid))
-        return (dl.task_sender(_me(), t) if t else None), False
+        return (dict(dl.task_sender(_me(), t), owner=False) if t and t.get("status") == "running" else None), False
     g = {"key": os.environ.get("FCB_SESSION_KEY", ""), "hop": os.environ.get("FCB_HOP") or 0,
          "layer": os.environ.get("FCB_LAYER"), "project": os.environ.get("FCB_PROJECT", "")}
     return _sess_sender(g, False), False
@@ -1772,9 +1783,9 @@ def sender_from_env():
     return s
 
 def owner_cli():
-    """diag、mr 这类主人专用的子命令：可信来源看授权；兜底（测试、macOS）看环境变量。"""
+    """diag、mr 这类主人专用的子命令：只认 bridge 或 cgroup 认出的主人身份，兜底的一律不算。"""
     s, trusted = whoami()
-    return bool(s and s.get("owner")) if trusted else os.environ.get("FCB_OWNER") == "1"
+    return bool(trusted and s and s.get("owner"))
 
 def cli(cmd, argv):
     if cmd == "inbox":
@@ -1795,7 +1806,12 @@ def cli(cmd, argv):
         for k in ("--to", "--kind", "--text"): ap.add_argument(k, required=True)
         ap.add_argument("--reply", choices=("是", "否"))
         a = ap.parse_args(argv)
-        me = sender_from_env()
+        reply = None if a.reply is None else a.reply == "是"
+        r = ask_bridge({"op": "send", "to": a.to, "kind": a.kind, "text": a.text, "reply": reply})
+        if r is not None:   # bridge 按来访进程认身份、自己写投递记录（带它的签名）
+            if r.get("err"): sys.exit(r["err"])
+            print(r.get("ok", "")); return
+        me = sender_from_env()   # bridge 不在：本地认（cgroup 或兜底）。记录没有 bridge 的签名，送的时候不带主人身份
         if me["type"] == "schedule":   # 定时运行在沙箱里，投递记录只读：写进本任务的发件箱，服务在外面按任务记录的身份送
             with _Lock(os.path.join(tdir(me["task"]), ".lock")):
                 with open(os.path.join(tdir(me["task"]), "outbox.jsonl"), "a") as f:
