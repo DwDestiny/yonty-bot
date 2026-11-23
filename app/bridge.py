@@ -917,7 +917,7 @@ def quota_check(now):
         key = f"{k}:{reset}:{int(u * 10)}"
         if key in sent: continue
         run = [t for t in tasks.all_tasks() if t["status"] == "running"]
-        lines = [f"额度提醒：{why}，{time.strftime('%m-%d %H:%M', time.localtime(reset))} 重置。这是整个订阅的用量，包括你终端里的会话。"]
+        lines = [f"额度提醒：{why}，{tasks.bjtime('%m-%d %H:%M', reset)} 重置。这是整个订阅的用量，包括你终端里的会话。"]
         if run: lines.append("在跑的任务：" + "；".join(f"{tasks.ref(t)} {t['title']}（{tasks.model_label(t)}，已用 {t.get('cost') or 0} 美元当量）" for t in run))
         lines.append(f"只是提醒，活照常干。要省着用：{BT}/task cancel 短名#N{BT} 停掉不急的，或跟我说改派便宜模型、放到云端。")
         owner_dm("feishu" if FEISHU_ON else "wecom", "\n".join(lines))
@@ -959,6 +959,12 @@ def task_tick():
                 cloud_polled[n] = now
                 try: tasks.cloud_poll(n)
                 except Exception: log.exception("task #%s cloud poll failed", n)
+        elif (st == "running" and t.get("schedule") and t.get("launched") and t.get("exec") != "cloud"
+              and now - t["launched"] > float((CFG.get("schedules") or {}).get("max_run_min", 120)) * 60):
+            if tasks.load(n)["status"] == "running":   # 定时任务的一次运行超过 schedules.max_run_min：停掉按失败交回
+                tasks.stop(t); tasks.update(n, status="failed")
+                tasks.event(n, "failed", f"结论：BLOCKED（定时运行超过 schedules.max_run_min "
+                                         f"{(CFG.get('schedules') or {}).get('max_run_min', 120)} 分钟，已停）")
         elif st == "running" and STUCK_S and t.get("exec") != "cloud" and not t.get("frozen") and now - last_activity(t) > STUCK_S:
             if tasks.load(n)["status"] == "running":   # 进程还在，但很久没有任何动作：按卡住处理，停掉交回主控
                 tasks.stop(t); tasks.update(n, status="failed")
@@ -1286,7 +1292,7 @@ def v2_command(ev, text, owner):
             with open(tasks.DECISIONS) as f: rows = [json.loads(l) for l in f if l.strip()]
         except FileNotFoundError: rows = []
         hit = [r for r in rows if m.group(1) in (r.get("task"), r.get("sender"), r.get("schedule"))][-8:]
-        return "\n".join(f"{time.strftime('%m-%d %H:%M', time.localtime(r['ts']))} {r['kind']}：{r.get('why') or r.get('to') or ''}" for r in hit) \
+        return "\n".join(f"{tasks.bjtime('%m-%d %H:%M', r['ts'])} {r['kind']}：{r.get('why') or r.get('to') or ''}" for r in hit) \
             or f"{m.group(1)} 还没有决策记录（放行、改投、去重、排队都会记）。"
     m = re.match(r"^/(bind|unbind)(?:\s+(\S+))?$", text)
     if m:
@@ -1570,7 +1576,7 @@ def ambient_cmd(chat_id, cmd):
                (f"\n开关：@我 {BT}{c} on{BT} / {BT}{c} off{BT}" if cmd == c else "")
     turn_on = cmd == c + " on"
     if turn_on:
-        chats[chat_id] = {"since": time.strftime("%Y-%m-%d %H:%M")}
+        chats[chat_id] = {"since": tasks.bjtime("%Y-%m-%d %H:%M")}
         ambient_init(chat_id)
         msg = f"收到，这个群我开始旁听了。不 @ 我也看，有梗接梗，跟{OWNER_NAME}或者我有关的会搭话，其余时候不出声。关掉：@我 {BT}{c} off{BT}"
     else:

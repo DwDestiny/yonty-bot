@@ -254,9 +254,9 @@ def limits_save(tk, st):
     os.replace(tmp, _lim(tk))
 
 
-def progress_key(t):
+def progress_key(tk, t):
     """进展按最终落到的聊天、按任务算；定时任务按每个定时任务、每天算。"""
-    return f"sched:{t['schedule']}:{time.strftime('%Y-%m-%d')}" if t.get("schedule") else f"task:{t['id']}"
+    return f"sched:{t['schedule']}:{tk.bjtime('%Y-%m-%d')}" if t.get("schedule") else f"task:{t['id']}"
 
 
 def progress_gate(tk, t, text, now=None):
@@ -264,7 +264,7 @@ def progress_gate(tk, t, text, now=None):
     c, now = conf(tk.CFG), now or time.time()
     with lock(tk):
         st = limits(tk)
-        p = st["progress"].setdefault(progress_key(t), {"n": 0, "last": 0})
+        p = st["progress"].setdefault(progress_key(tk, t), {"n": 0, "last": 0})
         if p["n"] >= c["progress_max"]:
             verdict = "drop"
         elif now - p["last"] < c["progress_gap_min"] * 60:

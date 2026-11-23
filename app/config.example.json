@@ -121,8 +121,10 @@
   "timezone": "Asia/Shanghai",
   "devices": [],
   "irreversible": [
-    "\\bgit\\s+push\\b.*(--tags|\\brefs/tags/)",
-    "\\bgh\\s+release\\s+create\\b",
+    "\\bgit\\s+push\\b.*(--tags|--follow-tags|\\brefs/tags/)",
+    "\\bgit\\s+push\\b.*[\\s:+](v\\d+(\\.\\d+)*|\\d+\\.\\d+(\\.\\d+)*)[\\w.-]*(\\s|$)",
+    "\\bgh\\s+release\\s+(create|edit|delete|upload)\\b",
+    "\\bgh\\s+api\\b(?=.*\\breleases\\b)(?=.*(-X\\s*(POST|PATCH|PUT|DELETE)|--method[\\s=]+(POST|PATCH|PUT|DELETE)|\\s-[fF]\\s|--(raw-)?field\\b|--input\\b))",
     "\\bnpm\\s+publish\\b"
   ],
   "schedules": {

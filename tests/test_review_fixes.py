@@ -348,6 +348,48 @@ class ScheduleTickTest(R2.Base):
         self.assertTrue(b.SCH_BUSY.acquire(timeout=5)); b.SCH_BUSY.release()
 
 
+
+class MiscFixTest(unittest.TestCase):
+    """第 11 项：验证期间到的指令不丢；不可逆命令补漏；schedules.max_run_min 生效；给人看的时间和按天的限额用北京时间。"""
+
+    def test_instruction_during_verify_is_not_lost(self):
+        e = Inst(self); os.environ['FAKE_MODE'] = 'plain'
+        x = e.task()
+        add = f"import sys; sys.path.insert(0, {str(e.inst)!r}); import tasks; tasks.inbox_add({x['id']}, '主人', True, 'DURING-VERIFY')"
+        e.t.update(x['id'], _force=True, verify=f'{sys.executable} -c "{add}"')
+        e.t.run(x['id'])
+        calls = sorted(e.fake_state.glob('call*.json'))
+        self.assertGreaterEqual(len(calls), 2, '验证通过后又来了指令，不能直接收“完成”')
+        self.assertIn('i1', json.loads(calls[1].read_text())['prompt'])
+        self.assertNotEqual(e.t.load(x['id'])['status'], 'done')
+
+    def test_irreversible_patterns_cover_tags_and_releases(self):
+        import re
+        pats = json.loads((Path(__file__).resolve().parents[1] / 'app' / 'config.example.json').read_text())['irreversible']
+        hit = lambda c: any(re.search(p, c) for p in pats)
+        for c in ('git push origin v1.2.3', 'git push --follow-tags origin main', 'git push origin 2.0.1', 'git push origin HEAD:v3',
+                  'git push origin --tags', 'gh release create v1', 'gh api -X POST repos/o/r/releases -f tag_name=v1',
+                  'gh api repos/o/r/releases --method PATCH', 'gh api repos/o/r/releases/1 -X DELETE'):
+            self.assertTrue(hit(c), c)
+        for c in ('git push origin main', 'git push -u origin HEAD:bot/yonty-bot-4-1122', 'gh api repos/o/r/releases',
+                  'git push origin feat/v2-ui', 'gh pr create'):
+            self.assertFalse(hit(c), c)
+
+    def test_schedule_run_stopped_after_max_run_min(self):
+        e = Inst(self, cfg_patch=lambda c: c.setdefault('schedules', {}).update(max_run_min=30))
+        x = e.task(schedule='proj#S1', thing='定时-proj#S1', launched=time.time() - 31 * 60, unit='yb-test-unit')
+        y = e.task(launched=time.time() - 31 * 60, unit='yb-test-unit2')
+        e.tick()
+        self.assertEqual(e.t.load(x['id'])['status'], 'failed')
+        self.assertIn('max_run_min', e.t.events(x['id'])[-1]['text'])
+        self.assertEqual(e.t.load(y['id'])['status'], 'running', '普通任务不受这条管')
+
+    def test_beijing_time(self):
+        e = Inst(self)
+        self.assertEqual(e.t.bjtime('%Y-%m-%d %H', 0), '1970-01-01 08')
+        self.assertEqual(e.t.dl.progress_key(e.t._me(), e.task(schedule='proj#S1')), f"sched:proj#S1:{e.t.bjtime('%Y-%m-%d')}")
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'

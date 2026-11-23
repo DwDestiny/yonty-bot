@@ -365,10 +365,10 @@ def spend_add(tid, usd):
     os.makedirs(STORE, exist_ok=True)
     with _Lock(os.path.join(STORE, ".lock")):
         with open(os.path.join(STORE, "spend.jsonl"), "a") as f:
-            f.write(json.dumps({"day": time.strftime("%Y-%m-%d"), "task": tid, "usd": round(usd, 4)}) + "\n")
+            f.write(json.dumps({"day": bjtime("%Y-%m-%d"), "task": tid, "usd": round(usd, 4)}) + "\n")
 
 def spent_today():
-    day, total = time.strftime("%Y-%m-%d"), 0.0
+    day, total = bjtime("%Y-%m-%d"), 0.0
     try:
         with open(os.path.join(STORE, "spend.jsonl")) as f:
             for l in f:
@@ -533,7 +533,7 @@ def sibling_save(t, ctx, notes, total=0):
             h["notes"] += [f"（{t['requester'].get('name', '同事')}派的任务提议的项目约定，没确认）{x}" for x in h.pop("conventions")]
         if h["notes"]:
             with open(_sib_path(t, ".md"), "a", encoding="utf-8") as f:
-                f.write(f"\n## {ref(t)} {t['title']}（{time.strftime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
+                f.write(f"\n## {ref(t)} {t['title']}（{bjtime('%Y-%m-%d')}）\n" + "\n".join(h["notes"]) + "\n")
         if h.get("conventions"):
             with open(_conv_path(t), "a", encoding="utf-8") as f:
                 f.write("".join(f"- {x.lstrip('-· ').strip()}（{ref(t)}）\n" for x in h["conventions"]))
@@ -1076,6 +1076,12 @@ def stop(t):
         try: os.killpg(t["pid"], signal.SIGTERM); os.killpg(t["pid"], signal.SIGCONT)   # 冻着的进程组收到 SIGCONT 才处理 SIGTERM
         except OSError: pass
 
+def bjtime(fmt="%m-%d %H:%M", ts=None):
+    """按实例的 timezone（默认北京时间）格式化时间；服务器时区是 UTC 也不影响按天算的限额、给人看的时间。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.fromtimestamp(time.time() if ts is None else ts, ZoneInfo(CFG.get("timezone") or "Asia/Shanghai")).strftime(fmt)
+
 def git(repo, *a): return subprocess.run(["git", "-C", repo, *a], capture_output=True, text=True)
 
 def make_worktree(t):
@@ -1388,6 +1394,10 @@ def run(tid):
                         event(tid, "failed", f"结论：BLOCKED（返工 {rnd} 次后验证仍没过）\n验证命令：{t['verify']}\n"
                                              f"输出末尾：\n{out[-800:]}\n\n任务最后的总结：\n{text}{note}")
                         return
+                    unf = inbox_unfetched(tid, "指令")
+                    if unf and late < 2:   # 跑验证的这段时间又来了指令：不收“完成”，带编号续跑
+                        late += 1; prompt, resume = inbox_hint(unf, gate=True), True
+                        continue
                     text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）" + accept_note(t) + f"\n\n{text}"
                 else:
                     text = "结论：没定验证命令，服务没复核" + accept_note(t) + "\n\n" + text
@@ -1641,8 +1651,8 @@ def diag_text(s=""):
     try:
         q = json.load(open(QUOTA))
         w = q.get("windows") or {}
-        out.append(f"订阅额度（{time.strftime('%m-%d %H:%M', time.localtime(q['at']))} 的快照，整个订阅，含终端里的会话）：" + "；".join(
-            f"{n} 已用 {w[k].get('utilization', 0):.0%}" + (f"，{time.strftime('%m-%d %H:%M', time.localtime(w[k]['resetsAt']))} 重置" if w[k].get("resetsAt") else "")
+        out.append(f"订阅额度（{bjtime('%m-%d %H:%M', q['at'])} 的快照，整个订阅，含终端里的会话）：" + "；".join(
+            f"{n} 已用 {w[k].get('utilization', 0):.0%}" + (f"，{bjtime('%m-%d %H:%M', w[k]['resetsAt'])} 重置" if w[k].get("resetsAt") else "")
             for k, n in (("five_hour", "5 小时"), ("seven_day", "7 天")) if k in w))
     except Exception:
         out.append("订阅额度：还没有快照（任务跑起来后才有）。")
@@ -1653,7 +1663,7 @@ def diag_text(s=""):
         out.append(f"{ref(t)} {t['title']}：{LABEL.get(t['status'], t['status'])}，第 {t.get('turn', 0)} 轮，"
                    f"单元 {t.get('unit') or '无'}" + (f"，结束原因 {res}" if res else "") + (f"，内存峰值 {peak}" if peak else "")
                    + f"，已用 {t.get('cost') or 0} 美元当量")
-        out += [f"  {time.strftime('%H:%M', time.localtime(e.get('ts') or 0))} {e['kind']}：{(e.get('text') or '').splitlines()[0][:120] if e.get('text') else ''}"
+        out += [f"  {bjtime('%H:%M', e.get('ts') or 0)} {e['kind']}：{(e.get('text') or '').splitlines()[0][:120] if e.get('text') else ''}"
                 for e in events(t["id"])[-8:]]
     else:
         act = [t for t in all_tasks() if t["status"] in ACTIVE]
