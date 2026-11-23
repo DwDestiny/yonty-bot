@@ -141,10 +141,16 @@ class DecideTest(Base):
 
     def test_facts_are_stripped(self):
         self.flush(); f = self.facts[0]
-        for w in ('hunter2abc', 'ou_zz9', '某甲'): self.assertNotIn(w, f)
-        for s in ('sk-abcdefghijklmnop1234', 'ghp_abcdefghijklmnop1234', 'Bearer abc.def', 'https://u:p@h.example/x', 'token: zzz', 'a@b.example', '10.1.2.3', '13800138000'):
+        self.assertNotIn('hunter2abc', f); self.assertIn('某甲', f)
+        self.assertEqual(self.d.clean('找 a@b.example 或 10.1.2.3，路径 /home/x/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbb'), '找 a@b.example 或 10.1.2.3，路径 /home/x/aaaaaaaaaaaaaaaaaaaa/bbbbbbbbbbbbbbbbbbbbbbb')
+        for s in ('sk-abcdefghijklmnop1234', 'ghp_abcdefghijklmnop1234', 'Bearer abc.def', 'https://u:p@h.example/x', 'token: zzz', 'AKIAABCDEFGHIJKLMNOP'):
             self.assertIn('[略]', self.d.clean(s))
         self.assertNotIn('hunter2abc', (self.e.inst / 'state' / 'decide' / 'ambient.jsonl').read_text())
+
+    def test_question_uses_rules_section(self):
+        seen = []
+        self.d.BACKENDS['fake'] = lambda p, f, o, c: (seen.append(self.d.ask(p, c)['q']), (0.1, 1))[1]
+        self.flush(); self.assertIn('群聊旁听', seen[0])
 
     def test_errors_fall_back_and_remind_once(self):
         self.p = urllib.error.HTTPError('u', 402, 'x', {}, None); told = []

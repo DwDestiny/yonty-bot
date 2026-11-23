@@ -33,7 +33,7 @@
 | `tasks.sibling_max_ctx` | `150000` | 上个会话的上下文超过这么多 token 就不再接着，新开会话读档案 |
 | `tasks.compact` | `{"idle_min": 50}` | 缓存过期前压缩：上下文到 `min_ctx`（不写就按“省下的冷启动重写大于压缩花费”算，约 8.9 万）、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务、还没到换新时间的聊天会话和旁听会话。`min_ctx` 写 0 关掉。别的时候交给 CLI 自己的自动压缩 |
 | `updates.enabled` | `true` | 每天查新版；补丁版空闲时自动装，别的问主人。主人私聊 `/updates` 看和控制 |
-| `decide` | 关 | 决策点。`backend`：`jev`、`openai`（要 `url`）、`haiku`、`rules`；`points.ambient`：`off`、`shadow`（只记录）、`on`（满 200 条样本才真跳过）。开了会把旁听群的消息去掉密钥后发给后端 |
+| `decide` | 关 | 决策点。`backend`：`jev`、`openai`（要 `url`）、`haiku`、`rules`；`points.ambient`：`off`、`shadow`（只记录）、`on`（满 200 条样本才真跳过）。开了会把旁听群的消息和守则“群聊旁听”一节去掉密钥后发给后端 |
 | `tasks.stuck_min` | `40` | 本机任务多少分钟没有任何动作（没调工具、没输出、进程 CPU 平均不到 5%）算卡住：停掉并交回主控；`0` 关闭 |
 | `tasks.verify_retries` | `2` | `[派活]` 写了验证命令时，验证没过最多退回返工几次 |
 | `tasks.verify_timeout_min` | `20` | 验证命令最长跑多久 |

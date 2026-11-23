@@ -2445,14 +2445,14 @@ HELD_FILE = os.path.join(STATE, "ambient_held.json")
 amb_held = load(HELD_FILE, {})    # 判了不用叫醒、还没给 Claude 看的群消息
 
 def ambient_judge(chat_id, msgs):
-    """另开一个线程问决策后端“要不要叫醒”。只给群消息，发送人换成 成员N；不进 Claude 的会话。返回 (盒子, 设置)。"""
+    """另开一个线程问决策后端“要不要叫醒”。给群消息和守则“群聊旁听”一节，去掉密钥；不进 Claude 的会话。返回 (盒子, 设置)。"""
     dc = dm.conf(CFG.get("decide"), "ambient")
     if dc["mode"] not in ("shadow", "on"): return None, dc
-    who, ls = {}, []
-    for m in msgs:
-        i = (m.get("sender") or {}).get("id") or m.get("sender_id") or "?"
-        ls.append(f"成员{who.setdefault(i, len(who) + 1)}：{str(m.get('content') or '')[:1000]}")
-    box, facts = {}, "\n".join(ls)
+    box, facts = {}, f"助手：{NAME}，主人：{OWNER_NAME}\n" + "\n".join(_line(m) for m in msgs)
+    try:
+        with open(tasks.RULES, encoding="utf-8") as f: m_ = re.search(r"^#+[^\n]*群聊旁听.*?(?=^#+ |\Z)", f.read(), re.S | re.M)
+        if m_: dc["rule"] = m_.group(0)[:3000]
+    except OSError: pass
     def go(): box["r"] = dm.decide("ambient", facts, ["叫醒", "不用"], dc, lambda x: owner_dm("feishu", x))
     box["th"] = threading.Thread(target=go, daemon=True); box["th"].start()
     return box, dc
