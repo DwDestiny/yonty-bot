@@ -302,7 +302,10 @@ def material(rd):
 
 
 def _run(tk, sc, now, alerts, rd=None):
-    """开一次运行；上一次没跑完就跳过（连跳 3 次提醒）。返回开没开。"""
+    """开一次运行；上一次没跑完就跳过（连跳 3 次提醒）。返回开没开。探针跑的时候被暂停、停掉的，不开。"""
+    with _lk(tk): cur = (_load1(sc["id"]) or {}).get("status")
+    if cur != "active":
+        tk.decide("跳过", schedule=sc["ref"], why=f"期间被改成了 {cur}，不开运行"); return False
     last = tk.load(sc["last_task"]) if sc.get("last_task") else None
     if last and last["status"] in tk.ACTIVE:
         sc["skips"] = sc.get("skips", 0) + 1

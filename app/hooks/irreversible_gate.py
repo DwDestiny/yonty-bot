@@ -16,6 +16,14 @@ try:
     with open(os.environ["FCB_CONFIG"]) as f: pats = json.load(f).get("irreversible") or []
 except Exception:
     pats = []
+# 内置的一份，和配置里的合并：老实例升级时 config.json 不会自动带上模板新加的模式
+pats = list(pats) + [
+    r"\bgit\s+push\b.*(--tags|--follow-tags|\brefs/tags/)",
+    r"\bgit\s+push\b.*[\s:+](v\d+(\.\d+)*|\d+\.\d+(\.\d+)*)[\w.-]*(\s|$)",
+    r"\bgh\s+release\s+(create|edit|delete|upload)\b",
+    r"\bgh\s+api\b(?=.*\breleases\b)(?=.*(-X\s*(POST|PATCH|PUT|DELETE)|--method[\s=]+(POST|PATCH|PUT|DELETE)|\s-[fF]\s|--(raw-)?field\b|--input\b))",
+    r"\bnpm\s+publish\b",
+]
 
 
 def hit(p):

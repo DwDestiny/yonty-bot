@@ -278,6 +278,21 @@ class HandbackEndTest(unittest.TestCase):
         x, _ = self.go('**结论**：BLOCKED，缺权限\n[提问] 谁能开一下权限？')
         self.assertEqual(x['status'], 'failed')
 
+    def test_conclusion_negations(self):
+        v = self.e.t.handback_verdict
+        for text, want in (('结论：全部通过，0 失败', 'done'), ('结论：没有失败', 'done'), ('结论：3 个失败', 'failed'),
+                           ('结论：不通过', 'failed'), ('结论：BLOCKED', 'failed'), ('没写结论', None)):
+            self.assertEqual(v(text), want, text)
+        self.assertEqual(v('结论：不通过，有 2 处要改', readonly=True), 'done', '评审的“不通过”是评审结果')
+        self.assertEqual(v('结论：BLOCKED，看不到代码', readonly=True), 'failed')
+
+    def test_irreversible_hook_blocks_new_forms(self):
+        e = self.e; a = e.task(); e.t.inbox_add(a['id'], '主人', True, '先别发版')
+        gate = lambda cmd: e.bash('irreversible_gate.py', cmd, FCB_TASK_ID=a['id']).returncode
+        for c in ('git push origin v1.2.3', 'git push --follow-tags origin main', 'gh api repos/o/r/releases -X POST -f tag_name=v1'):
+            self.assertEqual(gate(c), 2, c)
+        self.assertEqual(gate('git push origin bot/x-1'), 0)
+
     def test_plain_question_still_waits(self):
         x, ev = self.go('[提问] 方案 A 还是 B？我建议 A')
         self.assertEqual(x['status'], 'waiting'); self.assertEqual(ev[-1], 'question')
@@ -337,6 +352,7 @@ class ScheduleTickTest(R2.Base):
         self.e.tick()
         cur = json.loads((self.e.inst / 'state' / 'schedules' / f"{sc['id']}.json").read_text())
         self.assertEqual(cur['status'], 'stopped', '主人停掉的不能被 tick 写回“在跑”或“跑完了”')
+        self.assertEqual([x for x in self.e.t.all_tasks() if x.get('schedule')], [], '停掉了就不开运行')
 
     def test_slow_tick_does_not_block(self):
         b, calls = self.e.b, []

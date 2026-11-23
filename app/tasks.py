@@ -600,13 +600,16 @@ def thing_busy(t):
                                            "还要它接着干就回答它的问题；不要了就取消。")
     return busy
 
-def handback_verdict(text):
+def handback_verdict(text, readonly=False):
     """交回内容自己写了结局的，按它结束，不留在等回复：写了“按失败交回”或结论是失败、卡住 → failed；结论是通过、完成 → done。
     没写结论返回 None。"""
     if re.search(r"(?<![不别没])按失败交回", text or ""): return "failed"
     m = re.search(r"^[\s*#>]*结论\s*\**\s*[:：]\s*(.+)$", text or "", re.M)
     if not m: return None
-    return "failed" if re.search(r"BLOCKED|FAIL|失败|没过|未通过|不通过|做不了|卡住|放弃", m.group(1), re.I) else "done"
+    line = re.sub(r"(0|零|无|没有|没)\s*(个|项|条|处)?\s*(失败|FAIL\w*)", "", m.group(1), flags=re.I)
+    if re.search(r"BLOCKED|做不了|卡住|放弃", line, re.I): return "failed"
+    if readonly: return "done"   # 评审的“不通过”是评审结果，评审这件活本身做完了
+    return "failed" if re.search(r"FAIL|失败|没过|未通过|不通过", line, re.I) else "done"
 
 def all_siblings():
     out = []
@@ -1361,7 +1364,7 @@ def run(tid):
             rc = role_check(load(tid))
             if rc: note += "\n\n" + rc
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
-            verdict = handback_verdict(text)
+            verdict = handback_verdict(text, "Edit" in (roles().get(load(tid).get("role") or "", {}).get("deny") or []))
             if verdict == "failed":   # 写了按失败交回：结束，交回主控，不占着这件事
                 update(tid, status="failed", verify_round=0); event(tid, "failed", text + note)
                 return
