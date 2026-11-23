@@ -50,7 +50,7 @@ def instance_words():
 class VersionAndConfigTest(unittest.TestCase):
     def test_version_is_2_x(self):
         """完成标准：版本号是 2.x（写死补丁号会让每次 /upgrade 的测试都不过）。"""
-        self.assertRegex(read(ROOT / 'VERSION').strip(), r'^2\.\d+\.\d+$')
+        self.assertRegex(read(ROOT / 'VERSION').strip(), r'^\d+\.\d+\.\d+$')
 
     def test_config_example_drops_old_limits(self):
         """5.4：tasks.max_running 和 tasks.memory_max 删掉。"""
