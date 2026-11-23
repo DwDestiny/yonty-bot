@@ -1103,8 +1103,20 @@ def schedule_directive(ev, result):
         owner_dm(ev.get("channel", "feishu"), f"{creator['name']} 建了一个定时任务，等你批：{msg}\n" + (sch.scope_text(sc) if sc else ""))
     return (head + "\n\n" + msg).strip()
 
+DL_INFLIGHT = set()   # 这个进程交给会话、还没处理完的投递；重启后不在这里的 handing 记录重新送
+
 def delivery_turn(ev):
-    """投递排进主控或项目经理的会话：一轮只处理这一条投递，要对人说的话发回投递来源的聊天。"""
+    """投递排进主控或项目经理的会话：一轮处理完才标“已送”；中途服务重启或出错，记录停在 handing，下一拍重新送。"""
+    batch = ev.get("batch") or [ev["deliver"]]
+    try:
+        _delivery_turn(ev)
+        tk = tasks._me()
+        for x in batch:
+            if (tasks.dl.find(tk, x["id"]) or {}).get("status") == "handing": tasks.dl.update(tk, x["id"], status="sent")
+    finally:
+        DL_INFLIGHT.difference_update(x["id"] for x in batch)
+
+def _delivery_turn(ev):
     rec, key = ev["deliver"], ev["key"]
     batch = ev.get("batch") or [rec]   # 同一发送方 2 分钟内发给同一目标的，合成一轮（7.5 第 1 条）
     pm = key.split(":")[1] if key.startswith("proj:") else None
@@ -1166,6 +1178,12 @@ def delivery_tick():
             except Exception: log.exception("held progress for task #%s failed", tid)
     groups = {}
     for r in dl.load(tk):
+        if r["status"] == "handing" and r["id"] not in DL_INFLIGHT:   # 交给会话后服务重启了或那一轮出错：重新送，最多 3 次
+            n = (r.get("retried") or 0) + 1
+            if n > 3:
+                dl.update(tk, r["id"], status="dropped"); tasks.decide("投递放弃", sender=r["from"].get("ref"), why="交给会话 3 次都没处理完")
+                continue
+            dl.update(tk, r["id"], status="new", retried=n); r = dict(r, status="new", retried=n)
         if r["status"] != "new": continue
         to, fr = r["to"]["to"], r["from"]
         t = tasks.load(fr.get("task") or r.get("about")) if (fr.get("task") or r.get("about")) else None
@@ -1189,7 +1207,8 @@ def delivery_tick():
         if g[0] != "one" and now - (st.get("merge") or {}).get(gk, 0) < c["merge_s"]: continue   # 等着合并
         try:
             if g[0] == "sess":
-                for x in rs: dl.update(tk, x["id"], status="sent")
+                for x in rs: dl.update(tk, x["id"], status="handing")   # 先落盘：会话那一轮处理完才标已送
+                DL_INFLIGHT.update(x["id"] for x in rs)
                 enqueue(g[2], {"deliver": r, "batch": rs, "key": g[2]})
                 if len(rs) > 1: tasks.decide("合并", sender=fr["ref"], to=g[2], why=f"{len(rs)} 条合成一轮处理")
             else:

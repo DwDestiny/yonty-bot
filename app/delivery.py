@@ -2,7 +2,7 @@
 """投递：发消息的一方自己选交给谁（方案第 7 节）。
 
 Input:  tasks.py send、任务和项目经理回复里的 [投递 目标 类别] 标记；tk 是调用方按路径加载的 tasks 模块
-Output: state/deliveries/records.json（每条投递和状态：new 待送、queued 排队、open 等回复、sent 已送、answered 已回、
+Output: state/deliveries/records.json（每条投递和状态：new 待送、queued 排队、handing 交给会话还没处理完、open 等回复、sent 已送、answered 已回、
         held 进展留着到点再发、digest 并进给主人的摘要、dropped 只进记录）；state/deliveries/limits.json（进展和主人私聊的频率）；
         决策日志（改投、拦下、去重、排队、限频）；任务收件箱；给发送方的回执文字
 Pos:    tasks.py 和 bridge 共用。本模块只做判断和记账；真正发到 IM、排进会话队列的是 bridge.delivery_tick
@@ -33,7 +33,7 @@ def load(tk):
 
 def save(tk, recs):
     os.makedirs(_dir(tk), exist_ok=True)
-    keep = [r for r in recs if r["status"] in ("new", "queued", "open") or time.time() - r["ts"] < 7 * 86400][-2000:]
+    keep = [r for r in recs if r["status"] in ("new", "queued", "handing", "open") or time.time() - r["ts"] < 7 * 86400][-2000:]
     tmp = _file(tk) + ".tmp"
     with open(tmp, "w") as f: json.dump(keep, f, ensure_ascii=False)
     os.replace(tmp, _file(tk))

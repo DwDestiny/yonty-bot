@@ -295,6 +295,26 @@ class HandbackEndTest(unittest.TestCase):
         self.assertTrue(t.thing_busy(t.load(q['id'])), '在跑的照旧挡')
 
 
+
+class DeliveryPersistTest(unittest.TestCase):
+    """第 9 项：发给主控、项目经理的投递，会话那一轮处理完才标“已送”；交给会话后服务重启，下一拍重新送。"""
+
+    def test_restart_before_turn_redelivers(self):
+        e = Inst(self); t = e.task()
+        r = e.cli('send', '--to', '主控', '--kind', '留言', '--text', 'PERSIST-重启前的投递', FCB_TASK_ID=t['id'], FCB_OWNER=1)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        tk, dl = e.t._me(), e.t.dl
+        e.b.enqueue = lambda key, ev: None   # 交给会话的内存队列后进程就没了
+        e.b.delivery_tick()
+        rec = [x for x in dl.load(tk) if 'PERSIST' in x['text']][0]
+        self.assertEqual(rec['status'], 'handing', '没处理完不能标已送')
+        e.start()   # 服务重启：内存里的队列和在途记录都没了
+        st = dl.limits(tk); st['merge'] = {}; dl.limits_save(tk, st)   # 去掉合并等待，直接看下一拍
+        e.b.delivery_tick(); e.drain()
+        self.assertTrue([k for k, ev in e.enq if 'PERSIST' in ev], '重启后重新交给会话')
+        self.assertEqual(dl.find(tk, rec['id'])['status'], 'sent')
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'
