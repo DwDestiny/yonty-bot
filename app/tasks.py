@@ -920,7 +920,9 @@ def _private_cover(roots, reads, keep_cred=(), skip=()):
             except OSError: continue
             n += 1
             for e in es:
-                q, isdir = e.path, e.is_dir()
+                q = e.path
+                try: isdir = e.is_dir()
+                except OSError: isdir = False   # 指向自己的软链接之类
                 if isdir:
                     if e.is_symlink() or q in skip: continue
                     if any(x.search(q) or x.search(q + "/") for x in rx): add(q)

@@ -46,6 +46,7 @@ class PrivateCoverTest(Box):
 
     def test_skipped_dirs_are_searched(self):
         r = self.e.repo
+        (r / 'loop').symlink_to('loop'); (r / 'up').symlink_to('..')   # 绕圈的软链接不让遍历出错
         self.put(r, 'node_modules/x/zz-private/k', '.venv/zz-private/k', 'src/__pycache__/zz-private/k', '.git/zz-private/k', 'node_modules/x/ok')
         self.assertEqual(self.see(r), ['node_modules/x/ok'])
 
