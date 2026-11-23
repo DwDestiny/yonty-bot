@@ -322,16 +322,20 @@ def stale(l, now):
     return t.get("status") == "waiting" and now - l.get("last", 0) > cap
 
 
-def check(cmd, env=None, now=None):
-    """返回 (0, "") 放行，或 (2, 理由)。"""
+CMD_MAX, SCAN_S = 64 * 1024, 10   # 命令最长多少字符、最多查多少秒：查不完就拦，不拖到钩子超时被放行
+
+def check(cmd, env=None, now=None, scanned=lambda: None):
+    """返回 (0, "") 放行，或 (2, 理由)。scanned：看完命令文字、开始取租约之前调一次（钩子用它停掉计时）。"""
     env = os.environ if env is None else env
     cfg = config()
     devs = cfg.get("devices") or []
+    if devs and len(cmd or "") > CMD_MAX:
+        return 2, f"命令太长（{len(cmd)} 个字符，上限 {CMD_MAX}），设备钩子查不过来，按拦处理。写文件用 Write，命令拆短了再跑。"
     hits = calls(cmd or "", devs)
     if devs and REDLINE.search(cmd or "") and any(INDIRECT.match(s) for s in expand(cmd or "")):
         return 2, ("红线：命令里有 claude，又用变量或命令替换间接调用别的命令，分不清是不是在设备上跑，按红线拦下。"
                    "要用设备就直接写设备命令，被拦了不要绕路。")
-    if not hits: return 0, ""
+    if not hits: scanned(); return 0, ""
     loose = bool(re.search(r"(?<!\|)\|(?!\|)|<<|[<>]\(", cmd))   # 管道、heredoc 喂进去的文字也可能在设备上跑
     for d, s, direct in hits:
         texts, dyn = unknown(s, cmd)
@@ -344,6 +348,7 @@ def check(cmd, env=None, now=None):
         if dyn:
             return 2, (f"红线：设备命令里有算不出结果的变量或命令替换（{d['name']}），分不清最终在设备上跑的是什么。"
                        "把值直接写出来，或在同一条命令里用 X=值 赋好再用，被拦了不要绕路。")
+    scanned()
     holder, label, chat, allow, err = who(env)
     if err: return 2, err
     now = now or time.time()
