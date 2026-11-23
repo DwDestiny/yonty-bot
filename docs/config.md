@@ -18,6 +18,7 @@
 | `tasks.wait_block_min` | `60` | 等回复的任务最多挡同一件事的排队多少分钟；过了让排队的先跑，提醒主控一次 |
 | `tasks.identity_fallback` | `"auto"` | 命令行认不出调用方时按环境变量兜底（兜底的不带主人身份）。`auto`：没有 systemd 的机器才开。测试实例写 `true`。见 boundary.md |
 | `tasks.walk_max` | `200000` | 沙箱放回的每个目录最多看多少个文件和目录找私密路径，看不全就不放回或按失败交回。见 boundary.md |
+| `tasks.outbox_batch_s` | `3` | 发件箱每个任务一拍最多办多少秒，没办完的下一拍接着 |
 | `tasks.outbox_wait_s` | `60` | 沙箱里的命令等服务回执多少秒，等不到不算办成 |
 | `tasks.sandbox_read` / `tasks.sandbox_write` | `[]` | 定时运行的沙箱里额外只读放回、可写挂载的目录（家目录里的 MCP 服务器、构建缓存之类）。见 boundary.md |
 | `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活时主控能挑的模型别名；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
