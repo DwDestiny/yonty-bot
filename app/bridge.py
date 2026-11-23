@@ -420,14 +420,54 @@ def service_run(line):
     except SystemExit as e: return f"没办成：{e.code if isinstance(e.code, str) else '参数不对'}"
     except Exception as e: return f"没办成：{e or type(e).__name__}"
 
+SVC_FILE, SVC_LOCK = os.path.join(ROOT, "state", "service_acts.json"), threading.Lock()
+
+def service_once(line, sess, turn, used):
+    """[服务命令] act 只执行一次：键是这一轮的幂等键加命令加第几次。同一轮重跑（投递重送、服务重启）拿上次的结果；
+    上次执行了、但接着跑没成（超时、报错），同一个会话半小时内再写同一条，也拿上次的结果，交代过以后再写才算新的一次。
+    先记“开始”再执行：执行到一半服务停了，不知道成没成，不重跑。used 收这一轮用到的键。"""
+    if line.partition(" ")[0] != "act": return service_run(line)
+    try: norm = shlex.join(shlex.split(line))
+    except ValueError: return service_run(line)
+    with SVC_LOCK:
+        st, now = load(SVC_FILE, {}), time.time()
+        k = f"{turn}|{len([1 for u in used if u.endswith('|' + norm)])}|{norm}"
+        left = [x for x, v in st.items() if v["sess"] == sess and v["line"] == norm and v["turn"] != turn and not v.get("told")
+                and now - v["ts"] < 1800 and x not in used.values()]
+        old = k if k in st else left[0] if left else None
+        used[k] = old or k
+        if not old:
+            st = dict(sorted(((x, v) for x, v in st.items() if now - v["ts"] < 7 * 86400), key=lambda x: x[1]["ts"])[-500:])
+            st[k] = {"ts": now, "sess": sess, "turn": turn, "line": norm, "res": None}
+            save(SVC_FILE, st)
+    if old:
+        tasks.decide("服务命令去重", session=sess, text=norm[:300], why="已经执行过，没有重跑")
+        if st[old]["res"] is None: return "上次执行到一半服务停了，不知道成没成，没有重跑。先核实，确实要再跑就重新说一次。"
+        return f"（已经执行过，没有重跑，这是上次的结果）\n{st[old]['res']}"
+    res = service_run(line)
+    with SVC_LOCK:
+        st = load(SVC_FILE, {})
+        if k in st: st[k]["res"] = res; save(SVC_FILE, st)
+    return res
+
+def service_told(used):
+    """结果交代给会话了。"""
+    if not used: return
+    with SVC_LOCK:
+        st = load(SVC_FILE, {})
+        for x in used.values():
+            if x in st: st[x]["told"] = True
+        save(SVC_FILE, st)
+
 def service_marks(text):
     """(去掉 [服务命令] 行的文字, [命令])。"""
     return SVC_LINE.sub("", text or "").strip() if SVC_LINE.search(text or "") else text, SVC_LINE.findall(text or "")
 
-def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
+def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0, idem=None):
     """跑一轮聊天会话，返回最后一个结果。这一轮中途的结果（起了后台任务时）交给 on_extra。
-    回复里的 [服务命令] 只在主人私聊那一轮生效：服务执行，结果接着喂给同一个会话（最多两次），几段回复合在一起返回。"""
-    svc, out = [], on_extra
+    回复里的 [服务命令] 只在主人私聊那一轮生效：服务执行，结果接着喂给同一个会话（最多两次），几段回复合在一起返回。
+    idem：这一轮的幂等键（消息、投递、任务回报），同一轮重跑时 [服务命令] act 不执行第二次。"""
+    svc, out, turn, used = [], on_extra, idem or uuid.uuid4().hex, {}
     def extra(x):
         x, c = service_marks(x); svc.extend(c)
         if out and x.strip(): out(x)
@@ -441,12 +481,18 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
             why = "只在主人私聊里由主控用" if i < 2 else "一轮最多接着跑两次"
             tasks.decide("服务命令没执行", session=key, why=why, text="；".join(todo)[:300])
             return "\n\n".join(x for x in parts + [head, f"（服务命令没执行：{why}。）"] if (x or "").strip())
-        res = "\n\n".join(f"$ {x}\n{service_run(x)}" for x in todo)
+        res = "\n\n".join(f"$ {x}\n{service_once(x, key, turn, used)}" for x in todo)
         tasks.decide("服务命令", session=key, text="；".join(todo)[:300])
         parts.append(head)
-        text = run_claude_once(key, s, f"[服务命令结果]\n{res}\n\n（接着回。前面写过的话已经留着，会跟这一段拼在一起发出去，别重复。）",
-                               owner, private, chat_id, True, extra if on_extra else None, layer, hop)
+        try:
+            text = run_claude_once(key, s, f"[服务命令结果]\n{res}\n\n（接着回。前面写过的话已经留着，会跟这一段拼在一起发出去，别重复。）",
+                                   owner, private, chat_id, True, extra if on_extra else None, layer, hop)
+        except Exception as e:
+            log.exception("service command follow-up failed"); text = None
+            if isinstance(e, subprocess.TimeoutExpired):
+                with lock: sessions.pop(key, None); save(SESS_FILE, sessions)
         if text is None: return "\n\n".join(x for x in parts + [res] if (x or "").strip())   # 接着跑没成：结果原样给人，不丢
+        service_told(used)
 
 def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
     with lock: sid, started = s["id"], s["started"]
@@ -558,7 +604,7 @@ def handle(ev):
                 if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
                 with lock: s["pm_intro"] = True
             result = run_claude(key, s, prompt, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
-                                on_extra=lambda x: deliver(ev, key, x, in_thread, sent), **({"layer": pm} if pm else {}))
+                                on_extra=lambda x: deliver(ev, key, x, in_thread, sent), idem=ev.get("message_id"), **({"layer": pm} if pm else {}))
             if pm and (result or "").strip().startswith("[不是我的]"):   # 项目经理退回：主控重新判断这条消息
                 sticky.pop(session_key(ev), None)
                 enqueue(session_key(ev), dict(ev, pm=None, no_route=True)); result = ""
@@ -1183,27 +1229,42 @@ def can_answer(ev, rec):
     t = tasks.load(rec["from"]["task"]) if rec.get("from", {}).get("task") else None
     return bool(t and t["requester"].get("id") and t["requester"].get("id") == ev.get("sender_id"))
 
+def own_private(ev, key):
+    """这条消息是主人在自己的私聊里发的，而且会话键就是这个私聊的会话（或它的项目经理）。p2p:<主人 open_id> 是服务替主人飞书私聊用的键。"""
+    if not is_owner(ev) or ev.get("chat_type") != "p2p": return False
+    return base_key(key) in {session_key(ev)} | ({"p2p:" + OWNER_OPEN_ID} if ev.get("channel") != "wecom" else set())
+
 def answer(ev, rid):
-    """人对某条投递的回复：原样进发送方任务的收件箱（不经主控，不花 token）；发送方是会话的，排进那个会话。"""
+    """人对某条投递的回复：原样进发送方任务的收件箱（不经主控，不花 token）；发送方是会话的，排进那个会话。记下了才标已回。"""
     tk = tasks._me()
     cur = tasks.dl.find(tk, rid)
     if not cur or not can_answer(ev, cur): return
     who, text, fr = sender_name(ev.get("sender_id", "")), plain(ev), cur["from"]
-    if not fr.get("task"):   # 会话发的请求：这次答复新建一条投递（bridge 签名，主人身份来自这条 IM），落盘了才把原请求标成已回；出错照投递的规矩重送
-        me = {"type": "im", "ref": f"答复:{tasks.dl.head(cur)}:{ev.get('message_id')}", "label": who, "key": fr.get("key") or session_key(ev), "owner": is_owner(ev), "hop": 0}
+    idem = f"im-{ev['message_id']}" if ev.get("message_id") else None
+    if not fr.get("task"):   # 会话发的请求：这次答复新建一条投递（bridge 签名），落盘了才把原请求标成已回；出错照投递的规矩重送
+        # 主人身份只给一种：请求是主人自己的私聊会话发的（bridge 写的，签名对得上），又在同一个私聊里答复。别的会话只收答复文字
+        me = {"type": "im", "ref": f"答复:{tasks.dl.head(cur)}:{ev.get('message_id')}", "label": who, "key": fr.get("key") or session_key(ev),
+              "owner": tasks.dl.signed(cur) and own_private(ev, fr.get("key")), "hop": 0}
         im = {k: ev[k] for k in ("channel", "chat_id", "chat_type", "message_id", "sender_id", "thread_id", "root_id") if ev.get(k)}
-        tasks.dl.submit(tk, me, f"项目经理 {fr['project']}" if fr.get("type") == "pm" else "主控", "留言",
-                        f"{who} 回复了你的 {tasks.dl.head(cur)}：{text}", None, False, {"im": im, "auto": True, "idem": f"im-{ev.get('message_id') or time.time()}"})
+        try:
+            tasks.dl.submit(tk, me, f"项目经理 {fr['project']}" if fr.get("type") == "pm" else "主控", "留言",
+                            f"{who} 回复了你的 {tasks.dl.head(cur)}：{text}", None, False, {"im": im, "auto": True, "idem": idem or f"im-{time.time()}"})
+        except Exception:
+            log.exception("answer to delivery %s not recorded", rid)
+            reply(ev, "这句没记下来，你再回一次。", in_topic(ev)); return
         tasks.dl.answered(tk, rid)
         reply(ev, "转过去了。", in_topic(ev)); return
-    rec = tasks.dl.answered(tk, rid)
-    if not rec: return
-    if fr.get("task"):
-        t = tasks.load(fr["task"])
-        n = tasks.inbox_add(t["id"], who, is_owner(ev), f"回复 {tasks.dl.head(rec)}：{text}")
-        tasks.update(t["id"], _touch=False, hop=0)   # 人回话了，这条链重新数
-        if t["status"] == "waiting": tasks.update(t["id"], status="approved")
-        reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
+    t = tasks.load(fr["task"])
+    try:   # 先写收件箱，写成了再标已回；同一条消息再来一次不重复写
+        n = next((x["n"] for x in tasks.inbox_items(t["id"]) if idem and x.get("idem") == idem), None)
+        if n is None: n = tasks.inbox_add(t["id"], who, is_owner(ev), f"回复 {tasks.dl.head(cur)}：{text}", idem=idem)
+    except Exception:
+        log.exception("answer to delivery %s not in inbox", rid)
+        reply(ev, "这句没记下来，你再回一次。", in_topic(ev)); return
+    tasks.update(t["id"], _touch=False, hop=0)   # 人回话了，这条链重新数
+    if t["status"] == "waiting": tasks.update(t["id"], status="approved")
+    tasks.dl.answered(tk, rid)
+    reply(ev, f"交给 {tasks.ref(t)} 了（i{n}）。", in_topic(ev))
 
 def pm_intro(project):
     r = tasks.roles().get("项目经理") or {}
@@ -1280,27 +1341,42 @@ def _delivery_turn(ev):
     t = tasks.load(tid) if tid else None
     # 身份按投递记录定，不按这个会话上一个说话的人：群里同事的任务回报不能带着主人的权限跑
     o_owner, bk = all(tasks.dl.vouched_owner(r) for r in batch), base_key(key)   # 主人身份只认 bridge 自己写的记录（签名），不信记录里的字
-    o_priv, chat_id = o_owner and bk.startswith("p2p:"), (t["origin"].get("chat_id", "") if t else bk.split(":", 1)[-1])
+    im = rec.get("im")
+    if any(r.get("im") for r in batch): o_owner = bool(o_owner and im and len(batch) == 1 and own_private(im, key))   # 人答复叫起来的：只有主人自己私聊会话的请求、在同一个私聊里答复的
+    o_priv, chat_id = o_owner and (bool(im) or bk.startswith("p2p:")), im["chat_id"] if im and o_owner else (t["origin"].get("chat_id", "") if t else bk.split(":", 1)[-1])
     hop = max(r.get("hop") or 0 for r in batch)
     prompt = (pm_intro(pm) if pm and not s["started"] else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
         for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
         + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
-           if fr.get("task") else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）")
+           if fr.get("task") else f"\n（你的回复会发给{fr.get('label')}；还要问主人就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
+           if im else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）")
     with sem:
-        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop)
+        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
     if result is None: return False   # 这一轮没成：调用方退回重送
-    idem, im = f"dl{rec['id']}-{int(rec['ts'])}", rec.get("im")
+    idem = f"dl{rec['id']}-{int(rec['ts'])}"
     if pm: result = pm_marks(pm, key, o_owner, result, hop, tid, idem)
     if im and not t and len(batch) == 1 and result.strip() and result.strip() != AMB_SILENT:   # 人答复请求叫起来的那一轮：回在人答复的那个聊天里
-        ev2 = dict(im, idem=idem, hop=hop, **({} if tasks.dl.signed(rec) else {"sender_id": ""}))   # 签名对不上（服务重启过）：不知道是谁答的，只当没身份的人
-        deliver(ev2, key, (f"【{pm}】" if pm else "") + result, in_topic(ev2), [1])
+        if session_key(im) == bk or (tasks.dl.signed(rec) and im.get("chat_type") == "p2p"):   # 本会话自己的聊天，或者主人的私聊
+            ev2 = dict(im, idem=idem, hop=hop, **({} if o_owner else {"sender_id": ""}))   # 不带主人身份的那一轮：里面的 [派活]、[任务指令] 也不算主人的
+            deliver(ev2, key, (f"【{pm}】" if pm else "") + result, in_topic(ev2), [1])
+        else:   # 在群里答复了别的会话的请求：那个会话的话不发进群，改发主人私聊；里面的派活、指令不执行
+            said = talk_only(result)
+            owner_dm(im.get("channel", "feishu"), f"【{pm or '主控'} 对你答复的回应】\n{said}"
+                     + ("\n（里面的派活、任务指令没执行：不是在它自己的私聊里答复的。）" if said != result.strip() else ""))
     if t and result.strip() and result.strip() != AMB_SILENT:
         try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dl{rec['id']}")
 
+def talk_only(result):
+    """去掉 [派活]、[任务指令]、[转交]、[定时]，只留说的话。"""
+    head = tasks.parse_directive(sch.parse_block(result)[0])[0]
+    head = "\n".join(b for s, b in split_taskcmds(head) if s is None)
+    return re.sub(r"^\s*\[转交\].*$", "", head, flags=re.M).strip()
+
 def reply_target(fr):
+    if fr.get("type") == "im": return "主人"   # 人答复的：发件人不是智能体，回话直接写在回复里，要再问就找主人
     return {"pm": f"项目经理 {fr.get('project')}", "ctrl": "主控"}.get(fr.get("type"), fr.get("ref"))
 
 def turn_directives(t, result, hop, who, idem=None, cli=False):
@@ -1324,17 +1400,32 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
             text = task_directive(dict(rev, idem=idem) if idem else rev, text)
     return text
 
+OUTBOX_BUSY = threading.Lock()
+
+def outbox_tick():
+    """定时运行在沙箱里写进发件箱的请求，按范围校验后在箱外执行。放在单独线程里分批办，每个任务一拍最多办 tasks.outbox_batch_s 秒，
+    没办完的下一拍接着（不丢，箱里等到回执才算数）；投递、放行最多等它 1 秒。"""
+    if not OUTBOX_BUSY.acquire(blocking=False): return
+    def go():
+        try:
+            for t in tasks.all_tasks():
+                if not t.get("schedule"): continue
+                try: tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start(), budget=float(tasks.T.get("outbox_batch_s", 3)))
+                except Exception: log.exception("outbox of task #%s failed", t["id"])
+        finally: OUTBOX_BUSY.release()
+    th = threading.Thread(target=go, daemon=True); th.start()
+    th.join(1)
+
 def delivery_tick():
     """把新投递送出去（方案 7.5 防刷屏）：主人、派活人、聊天发到来源聊天（带编号），主控、项目经理排进会话队列。
     同一发送方发给同一目标的，离上一次送不到 2 分钟就等着，到点合成一条（要回复的找主人请求不合并）；
     进展按任务限频；落到主人私聊的每 10 分钟最多 4 条、每小时最多 12 条，超出的不用回复的进摘要，要回复的接着排队。"""
     tk, dl, now = tasks._me(), tasks.dl, time.time()
     c = dl.conf(CFG)
-    for t in tasks.all_tasks():   # 定时运行在沙箱里写进发件箱的请求，按范围校验后在箱外执行；runner 从输出里解析出的 [投递]，按任务记录的身份投
-        try:
-            if t.get("schedule"): tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start())
-            tasks.marks_drain(t["id"])
-        except Exception: log.exception("outbox of task #%s failed", t["id"])
+    outbox_tick()
+    for t in tasks.all_tasks():   # runner 从输出里解析出的 [投递]，按任务记录的身份投
+        try: tasks.marks_drain(t["id"])
+        except Exception: log.exception("marks of task #%s failed", t["id"])
     for tid, text in dl.progress_due(tk, now):   # 进展留着的那条到点了
         t = tasks.load(tid)
         if t:
@@ -1565,7 +1656,7 @@ def task_relay(ev):
                 s = get_session(key)
                 briefed = n in (s.get("briefed") or [])
                 result = run_claude(key, s, relay_prompt(t, e, briefed), owner, owner and t["origin"]["chat_type"] == "p2p",
-                                    t["origin"]["chat_id"], quiet=True, on_extra=more)
+                                    t["origin"]["chat_id"], quiet=True, on_extra=more, idem=f"t{n}e{idx}")
         except Exception:
             log.exception("task #%s relay claude failed", n)
         log.info("task #%s relay %s -> %s", n, e["kind"], "raw" if result is None else "orchestrated")
