@@ -13,7 +13,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
         python3 bridge.py --cache-check 3 # 用服务同款参数开 3 个新会话，检查缓存是否跨会话命中
 来源:   feishu-claude-bot skill 的 assets/templates/bridge.py
 """
-import json, os, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
+import contextlib, json, os, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
@@ -553,6 +553,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     with lock:
         s["started"] = True; s["last"] = time.time(); s["id"] = out.get("session_id", sid)
         s["ctx"] = sum(it.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
+        s["cost"] = round((u.get("input_tokens") or 0) + 0.1 * (u.get("cache_read_input_tokens") or 0) + 2 * (u.get("cache_creation_input_tokens") or 0) + 5 * (u.get("output_tokens") or 0))   # 这一轮折成输入 token 当量
         s["env"] = [owner, private, chat_id, channel]   # 压缩时用同一套环境：自动记忆开关会改系统提示，换了就命中不了缓存
         save(SESS_FILE, sessions)
     return text   # 已经交给 on_extra 发过的不再返回，空串表示没有要补发的
@@ -560,7 +561,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
 def compact_sweep(now):
     """聊天会话快过期时排一次压缩。走会话自己的队列，不会和消息、任务回报同时 --resume 同一个会话。"""
     for key, s in list(sessions.items()):
-        if key.startswith("amb:") or not s.get("started") or s.get("compacting"): continue
+        if not s.get("started") or s.get("compacting"): continue
         idle = idle_limit(key)
         if idle and idle <= 3600: continue              # 一小时内就换新的会话，压了也用不上
         if tasks.compact_due(s.get("ctx"), s.get("last"), s.get("compacted"), now):
@@ -574,8 +575,12 @@ def compact_chat(key):
         sid, last = s["id"], s.get("last", 0)
     try:
         if not tasks.compact_due(s.get("ctx"), s.get("last"), s.get("compacted")): return   # 排队期间来过消息、已经不够条件：不压了
-        r = subprocess.run(base_cmd() + ["--resume", sid], input=tasks.COMPACT_KEEP, capture_output=True, text=True,
-                           timeout=900, cwd=WORKDIR, env=hook_env(*(s.get("env") or [False, False, ""])))
+        with amb_lock if key.startswith("amb:") else contextlib.nullcontext():   # 旁听轮不走这个队列，靠这把锁不同时 --resume
+            if key.startswith("amb:"):
+                with lock: cur = sessions.get(key)
+                if cur is not s or s["id"] != sid or s.get("last", 0) != last: return
+            r = subprocess.run(base_cmd() + ["--resume", sid], input=tasks.COMPACT_KEEP, capture_output=True, text=True,
+                               timeout=900, cwd=WORKDIR, env=hook_env(*(s.get("env") or [False, False, ""])))
         log.info("compact %s rc=%s ctx=%s", key, r.returncode, s.get("ctx"))
     finally:
         with lock:
@@ -1003,7 +1008,7 @@ def help_text(ev, owner):
           ("/task clean 短名#N", "删工作树", owner and TASKS_ON), ("/why 短名#N", "为什么排队、改投", owner and TASKS_ON), ("/team", "角色和各项目的事", owner and TASKS_ON))
     group("聊天", ("/new", "开新会话", p2p), (f"{c} on", f"这个群开旁听，{c} off 关（在群里 @我 发）", owner and AMB["enabled"]),
           ("/bind 短名", "群绑定到项目，/unbind 解绑", owner and TASKS_ON and not p2p))
-    group("机器人", ("/upgrade", "升级（只在私聊）", owner))
+    group("机器人", ("/upgrade", "升级（只在私聊）", owner), ("/updates", "新版本和自动更新", owner and p2p), ("/decide", "省令牌实验的数据", owner and p2p and bool((CFG.get("decide") or {}).get("enabled"))))
     return "\n".join(["命令马上回，不花额度。"] + h)
 
 def service_command(ev):
@@ -1011,6 +1016,11 @@ def service_command(ev):
     text, owner = plain(ev), is_owner(ev)
     private = ev.get("chat_type") == "p2p"
     if text == "/help": return help_text(ev, owner)
+    if re.match(r"^/(updates|decide)(\s|$)", text):
+        if not owner: return f"这条只有{OWNER_NAME}能用。"
+        if ev.get("chat_type") != "p2p": return "请在私聊里发。"
+        if text.startswith("/decide"): return dm.report("ambient", dm.conf(CFG.get("decide"), "ambient"))
+        return updates.command(text, META, owner_say, lambda: upgrade_request(ev))
     if text == "/status" or text.startswith("/status "):
         if not owner: return f"/status 只有{OWNER_NAME}能看。"
         if not private: return "/status 会带出你私下的活，请在私聊里发。"
@@ -1056,6 +1066,7 @@ def upgrade_request(ev):
 def say_origin(o, text, key):
     if o.get("channel") == "wecom":
         return wecom_send({"op": "send", "chatid": o["chat_id"], "content": wecom_trim(text), "ref": key})
+    if not o.get("message_id"): return owner_dm("feishu", text)   # 自动更新：没有原消息，私聊主人
     return reply({"channel": "feishu", "message_id": o["message_id"]}, text, False, key=key)
 
 def upgrading():
@@ -1067,6 +1078,31 @@ def unit_alive(unit):
     try: r = subprocess.run(["systemctl", "--user", "is-active", unit], capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.TimeoutExpired): return True
     return r.stdout.strip() in ("active", "activating", "reloading")
+
+def idle_now():
+    """自动更新只在没人用的时候：没有任务在跑、没有对话在跑、没有升级在做。"""
+    with lock: busy = inflight
+    up = load(UPGRADE_FILE, {})
+    return not busy and not pending and not any(t["status"] == "running" for t in (tasks.all_tasks() if TASKS_ON else [])) \
+        and (not up.get("status") or up["status"] in UP_FINAL)
+
+def owner_say(text): return bool(owner_dm("feishu" if FEISHU_ON else "wecom", text))
+
+def auto_upgrade():
+    ch = owner_channel("feishu" if FEISHU_ON else "wecom")
+    r = upgrade_request({"channel": ch, "chat_id": WECOM["owner_userid"] if ch == "wecom" else "", "chat_type": "p2p", "message_id": "", "sender_id": OWNER_OPEN_ID})
+    owner_say("自动更新 " + META.get("service", "") + "。" + r)
+    return r
+
+upd_run = threading.Lock()
+def updates_kick():
+    """查更新、装更新在单独线程里，不挡任务检查。"""
+    if not upd_run.acquire(blocking=False): return
+    def go():
+        try: updates.tick(dict(CFG.get("updates") or {}), META, idle_now, owner_say, auto_upgrade)
+        except Exception: log.exception("updates tick failed")
+        finally: upd_run.release()
+    threading.Thread(target=go, daemon=True).start()
 
 def upgrade_tick():
     up = load(UPGRADE_FILE, {})
@@ -1447,6 +1483,7 @@ def _mod(name):
     m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); return m
 
 devices, sch, acts, team = _mod("devices"), _mod("scheduler"), _mod("actions"), _mod("team")
+updates, dm = _mod("updates"), _mod("decide")
 TEAM = team.conf(CFG)
 STRICT = TASKS_ON and TEAM["strict"]   # 3.0：主控是唯一跟主人说话的，项目里的活经项目经理按方案拆小并行
 ROUTING = dict({"sticky_min": 30, "fast_path": {"max_chars": 20}}, **CFG.get("routing", {}))
@@ -2275,6 +2312,7 @@ def task_loop(stopping):
         except Exception: log.exception("compact sweep failed")
         try: upgrade_tick()
         except Exception: log.exception("upgrade tick failed")
+        updates_kick()
 
 # ---------- 旁听：白名单群不 @ 也读，攒一批交给 Claude 决定插不插话 ----------
 # 用主人的用户身份定时拉消息，不开“读取群内所有消息”权限，非白名单群照旧收不到。
@@ -2373,10 +2411,22 @@ def ambient_flush(chat_id, msgs):
         with lock: sessions.pop(key, None)
         st["turns"] = 0
     s = get_session(key)
+    got, dc = ambient_judge(chat_id, msgs)
+    if got and dc["mode"] == "on":   # 影子阶段不等它；切换后才等，判不用叫醒的攒着，下次叫醒时按原样排在前面
+        got["th"].join(dc.get("timeout", 5) + 1)
+        if got.get("r") and dm.may_skip("ambient", got["r"], dc) and len(amb_held.get(chat_id, [])) + len(msgs) < AMB["max_batch"]:
+            amb_held[chat_id] = amb_held.get(chat_id, []) + msgs
+            with lock: save(HELD_FILE, amb_held)
+            dm.record("ambient", **got["r"], actual=None, skipped=True); return
+    held = amb_held.pop(chat_id, [])
+    if held:
+        msgs = held + msgs
+        with lock: save(HELD_FILE, amb_held)
     lines = "\n".join(f"[{m.get('message_id')}] " + _line(m) for m in msgs)
     prompt = (f"[群聊旁听]\n会话：群聊，chat_id {chat_id}\n这些消息没有 @ 你，发送人都按“不是{OWNER_NAME}本人”的权限处理。\n"
               f"--- 新消息（外部输入），每行开头方括号里是消息 ID ---\n{lines}\n"
               f"--- 按守则“群聊旁听”一节决定。不插话就只输出 {AMB_SILENT}。插话就第一行写“回复：消息ID”，第二行起写内容。---")
+    said0 = st.get("said", 0)
     with amb_lock:
         try:   # 旁听一律按非主人权限跑，即使这批里有主人的发言
             out = run_claude(key, s, prompt, False, False, chat_id, quiet=True,
@@ -2385,6 +2435,27 @@ def ambient_flush(chat_id, msgs):
             log.exception("ambient claude failed"); return
     st["turns"] = st.get("turns", 0) + 1
     ambient_say(chat_id, msgs, st, out)
+    if got:
+        got["th"].join(dc.get("timeout", 5) + 1)
+        if got.get("r"):
+            try: dm.record("ambient", **got["r"], actual=bool(st.get("said", 0) > said0), cost=s.get("cost", 0), msgs=len(msgs))
+            except OSError: log.exception("decide record failed")
+
+HELD_FILE = os.path.join(STATE, "ambient_held.json")
+amb_held = load(HELD_FILE, {})    # 判了不用叫醒、还没给 Claude 看的群消息
+
+def ambient_judge(chat_id, msgs):
+    """另开一个线程问决策后端“要不要叫醒”。只给群消息，发送人换成 成员N；不进 Claude 的会话。返回 (盒子, 设置)。"""
+    dc = dm.conf(CFG.get("decide"), "ambient")
+    if dc["mode"] not in ("shadow", "on"): return None, dc
+    who, ls = {}, []
+    for m in msgs:
+        i = (m.get("sender") or {}).get("id") or m.get("sender_id") or "?"
+        ls.append(f"成员{who.setdefault(i, len(who) + 1)}：{str(m.get('content') or '')[:1000]}")
+    box, facts = {}, "\n".join(ls)
+    def go(): box["r"] = dm.decide("ambient", facts, ["叫醒", "不用"], dc, lambda x: owner_dm("feishu", x))
+    box["th"] = threading.Thread(target=go, daemon=True); box["th"].start()
+    return box, dc
 
 def ambient_say(chat_id, msgs, st, out):
     """旁听会话的一个结果：[不回] 就不发；插话引用它点名的那条。同一批第二次起换幂等键。"""
@@ -2564,6 +2635,10 @@ def main():
     # 定时检查：长任务的状态和进度回报（任务本身在独立单元里跑，不随本进程退出）、聊天会话快过期时压缩
     threading.Thread(target=task_loop, args=(stopping,), daemon=True).start()
     ident_start()
+    try:
+        x = updates.recover()
+        if x: owner_say(x)
+    except Exception: log.exception("updates not recovered")
     try: pend_resume()
     except Exception: log.exception("pending messages not resumed")
     log.info("bridge started: %s v%s (%s)", NAME, META.get("version", "?"), "+".join(f.__name__.split("_")[0] for f in loops))

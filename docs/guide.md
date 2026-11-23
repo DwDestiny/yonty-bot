@@ -146,6 +146,13 @@
 
 ## 变更记录
 
+- 3.2.0（2026-11-23）自动更新和决策点：
+  - 每天查一次 yonty-bot、Claude Code、lark-cli、wecom-cli、mcporter、企微网关依赖、gh。补丁版在没有任务和对话时自动装，装完汇报，验不过退回，失败的版本不再自动试。小版本、大版本、Claude Code、有人工步骤的先问，一版只问一次。
+  - /updates 看和控制：check、on、off、pin 名字、unpin 名字、up 名字。只认主人私聊。
+  - Claude Code 装进 ~/.local/share/yonty-bot/claude/<版本>，跑完整测试和 --cache-check 都过才给机器人换，终端里的不动；会话带 DISABLE_AUTOUPDATER=1。第一次检查时把现用的原版本装一份，以后终端自动升级不带着机器人换。手动退回：把 state/updates.json 的 claude_bin 改回 claude_prev，重启服务。
+  - 决策点（decide.py，默认关）：旁听要不要叫醒 Claude，先影子记录，Claude 的输入不变。/decide 看样本、阈值、漏判、净省。满 200 条后把 points.ambient 改成 on 才真跳过，留 5% 照常叫醒；跳过的消息下次叫醒时排在前面。
+  - 缓存到期前压缩包括旁听会话；门槛按价格算，约 8.9 万。
+
 - 3.1.0（2026-11-23）消息改版和热更新：
   - 命令回复和通知：第一行是结论，一行一件事，手机上不用左右滑。/status 看要你处理的、在干的、额度，日志原文在 /status log。/task 只写进度和要不要人管，分支、验证命令、收件箱、终端接手在 /task info 短名#N。
   - 升级不等任务：代码放在 releases/<序号>-<提交>/，current 指向当前版本，实例里的 bridge.py、hooks 等是指向 current/… 的软链。换版本只换 current。在跑的任务用开工时读进内存的代码跑完这一轮；钩子每次现读，安全修复立即生效。

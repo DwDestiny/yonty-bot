@@ -46,7 +46,7 @@ if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
 
 # 1. 代码和钩子：整份放进 releases/<序号>-<提交>/，current 指向它；实例里的 bridge.py、hooks 等是指向 current/… 的软链。
 #    换版本只换 current 一个链接，一步到位：在跑的任务不会读到半新半旧的文件，路径也不变（提示词、缓存前缀不动）。
-CODE = ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py")
+CODE = ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "updates.py", "decide.py")
 HOOKS = ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
          "device_guard.py", "irreversible_gate.py", "scope_guard.py")
 
@@ -210,7 +210,7 @@ else:
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
-INST_LOCKED = ["releases/**", "current", "current/**", "bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
+INST_LOCKED = ["releases/**", "current", "current/**", "bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "updates.py", "decide.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
                "package.json", "package-lock.json", "node_modules/**", "state/**", "logs/**", "inbox/**", "AGENTS.md", "CLAUDE.md",
                "*.service", "*.plist"]
 deny = [f"Read({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if p.startswith(("~", "/")) and "(" not in p and "\\" not in p]
@@ -218,7 +218,7 @@ deny += [f"Edit({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if 
 deny += ["Read(**/.private/**)", "Edit(**/.private/**)", f"Read({HOME}/.lark-cli/**)", "Read(**/.env)", "Read(**/.env.*)",
          "Bash(lark-cli config:*)", "Bash(lark-cli auth:*)", "Bash(lark-cli profile:*)", "Bash(lark-cli event:*)",
          f"Read({HOME}/.config/wecom/**)", f"Edit({HOME}/.config/wecom/**)", "Bash(wecom-cli auth:*)",
-         f"Read({HOME}/.config/gh/**)", "Bash(gh auth:*)",
+         f"Read({HOME}/.config/gh/**)", f"Read({HOME}/.config/yonty-bot/**)", f"Edit({HOME}/.config/yonty-bot/**)", f"Edit({HOME}/.local/share/yonty-bot/**)", "Bash(gh auth:*)",
          *[f"Edit({INST}/{p})" for p in INST_LOCKED], f"Read({INST}/state/**)", f"Read({INST}/logs/**)", f"Read({INST}/config.json)"]
 SLUG = CFG.get("service_name") or "fcb-" + os.path.basename(INST)
 deny += [f"Bash(systemctl --user stop {SLUG}:*)", f"Bash(launchctl unload:*)"]
