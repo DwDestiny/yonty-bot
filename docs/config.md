@@ -45,6 +45,7 @@
 | `private` | 见 boundary.md | 私密路径和搜索排除 |
 | `credential_paths` | `["~/.config/codeup", "~/.git-credentials"]` | 代码平台凭据。机器人的所有会话（含主人的）都不能直接读，Read 进拒绝表，Bash 由 `git_guard` 拦；建合并请求只能走 `tasks.py mr` |
 | `deny_extra` | `[]` | 额外的权限拒绝规则，格式同 Claude Code settings |
+| `allow_extra` | `[]` | 额外的放行规则，只写进实例的 `claude-settings.json`，不碰用户级配置。auto 模式下命中的命令不再交给自动判断（用于机器人该自己做、却总被自动判断拦的窄操作，例如删草稿 Release）。括号里 `*` 前至少 8 个字符，太宽的规则生成时直接报错；拒绝规则仍然优先。放行对所有会话生效，按人限制靠钩子。规则按字面匹配命令：用 shell 变量或循环拼出来的命令匹配不上，要逐条写全 |
 | `context.enabled` | `true` | 是否带前文 |
 | `context.max` / `topic_max` | 20 / 50 | 群聊或私聊最多几条；话题里最多几条 |
 | `context.group_window_h` / `p2p_window_h` | 2 / 24 | 只取这段时间内的消息 |
