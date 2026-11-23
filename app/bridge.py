@@ -531,6 +531,9 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     if CHAT_MAX_TURNS: cmd += ["--max-turns", str(CHAT_MAX_TURNS)]
     out, text, rc, tail = stream_claude(cmd, prompt, env, on_extra)
     log.info("claude %s rc=%s %.0fs", key, rc, time.time() - t0)
+    if STOPPING.is_set() and (not out or rc):   # 服务在停，Claude 被一起停了：不当成失败、不丢会话，重启后接着做
+        time.sleep(600)   # 等进程退出（线程是守护线程）：不返回，就不会回半截话，也不会被记成处理完
+        raise RuntimeError("服务停了")
     if out and out.get("subtype") == "error_max_turns" and not quiet:
         log.warning("claude %s hit max turns, asking it to hand off", key)
         out, text, rc, tail = stream_claude(base_cmd(stream=True) + ["--max-turns", "4", "--resume", out.get("session_id") or sid],
@@ -620,6 +623,7 @@ def handle(ev):
             pm = ev.get("pm")
             if pm: key = ev["pm_key"]; s = get_session(key)
             prompt = build_prompt(ev, name, ctx, quoted)
+            if ev.get("resumed"): prompt += "\n\n（服务刚重启，你上一轮处理这条消息做到一半断了。接着做完再回，已经做过的动作别重复。）"
             if pm:
                 prompt = (pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "") + prompt
                 if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
@@ -748,9 +752,11 @@ def hold_marks(ev, result):
 def worker(key, q):
     while True:
         ev = q.get()
+        pend_mark(key, ev)
         try: handle(ev)
         except Exception: log.exception("worker error")
         finally:
+            pend_mark(key, ev, True)
             with lock: following.get(key, set()).discard(ev.get("message_id"))
             q.task_done()
 
@@ -791,7 +797,44 @@ def enqueue(key, ev):
             threading.Thread(target=worker, args=(key, q), daemon=True).start()
             workers[key] = q   # 线程起来了才登记：没起来就登记，这个会话再也没人处理
         if ev.get("message_id") and FOLLOW_RE.match(plain(ev)): following.setdefault(key, set()).add(ev["message_id"])
+    pend_put(key, ev)
     q.put(ev)
+
+# 人发的、还没处理完的消息记在盘上：服务重启（升级、崩溃）后接着原会话处理，不丢也不从头来
+PEND_FILE = os.path.join(STATE, "pending.json")
+pending = load(PEND_FILE, {})
+STOPPING = threading.Event()
+
+def pend_id(key, ev): return f"{key}|{ev['message_id']}" if ev.get("message_id") and not any(ev.get(k) for k in ("compact", "deliver", "task", "event", "relay")) else ""
+
+def pend_put(key, ev):
+    i = pend_id(key, ev)
+    if not i: return
+    try: json.dumps(ev)
+    except (TypeError, ValueError): return
+    with lock:
+        if i not in pending: pending[i] = {"key": key, "ev": ev, "at": time.time(), "tries": 0, "started": False}
+        save(PEND_FILE, pending)
+
+def pend_mark(key, ev, done=False):
+    i = pend_id(key, ev)
+    with lock:
+        if i not in pending: return
+        if done: pending.pop(i)
+        else: pending[i]["started"] = True; pending[i]["tries"] += 1
+        save(PEND_FILE, pending)
+
+def pend_resume():
+    """启动时：上次没处理完的重新排队。开了头的带上说明接着原会话做；重来过一次还没成的不再试，告诉发的人。"""
+    for i, p in list(pending.items()):
+        ev = p["ev"]
+        if time.time() - p["at"] > 6 * 3600 or p["tries"] >= 2:
+            with lock: pending.pop(i, None); save(PEND_FILE, pending)
+            if p["tries"] >= 2:
+                try: reply(ev, "这条我处理到一半服务断了两次，没再接着试，请重新发一下。", in_topic(ev))
+                except Exception: log.exception("resume notice failed")
+            continue
+        enqueue(p["key"], dict(ev, resumed=True) if p["started"] else ev)
 
 
 # ---------- 长任务：派活、审批、命令、进度回报（任务存储和后台运行在 tasks.py） ----------
@@ -855,8 +898,53 @@ def can_steer(t, ev):
 
 def mins(t): return int((time.time() - (t.get("started") or t["created"])) / 60)
 
-def task_line(t):
-    return f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])} · {t['title']}（{t['requester']['name']}）"
+def short(s, n=28):
+    s = re.sub(r"\s+", " ", s or "").strip()
+    return s if len(s) <= n else s[:n - 1] + "…"
+
+def age_text(t):
+    m = mins(t) if t.get("started") else 0
+    return f"{m} 分钟" if m < 120 else f"{m // 60} 小时"
+
+def task_line(t, who=False):
+    """列表里的一行：编号、状态、标题，等人的写等什么。"""
+    st = tasks.LABEL.get(t["status"], t["status"]) + (f" {age_text(t)}" if t["status"] == "running" else "")
+    why = f"：{t['wait_why']}" if t["status"] == "approved" and t.get("wait_why") else ""
+    return f"{tasks.ref(t)} {st} · {short(t['title'])}" + why + (f"（{t['requester']['name']}）" if who else "")
+
+def tasks_text(mine):
+    """/tasks：要人处理的在前，再是在干的、排队的，最近完成的一行。"""
+    live = [t for t in mine if t["status"] in tasks.ACTIVE + ("pending",)]
+    need = [t for t in live if t["status"] in ("waiting", "pending") and not t.get("held")]
+    run = [t for t in live if t["status"] == "running"]
+    rest = [t for t in live if t not in need and t not in run]
+    done = sorted((t for t in mine if t not in live), key=lambda t: -(t.get("updated") or 0))[:3]
+    if not live and not done: return "现在没有长任务。"
+    who = len({t["requester"]["name"] for t in live}) > 1
+    out = [f"在干 {len(run)} 个，等人处理 {len(need)} 个" + (f"，排队 {len(rest)} 个" if rest else "") + "。"] if live else ["现在没有在跑的任务。"]
+    for name, ts in (("等人处理", need), ("在干", run), ("排队", rest)):
+        if not ts: continue
+        out.append(f"{name}：")
+        for t in sorted(ts, key=lambda t: (t.get("project") or "", t.get("num") or 0)): out.append("· " + task_line(t, who))
+    if done: out.append("最近结束：" + "、".join(f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])} {short(t['title'], 14)}" for t in done))
+    return "\n".join(out)
+
+def status_text(ev):
+    """/status：额度、在干的活、要主人处理的事、最近有没有问题。日志原文在 /status log。"""
+    act = [t for t in tasks.all_tasks() if t["status"] in tasks.ACTIVE + ("pending",)] if TASKS_ON else []
+    run = [t for t in act if t["status"] == "running"]
+    need = [f"{tasks.ref(t)} {'等你批' if t['status'] == 'pending' else '等回复'}：{short(t['title'])}" for t in act if t["status"] in ("waiting", "pending") and not t.get("held")]
+    try: need += [f"{r['from'].get('ref') or r['from'].get('label')} 问你：{short(r['text'], 40)}" for r in tasks.dl.load(tasks._me())
+                  if r.get("status") == "open" and r.get("need") and r["to"]["to"] == "主人"][:5] if TASKS_ON else []
+    except Exception: log.exception("open requests not listed")
+    out = [f"要你处理 {len(need)} 件：" if need else "没有要你处理的事。"] + ["· " + x for x in need]
+    out.append("在跑的任务：" + (f"{len(run)} 个" if run else "没有")); out += ["· " + task_line(t) for t in run]
+    held = sorted(team.load().get("held") or {})
+    if held: out.append("停工中：" + "、".join(held) + f"，{BT}/resume{BT} 复工")
+    out.append(tasks.quota_text() or "额度：还没有数据（任务跑起来后才有）。")
+    n = tasks.recent_errors(3600)
+    out.append(f"最近一小时服务报错 {n} 条，{BT}/status log{BT} 看原文" if n else "服务正常。")
+    return "\n".join(out)
 
 def ambiguous(s, cands):
     """只写了号、好几个项目都有：列出候选，让对方带上项目名。"""
@@ -870,49 +958,65 @@ def find_task(s, pool):
     if t: return t, None
     return None, (ambiguous(s, cands) if len(cands) > 1 else "没有这个任务。")
 
-def task_detail(t, owner):
-    lines = [f"{tasks.ref(t)} {t['title']} · {tasks.LABEL.get(t['status'], t['status'])}"
-             + (f"（升级前的 {t['legacy']} 号）" if t.get("legacy") else ""),
-             f"仓库 {BT}{t['repo']}{BT}，分支 {BT}{t['branch']}{BT}，{tasks.model_label(t)}"]
-    if t.get("started"):
-        lines.append(f"已经 {mins(t)} 分钟，调用工具 {t.get('tools', 0)} 次")
-        if owner:
-            lines.append(f"已用 {t.get('cost') or 0} 美元当量，检查点 {t.get('budget')}（{t.get('budget_why', '')}）"
-                         + (f"；接着“{t.get('thing') or tasks.MAIN_THING}”负责人上次的会话干" if t.get("forked_from") else ""))
-            if tasks.quota_line(): lines.append(tasks.quota_line() + "（整个订阅，含终端里的会话）")
-        if t.get("verify"): lines.append(f"验证命令：{BT}{t['verify']}{BT}")
+def task_detail(t, owner, full=False):
+    """/task：现在在干什么、多久了、要不要人管。full（/task info）再加仓库、验证命令、收件箱这些。"""
+    n = tasks.ref(t)
+    st = tasks.LABEL.get(t["status"], t["status"])
+    if t["status"] == "approved" and t.get("wait_why"): st += f"（{t['wait_why']}）"
+    lines = [f"{n} {t['title']}", st + (f"，已经 {age_text(t)}" if t.get("started") and t["status"] in tasks.ACTIVE else "")]
+    need = {"pending": f"要{OWNER_NAME}批：{BT}/approve {n}{BT} 或 {BT}/reject {n}{BT}", "waiting": f"等人答：回 {BT}{n} 你的意见{BT}",
+            "failed": f"要接着干就回 {BT}{n} 继续{BT}", "lost": f"要接着干就回 {BT}{n} 继续{BT}"}.get(t["status"])
+    if t.get("held"): need = f"停工中，{BT}/resume {t.get('project')}{BT} 复工"
+    if need: lines.append(need)
+    evs = tasks.events(t["id"])
+    q = [e for e in evs if e["kind"] == "question"]
+    if t["status"] == "waiting" and q: lines.append("问的是：" + q[-1]["text"][:300])
     mark = {"completed": "✔", "in_progress": "▶"}
     todos = t.get("todos") or []
     if todos: lines += ["计划："] + [f"{mark.get(x.get('status'), '·')} {x.get('content', '')}" for x in todos[:12]]
-    prog = [e for e in tasks.events(t["id"]) if e["kind"] == "progress"]
+    prog = [e for e in evs if e["kind"] == "progress"]
     if prog: lines.append("最近进展：" + prog[-1]["text"])
+    if owner and t.get("started"): lines.append(f"花费 {t.get('cost') or 0}，检查点 {t.get('budget')} 美元当量")
+    if not full:
+        return "\n".join(lines + [f"{BT}/task info {n}{BT} 看分支、验证、收件箱"])
+    lines += [f"仓库 {BT}{t['repo']}{BT}", f"分支 {BT}{t['branch']}{BT}", f"{tasks.model_label(t)}，调用工具 {t.get('tools', 0)} 次"]
+    if t.get("legacy"): lines.append(f"升级前的 {t['legacy']} 号")
+    if owner and t.get("budget_why"): lines.append(f"检查点依据：{t['budget_why']}")
+    if owner and t.get("forked_from"): lines.append(f"接着“{t.get('thing') or tasks.MAIN_THING}”负责人上次的会话干")
+    if t.get("verify"): lines.append(f"验证命令：{BT}{t['verify']}{BT}")
     box = tasks.inbox_items(t["id"])[-6:]
     if box: lines += ["收件箱："] + [f"i{x['n']} {x['kind']}（{x['who']}）：{'已取' if x['fetched'] else '没取'}" + (f"，{x['ack']}" if x.get("ack") else "")
                                     for x in box]
-    if t.get("wait_why") and t["status"] == "approved": lines.append("排队原因：" + t["wait_why"])
+    if owner and t["origin"]["chat_type"] == "p2p" and t.get("session_started") and not t.get("clone"):
+        lines.append(f"终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}")
     return "\n".join(lines)
+
+def help_text(ev, owner):
+    p2p, c, h = ev.get("chat_type") == "p2p", AMB["command"], []
+    def group(name, *ls):
+        ls = [f"· {BT}{a}{BT} {b}" for a, b, ok in ls if ok]
+        if ls: h.extend([name] + ls)
+    group("看进度", ("/status", "要我处理的、在干的、额度", owner and p2p), ("/tasks", "任务列表", TASKS_ON), ("/task 短名#N", "一个任务做到哪了", TASKS_ON),
+          ("/schedules", "定时任务", TASKS_ON))
+    group("管任务", ("短名#N 内容", "给任务补一句", TASKS_ON), ("/stop", "全部停工，加短名只停一个项目", owner and TASKS_ON), ("/resume", "复工", owner and TASKS_ON),
+          ("/approve 短名#N", "批，/reject 是不批", owner and TASKS_ON), ("/task cancel 短名#N", "取消", TASKS_ON), ("/task brief 短名#N", "看任务书", TASKS_ON),
+          ("/task clean 短名#N", "删工作树", owner and TASKS_ON), ("/why 短名#N", "为什么排队、改投", owner and TASKS_ON), ("/team", "角色和各项目的事", owner and TASKS_ON))
+    group("聊天", ("/new", "开新会话", p2p), (f"{c} on", f"这个群开旁听，{c} off 关（在群里 @我 发）", owner and AMB["enabled"]),
+          ("/bind 短名", "群绑定到项目，/unbind 解绑", owner and TASKS_ON and not p2p))
+    group("机器人", ("/upgrade", "升级（只在私聊）", owner))
+    return "\n".join(["命令马上回，不花额度。"] + h)
 
 def service_command(ev):
     """/help、/status、/upgrade：服务自己答，不经过 Claude，不花 token。不是这些就返回 None。"""
     text, owner = plain(ev), is_owner(ev)
     private = ev.get("chat_type") == "p2p"
-    if text == "/help":
-        c = AMB["command"]
-        out = ["命令（不经过 Claude，马上回）："]
-        if ev.get("chat_type") == "p2p": out.append(f"{BT}/new{BT} 开新会话")
-        if TASKS_ON:
-            out += [f"{BT}/tasks{BT} 任务列表", f"{BT}/task 短名#N{BT} 任务详情；{BT}/task brief 短名#N{BT} 任务书；{BT}/task cancel 短名#N{BT} 停掉",
-                    f"{BT}短名#N 内容{BT} 给任务补充要求"]
-            if owner: out += [f"{BT}/stop{BT} 全部停工（{BT}/stop 短名{BT} 只停一个项目）；{BT}/resume{BT} 复工", f"{BT}/task clean 短名#N{BT} 删工作树", f"{BT}/approve 短名#N{BT} / {BT}/reject 短名#N{BT} 审批", f"{BT}/team{BT} 角色和各项目的事"]
-        if owner:
-            if AMB["enabled"]: out.append(f"{BT}{c} on{BT} / {BT}{c} off{BT} / {BT}{c} status{BT} 群里旁听（在群里 @我 发）")
-            out += [f"{BT}/status{BT} 额度、在跑的任务、最近的报错；{BT}/status 短名#N{BT} 看单个任务",
-                    f"{BT}/upgrade{BT} 升级机器人（只在私聊）"]
-        return "\n".join(out)
+    if text == "/help": return help_text(ev, owner)
     if text == "/status" or text.startswith("/status "):
         if not owner: return f"/status 只有{OWNER_NAME}能看。"
-        if not private: return "/status 会带出日志里的报错，请在私聊里发。"
-        try: return tasks.diag_text(text[len("/status"):].strip())
+        if not private: return "/status 会带出你私下的活，请在私聊里发。"
+        arg = text[len("/status"):].strip()
+        if not arg: return status_text(ev)
+        try: return tasks.diag_text("" if arg == "log" else arg)
         except LookupError as e: return str(e)
     if text == "/upgrade" or text.startswith("/upgrade "):
         if not owner: return f"/upgrade 只有{OWNER_NAME}能用。"
@@ -935,7 +1039,9 @@ def upgrade_request(ev):
     o = {k: ev.get(k) for k in ("channel", "chat_id", "chat_type", "message_id", "sender_id")}
     save(UPGRADE_FILE, {"status": "queued", "token": token, "origin": o, "from": META.get("version"), "requested": time.time()})
     env = [f"--setenv={k}={os.environ[k]}" for k in ("PATH", "HOME", "LANG", "USER") if k in os.environ]
-    r = subprocess.run(["systemd-run", "--user", "--collect", f"--unit={META.get('service', 'yonty')}-upgrade-{int(time.time())}",
+    unit = f"{META.get('service', 'yonty')}-upgrade-{int(time.time())}"
+    up = load(UPGRADE_FILE, {}); up["unit"] = unit; save(UPGRADE_FILE, up)
+    r = subprocess.run(["systemd-run", "--user", "--collect", f"--unit={unit}", "-p", "Restart=on-failure", "-p", "RestartSec=5",
                         f"--working-directory={ROOT}", f"--setenv=FCB_UPGRADE_TOKEN={token}", *env,
                         sys.executable, os.path.join(ROOT, "upgrade.py")], capture_output=True, text=True, timeout=30)
     if r.returncode:
@@ -945,7 +1051,7 @@ def upgrade_request(ev):
     log.info("upgrade requested by owner, unit started")
     busy = [t for t in tasks.all_tasks() if t["status"] == "running"]
     return (f"开始升级（现在 {META.get('version')}）：拉代码、跑测试，几分钟。重启前和重启后都会告诉你。"
-            + (f"\n有 {len(busy)} 个任务在跑，等它们跑完才重启。" if busy else ""))
+            + (f"\n在跑的 {len(busy)} 个任务不受影响。" if busy and os.path.islink(os.path.join(ROOT, "current")) else f"\n有 {len(busy)} 个任务在跑，等它们跑完才重启。" if busy else ""))
 
 def say_origin(o, text, key):
     if o.get("channel") == "wecom":
@@ -953,18 +1059,29 @@ def say_origin(o, text, key):
     return reply({"channel": "feishu", "message_id": o["message_id"]}, text, False, key=key)
 
 def upgrading():
+    """该先不开新任务：正在换版本的那一小段，或这次升级要等任务跑完。拉代码、跑测试时照常开。"""
     up = load(UPGRADE_FILE, {})
-    return bool(up.get("status")) and up["status"] not in UP_FINAL and time.time() - up.get("updated", up.get("requested", 0)) < 7 * 3600
+    return (up.get("status") in ("announce", "restarting", "rolling_back") or bool(up.get("waiting") and up.get("status") == "running")) and time.time() - up.get("updated", up.get("requested", 0)) < 7 * 3600
+
+def unit_alive(unit):
+    try: r = subprocess.run(["systemctl", "--user", "is-active", unit], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired): return True
+    return r.stdout.strip() in ("active", "activating", "reloading")
 
 def upgrade_tick():
     up = load(UPGRADE_FILE, {})
     st, o = up.get("status"), up.get("origin") or {}
     if not st or not o or up.get("reported"): return
+    if st not in UP_FINAL and up.get("unit") and time.time() - up.get("updated", up.get("requested", 0)) > 120 and not unit_alive(up["unit"]):
+        # 升级单元没了（机器重启、被停）：换到一半的，磁盘上是新版就当换好，否则按失败记，不一直挡着开任务
+        now_ = load(os.path.join(ROOT, "yonty-bot.json"), {})
+        up.update(status="done" if up.get("to") and META.get("version") == up["to"] == now_.get("version") else "failed", detail="升级中途断了（升级单元没了）。", updated=time.time())
+        save(UPGRADE_FILE, up); st = up["status"]
     if st == "announce" and not up.get("announced"):
         with lock: busy = inflight
         if busy and time.time() - up.get("updated", 0) < 600: return   # 有对话在跑：等它说完再重启，最多等 10 分钟
         say_origin(o, f"测试过了，{up.get('from')} → {up.get('to')}，马上重启，起来后告诉你。"
-                      + ("\n还有对话没跑完，会被打断。" if busy else ""), "upa")
+                      + ("\n还有对话没跑完，重启后接着说。" if busy else ""), "upa")
         up["announced"] = True; save(UPGRADE_FILE, up); return
     if st not in UP_FINAL: return
     if st == "done":
@@ -974,7 +1091,7 @@ def upgrade_tick():
         elif up.get("rules_changed"): text += "\n守则模板有改动，已合进你的守则，你自己改过的都保留。"
     elif st == "uptodate": text = f"已经是最新版（{up.get('to') or META.get('version')}），没动。"
     elif st == "rolled_back": text = "升级没成，已回滚。\n" + (up.get("detail") or "")
-    else: text = "升级没成，什么都没动。\n" + (up.get("detail") or "")
+    else: text = "升级没成。\n" + (up.get("detail") or "")
     say_origin(o, text, "up" + st[:2] + str(int(up.get("requested", 0)))[-6:])
     up["reported"] = True; up.pop("token", None); save(UPGRADE_FILE, up)
 
@@ -988,23 +1105,16 @@ def task_command(ev):
     if v2 is not None: return v2
     if text == "/tasks":
         mine = [t for t in tasks.all_tasks() if can_see(t, ev)]
-        act = [t for t in mine if t["status"] in tasks.ACTIVE + ("pending",)]
-        done = [t for t in mine if t not in act][-3:]
-        if not act and not done: return "现在没有长任务。"
-        out = [] if act else ["现在没有在跑的任务。"]
-        groups = {}   # 按项目分组：最近有动静的项目在前，组内按编号
-        for t in sorted(act + done, key=lambda t: -(t.get("updated") or 0)): groups.setdefault(t.get("project") or "task", []).append(t)
-        for proj, ts in groups.items():
-            out += [f"{proj}："] + ["· " + task_line(t) for t in sorted(ts, key=lambda t: t.get("num") or 0)]
-        return "\n".join(out + [f"{BT}/task 短名#N{BT} 看详情，{BT}/task cancel 短名#N{BT} 停掉。"])
+        return tasks_text(mine)
     if text == "/task" or text.startswith("/task "):
         arg = text[len("/task"):].split()
-        if not arg or len(arg) > 2 or (len(arg) == 2 and arg[0] not in ("brief", "cancel", "clean")) or not tasks.parse_ref(arg[-1]):
+        if not arg or len(arg) > 2 or (len(arg) == 2 and arg[0] not in ("brief", "cancel", "clean", "info")) or not tasks.parse_ref(arg[-1]):
             return usage
         t, err = find_task(arg[-1], [t for t in tasks.all_tasks() if can_see(t, ev)])
         if not t: return err
         n = tasks.ref(t)
         if len(arg) == 1: return task_detail(t, owner)
+        if arg[0] == "info": return task_detail(t, owner, True)
         if arg[0] == "brief": return f"{n} {t['title']} 的任务书：\n{t['brief']}"
         if arg[0] == "cancel":
             if not can_steer(t, ev): return f"{n} 不是你派的，取消找{t['requester']['name']}或{OWNER_NAME}。"
@@ -1037,20 +1147,17 @@ def known_ref(s):
     return bool(p) and (p[0] is None or any(t.get("project") == p[0] for t in tasks.all_tasks()))
 
 def team_view():
-    """角色模板和各项目上的事：每件事谁负责、做到哪、上下文多大、缓存还热不热。"""
+    """角色和各项目上的事：谁在负责、做到哪。"""
     rs = tasks.roles()
-    out = ["角色模板：" + ("、".join(f"{r['name']}（{r['model'] or '默认'}）" for r in rs.values()) or "没有（实例的 roles/ 目录是空的）")]
+    out = ["角色：" + ("、".join(r["name"] for r in rs.values()) or "没有（实例的 roles/ 目录是空的）")]
     sibs = tasks.all_siblings()
-    if not sibs: return "\n".join(out + ["还没有事：派活时写上“事情”，干完一个任务就有了；不写就归到项目主线。"])
-    warm = tasks.T["sibling_warm_min"] * 60
-    out.append("各项目的事（项目 · 事）：")
-    for s in sorted(sibs, key=lambda s: -s.get("last_used", 0)):
-        age = int((time.time() - (s.get("last_used") or s.get("updated") or time.time())) / 60)
-        hot = "缓存热，下个任务接着它的会话" if s.get("head") and age * 60 < warm and (s.get("ctx") or 0) <= tasks.T["sibling_max_ctx"] else "下个任务新开会话、读档案"
-        now_ = (s.get("now") or "").splitlines()[0][:60] if s.get("now") else ""
-        out.append(f"· {s['project'].rsplit('-', 1)[0]} · {s.get('thing') or tasks.MAIN_THING}："
-                   f"做过 {'、'.join(tasks.tref(x) for x in s.get('tasks', [])[-5:]) or '无'}，上下文约 {int((s.get('ctx') or 0) / 1000)}k，{age} 分钟前，{hot}"
-                   + (f"；现状：{now_}" if now_ else "") + (f"；有 {len(s['inbound'])} 条别处留言" if s.get("inbound") else ""))
+    if not sibs: return "\n".join(out + ["还没有事：干完一个任务就有了。"])
+    out.append("各项目的事（最近动过的在前）：")
+    for s in sorted(sibs, key=lambda s: -s.get("last_used", 0))[:15]:
+        m = int((time.time() - (s.get("last_used") or s.get("updated") or time.time())) / 60)
+        now_ = short((s.get("now") or "").splitlines()[0], 40) if s.get("now") else ""
+        out.append(f"· {s['project'].rsplit('-', 1)[0]} · {s.get('thing') or tasks.MAIN_THING}（{tasks.left_text(m * 60)}前，做过 {'、'.join(tasks.tref(x) for x in s.get('tasks', [])[-3:]) or '无'}）"
+                   + (f"：{now_}" if now_ else "") + (f"；{len(s['inbound'])} 条留言没看" if s.get("inbound") else ""))
     return "\n".join(out)
 
 def task_approve(ev, yes, s):
@@ -1173,7 +1280,7 @@ def dispatch_one(ev, d):
     if t.get("plan") and owner: return (head + f"\n\n派了 {n} {t['title']}。").strip()
     head = (head + "\n\n" + thing_line(t)).strip()
     if owner:
-        return (head + f"\n\n排上了，任务 {n}。进展在这儿报，{BT}/task {n}{BT} 随时看，@我 {BT}{n} 内容{BT} 补充。").strip()
+        return (head + f"\n\n排上了，任务 {n}。").strip()
     brief = d["brief"] if len(d["brief"]) <= 3000 else d["brief"][:3000] + f"\n……（后面还有 {len(d['brief']) - 3000} 字，{BT}/task brief {n}{BT} 看完整任务书）"
     snap = (f"{n} {d['title']}\n仓库：{BT}{repo}{BT}（{tasks.model_label(t)}）\n" + (f"验证：{BT}{t['verify']}{BT}\n" if t.get("verify") else "")
             + f"检查点：{t['budget']} 美元当量（{t.get('budget_why', '')}）\n"
@@ -1206,15 +1313,12 @@ def task_event_text(t, e):
     n, k, r, o = tasks.ref(t), e["kind"], t["requester"], t["origin"]
     at = (mention(o["channel"], r["id"], r["name"]) + " ") if o["chat_type"] != "p2p" else ""
     if k == "start":
-        return f"{n} 开工：{t['title']}\n分支 {BT}{t['branch']}{BT}，{tasks.model_label(t)}。有进展在这儿说，{BT}/task {n}{BT} 随时看。"
+        return f"{n} 开工：{t['title']}\n{tasks.model_label(t)}"
     if k == "progress": return f"{n} 进展：{e['text']}"
-    if k == "question": return f"{at}{n} 有事要你定：\n{e['text']}\n\n@我 回复「{n} 你的意见」。"
+    if k == "question": return f"{at}{n} 有事要你定：\n{e['text']}\n\n" + ("" if o["chat_type"] == "p2p" else "@我 ") + f"回 {BT}{n} 你的意见{BT}"
     if k == "done":
-        extra = ""
-        if r.get("owner") and o["chat_type"] == "p2p" and not t.get("clone"):   # 只在主人私聊里给接手命令
-            extra = f"\n\n要在终端接手：{BT}cd {t['worktree']} && claude --resume {t['session_id']}{BT}"
-        return f"{at}{n} 完成：\n{e['text']}{extra}"
-    return f"{at}{n} {'挂了' if k == 'failed' else '中断了'}：{e['text']}\n@我 回复「{n} 继续」接着干。"
+        return f"{at}{n} 完成：{t['title']}\n{e['text']}"
+    return f"{at}{n} {'挂了' if k == 'failed' else '中断了'}：{t['title']}\n{e['text']}\n" + ("" if o["chat_type"] == "p2p" else "@我 ") + f"回 {BT}{n} 继续{BT} 接着干"
 
 def heartbeat_text(t):
     now = next((x.get("activeForm") or x.get("content") for x in (t.get("todos") or []) if x.get("status") == "in_progress"), "")
@@ -1252,9 +1356,8 @@ def quota_check(now):
         key = f"{k}:{reset}:{int(u * 10)}"
         if key in sent: continue
         run = [t for t in tasks.all_tasks() if t["status"] == "running"]
-        lines = [f"额度提醒：{why}，{tasks.left_text(max(0, reset - now))}后刷新。这是整个订阅的用量，包括你终端里的会话。"]
-        if run: lines.append("在跑的任务：" + "；".join(f"{tasks.ref(t)} {t['title']}（{tasks.model_label(t)}，已用 {t.get('cost') or 0} 美元当量）" for t in run))
-        lines.append(f"只是提醒，活照常干。要省着用：{BT}/task cancel 短名#N{BT} 停掉不急的，或跟我说改派便宜模型、放到云端。")
+        lines = [f"额度提醒：{why}，{tasks.left_text(max(0, reset - now))}后刷新。"]
+        if run: lines += ["活照常干。在跑的："] + [f"· {tasks.ref(t)} {short(t['title'])}（已用 {t.get('cost') or 0}）" for t in run] + [f"要省着用：{BT}/stop{BT} 停工，或 {BT}/task cancel 短名#N{BT} 取消一个"]
         owner_dm("feishu" if FEISHU_ON else "wecom", "\n".join(lines))
         sent[key] = now
         save(QUOTA_SENT, dict(list(sent.items())[-50:]))
@@ -2447,7 +2550,7 @@ def main():
     """每个渠道一个线程，各自断线重连；一个渠道挂了不影响另一个，也不打断正在跑的 Claude。"""
     stopping = threading.Event()
     def stop(*_):
-        stopping.set()
+        stopping.set(); STOPPING.set()
         for p in (feishu_proc, wecom_proc):   # SIGTERM，让子进程正常收尾；不要 kill -9
             if p and p.poll() is None: p.terminate()
     signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
@@ -2461,6 +2564,8 @@ def main():
     # 定时检查：长任务的状态和进度回报（任务本身在独立单元里跑，不随本进程退出）、聊天会话快过期时压缩
     threading.Thread(target=task_loop, args=(stopping,), daemon=True).start()
     ident_start()
+    try: pend_resume()
+    except Exception: log.exception("pending messages not resumed")
     log.info("bridge started: %s v%s (%s)", NAME, META.get("version", "?"), "+".join(f.__name__.split("_")[0] for f in loops))
     save(STARTED_FILE, {"version": META.get("version"), "at": time.time(), "pid": os.getpid()})   # 升级单元靠它判断新服务起来了
     while not stopping.wait(3600): pass

@@ -44,22 +44,50 @@ if CFG.get("cross_im_read") and FEISHU_ON and WECOM_ON and not os.path.exists(CR
 if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
     sys.exit("workdir 不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
 
-# 1. 代码和钩子：总是用模板覆盖，保证和 skill 同版本
-for f in ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py"):
-    shutil.copy(os.path.join(T, f), os.path.join(INST, f))
-os.makedirs(os.path.join(INST, "hooks", "git"), exist_ok=True)
-for f in ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
-          "device_guard.py", "irreversible_gate.py", "scope_guard.py"):
-    shutil.copy(os.path.join(T, "hooks", f), os.path.join(INST, "hooks", f))
-# git 钩子分发器：非主人触发的会话把 core.hooksPath 指到 hooks/git，pre-push 只放行 bot/ 分支
-gh = os.path.join(INST, "hooks", "git")
-shutil.copy(os.path.join(T, "hooks", "git", "fcb-githook"), os.path.join(gh, "fcb-githook"))
-os.chmod(os.path.join(gh, "fcb-githook"), 0o755)
-for name in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-push", "pre-rebase",
-             "post-checkout", "post-merge", "post-rewrite", "pre-merge-commit"):
-    p = os.path.join(gh, name)
-    if os.path.lexists(p): os.remove(p)
-    os.symlink("fcb-githook", p)
+# 1. 代码和钩子：整份放进 releases/<序号>-<提交>/，current 指向它；实例里的 bridge.py、hooks 等是指向 current/… 的软链。
+#    换版本只换 current 一个链接，一步到位：在跑的任务不会读到半新半旧的文件，路径也不变（提示词、缓存前缀不动）。
+CODE = ("bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py")
+HOOKS = ("lark_identity.py", "private_guard.py", "wecom_guard.py", "git_guard.py", "task_inbox.py", "mcp_guard.py", "command_guard.py",
+         "device_guard.py", "irreversible_gate.py", "scope_guard.py")
+
+def swap_link(target, path):
+    """path 换成指向 target 的软链，原来是文件的一步换掉；原来是目录的先挪开。"""
+    tmp = f"{path}.{os.getpid()}.lnk"
+    if os.path.lexists(tmp): os.remove(tmp)
+    os.symlink(target, tmp)
+    if os.path.isdir(path) and not os.path.islink(path):
+        old = f"{path}.{os.getpid()}.old"
+        os.rename(path, old); os.replace(tmp, path); shutil.rmtree(old)
+    else: os.replace(tmp, path)
+
+def build_release():
+    head = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short=10", "HEAD"], capture_output=True, text=True).stdout.strip() or "v" + VERSION
+    rel = os.path.join(INST, "releases"); os.makedirs(rel, exist_ok=True)
+    n = max([int(x.split("-")[0]) for x in os.listdir(rel) if x.split("-")[0].isdigit()] or [0]) + 1   # 只增不减：删过的编号不再用
+    name = f"{n:04d}-{head}"; d = os.path.join(rel, f".{name}.{os.getpid()}")
+    os.makedirs(os.path.join(d, "hooks", "git"))
+    for f in CODE: shutil.copy(os.path.join(T, f), os.path.join(d, f))
+    for f in HOOKS: shutil.copy(os.path.join(T, "hooks", f), os.path.join(d, "hooks", f))
+    # git 钩子分发器：非主人触发的会话把 core.hooksPath 指到 hooks/git，pre-push 只放行 bot/ 分支
+    gh = os.path.join(d, "hooks", "git")
+    shutil.copy(os.path.join(T, "hooks", "git", "fcb-githook"), os.path.join(gh, "fcb-githook"))
+    os.chmod(os.path.join(gh, "fcb-githook"), 0o755)
+    for h in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-push", "pre-rebase",
+              "post-checkout", "post-merge", "post-rewrite", "pre-merge-commit"): os.symlink("fcb-githook", os.path.join(gh, h))
+    os.rename(d, os.path.join(rel, name))
+    return name
+
+RELEASE = build_release()
+try: _prev = os.path.basename(os.readlink(os.path.join(INST, "current")))
+except OSError: _prev = ""
+swap_link(os.path.join("releases", RELEASE), os.path.join(INST, "current"))
+for f in CODE + ("hooks",):
+    p = os.path.join(INST, f)
+    if not (os.path.islink(p) and os.readlink(p) == os.path.join("current", f)): swap_link(os.path.join("current", f), p)
+# 旧版本留最近 3 个：任务进程的代码开工时已读进内存，钩子总用当前版本（安全修复立即生效），不会再读旧目录
+_rels = sorted(os.listdir(os.path.join(INST, "releases")))   # 以点开头的是没做完的半成品，排最前
+for x in _rels[:-3] + [x for x in _rels[-3:] if x.startswith(".")]:
+    if x not in (RELEASE, _prev): shutil.rmtree(os.path.join(INST, "releases", x), ignore_errors=True)
 if WECOM_ON:
     shutil.copy(os.path.join(T, "wecom_gateway.mjs"), os.path.join(INST, "wecom_gateway.mjs"))
     pkg = os.path.join(INST, "package.json")
@@ -182,7 +210,7 @@ else:
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
-INST_LOCKED = ["bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
+INST_LOCKED = ["releases/**", "current", "current/**", "bridge.py", "tasks.py", "upgrade.py", "delivery.py", "resources.py", "devices.py", "scheduler.py", "actions.py", "fsio.py", "outbox.py", "team.py", "actions/**", "yonty-bot.json", "hooks/**", "claude-settings.json", "config.json", "ambient.json", "wecom_gateway.mjs",
                "package.json", "package-lock.json", "node_modules/**", "state/**", "logs/**", "inbox/**", "AGENTS.md", "CLAUDE.md",
                "*.service", "*.plist"]
 deny = [f"Read({X(p)}/**)" for p in CFG.get("private", {}).get("paths", []) if p.startswith(("~", "/")) and "(" not in p and "\\" not in p]
@@ -218,7 +246,9 @@ settings = {"permissions": {"deny": list(dict.fromkeys(deny)), **({"allow": list
                                      {"matcher": "*", "hooks": [hook("scope_guard.py")]}],
                       # 长任务运行中把聊天里的补充指令塞进去；聊天会话里这个钩子直接退出
                       "PostToolUse": [{"matcher": "*", "hooks": [hook("task_inbox.py")]}]}}
-json.dump(settings, open(os.path.join(INST, "claude-settings.json"), "w"), ensure_ascii=False, indent=2)
+_st = os.path.join(INST, "claude-settings.json")   # 在跑的会话随时会读：先写好再一步换上
+with open(_st + ".tmp", "w") as f: json.dump(settings, f, ensure_ascii=False, indent=2)
+os.replace(_st + ".tmp", _st)
 
 # 4. 服务文件
 os.makedirs(os.path.join(INST, "logs"), exist_ok=True)
@@ -277,8 +307,8 @@ with open(os.path.join(INST, f"{SLUG}-yb-watchdog.service"), "w") as f:
             f"WorkingDirectory={INST}\nExecStart={sys.executable} {os.path.join(INST, 'scheduler.py')} watchdog\n")
 with open(os.path.join(INST, f"{SLUG}-yb-watchdog.timer"), "w") as f:
     f.write(f"[Unit]\nDescription={SLUG} 看门狗定时器（每 2 分钟）\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n\n[Install]\nWantedBy=timers.target\n")
-json.dump({"version": VERSION, "source": ROOT, "commit": HEAD, "rules_commit": rules_commit, "rules_left": rules_left, "service": SLUG,
+json.dump({"version": VERSION, "release": RELEASE, "source": ROOT, "commit": HEAD, "rules_commit": rules_commit, "rules_left": rules_left, "service": SLUG,
            "flags": [a for a in sys.argv[2:] if a in ("--no-npm",)]},
           open(os.path.join(INST, "yonty-bot.json"), "w"), ensure_ascii=False, indent=1)
-open(os.path.join(INST, ".gitignore"), "w").write("state/\nlogs/\ninbox/\nnode_modules/\n_tmp/\n__pycache__/\n")
+open(os.path.join(INST, ".gitignore"), "w").write("releases/\ncurrent\nstate/\nlogs/\ninbox/\nnode_modules/\n_tmp/\n__pycache__/\n")
 print(f"完成（Yonty Bot v{VERSION}）。下一步：python3 bridge.py --cache-check 3")

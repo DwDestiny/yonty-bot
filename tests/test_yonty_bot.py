@@ -1096,7 +1096,9 @@ class TaskTest(unittest.TestCase):
         self.assertIn('sonnet · 思考 high', self.b.task_event_text(t, self.t.events(n)[0]))   # 开工消息写明模型
         br = subprocess.run(['git', '-C', str(wt), 'branch', '--show-current'], capture_output=True, text=True).stdout.strip()
         self.assertEqual(br, t['branch'])
-        self.assertIn('claude --resume', self.b.task_event_text(t, self.t.events(n)[-1]))   # 主人私聊给接手命令
+        t['session_started'] = True
+        self.assertIn('claude --resume', self.b.task_detail(t, True, True))   # 接手命令在 /task info 里
+        self.assertNotIn('claude --resume', self.b.task_detail(t, True))
 
     # ---------- 2.0/3.0：验证闸门、检查点、卡死、额度提醒、团队、云端、聊天步数 ----------
     def fake_bin(self, body):

@@ -1574,6 +1574,7 @@ def run(tid):
     """后台单元的入口：跑一轮或几轮 Claude，把进展、提问、结果写成事件。"""
     t = load(tid)
     if t.get("exec") == "cloud": return run_cloud(tid)
+    _mod_team()   # 一轮要用的代码开工时就读进来：跑着的时候服务换了版本，这一轮还用自己这份
     o = t["origin"]
     try:
         budget = t.get("budget") or T["budget_default"]
@@ -1987,6 +1988,13 @@ def diag(s=""):
     """命令行不带主人身份，诊断由服务执行：主人私聊发 /status，或主控在主人私聊的回复里写一行 [服务命令] diag。"""
     sys.exit(f"诊断由服务执行，命令行不给。在{OWNER_NAME}私聊的回复里单独写一行：[服务命令] diag{' ' + s if s else ''}\n"
              f"服务查完把结果交回这个会话，你再接着回。{OWNER_NAME}自己也可以发 /status{' ' + s if s else ''}。")
+
+def recent_errors(sec):
+    """服务日志里最近 sec 秒的报错条数（ERROR）。"""
+    try: lines = open(os.path.join(ROOT, "logs", "bridge.log"), encoding="utf-8", errors="replace").read().splitlines()[-3000:]
+    except OSError: return 0
+    since = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() - sec))
+    return sum(1 for l in lines if " ERROR " in l and re.match(r"\d{4}-\d\d-\d\d ", l) and l[:19] >= since)
 
 def diag_text(s=""):
     """诊断文字：额度快照、在跑的任务（或单个任务的细节）、最近的报错。服务的 /status 命令和上面的 diag 共用。"""
