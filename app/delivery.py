@@ -225,6 +225,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
                              kind="指令" if upstream else "留言", src=sender, upper=upstream)
             tk.update(t2["id"], _touch=False, hop=max(t2.get("hop") or 0, nh))   # 任务再往外投时从这一跳接着数
             if upstream:
+                _close([r for r in recs if sender.get("owner") or r["kind"] not in OWNER_CATS], t2["id"])
                 tk.update(t2["id"], auto_follow=(t2.get("auto_follow") or 0) + (0 if tk.BUDGET_RE.search(full) else 1))
                 if t2["status"] in ("waiting", "done", "failed", "lost"): tk.update(t2["id"], status="approved")
             rec["status"] = "sent"
@@ -237,7 +238,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
                 f"没写全：正文 {len(full)} 字，只留了前 {tk.NOTE_MAX} 字。" if len(full) > tk.NOTE_MAX else "") if ok else "没有这件事，只记进了运行记录。"
         elif tg["to"] == "记录":
             tk.decide("记录", sender=sender["ref"], category=kind, text=full[:500]); rec["status"] = "sent"; receipt = "记进运行记录了。"
-        elif tg["to"] == "主人" and need:
+        elif need and (tg["to"] == "主人" or (tg["to"] == "派活人" and not sender.get("task"))):   # 会话发给“派活人”的也是发给主人，没编号就没有关它的写法
             mine = [r for r in recs if r["from"]["ref"] == sender["ref"] and r.get("q")]
             rec["q"] = tk.fsio.bump(_seq(tk), "q:" + sender["ref"], [r["q"] for r in mine])
             ahead = [r for r in mine if lane(r["from"]) == lane(sender) and r["status"] in ("new", "queued", "open")]
@@ -288,6 +289,33 @@ def answered(tk, rid):
         _release(recs)
         save(tk, recs)
         return rec
+
+
+def _close(recs, tid, status=("open",)):
+    """任务没编号的请求标成已回（带编号的只按编号关）。返回关了哪些。"""
+    hit = [r for r in recs if r["status"] in status and not r.get("q") and r["from"].get("task") == tid and r.get("need")]
+    for r in hit: r["status"], r["answered_at"] = "answered", time.time()
+    return hit
+
+
+def close_task(tk, tid, can):
+    """人的话写进了任务的收件箱：它没编号的、can 说这个人能答的请求，算回了。"""
+    with lock(tk):
+        recs = load(tk)
+        if _close([r for r in recs if can(r)], tid): save(tk, recs)
+
+
+def close_ended(tk):
+    """任务结束了（完成、失败、中断、取消）：挂着的没编号请求关掉，不再把短话当成它的答复；取消的，没发出去的也不发了。
+    结束以后才发出去的（最后一轮输出里的 [投递]）照样发，发完再关；要接着说发 短名#N。"""
+    ids = {r["from"]["task"] for r in load(tk) if r["status"] in ("open", "new") and not r.get("q") and r["from"].get("task")}
+    end = {i: t["status"] for i in ids for t in [tk.load(i)] if t and t["status"] not in tk.ACTIVE + ("pending",)}
+    if not end: return
+    with lock(tk):
+        recs = load(tk)
+        hit = [r for i, st in end.items() for r in _close(recs, i, ("open", "new") if st == "cancelled" else ("open",))]
+        if hit: save(tk, recs)
+    for r in hit: tk.decide("请求关了", sender=r["from"]["ref"], category=r["kind"], why="任务已经" + tk.LABEL.get(end[r["from"]["task"]], "结束"))
 
 
 def _release(recs):
