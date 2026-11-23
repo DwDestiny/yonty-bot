@@ -4,7 +4,7 @@ Input:  test_accept_flow 的临时实例（Claude、systemd、lark-cli 都是假
 Output: unittest 结果
 Pos:    tests/ 下的行为测试，内容全是虚构的
 """
-import os, sys, time, unittest
+import importlib.util, os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_accept_flow as A
 
@@ -60,6 +60,8 @@ class ReplayTest(Base):
         # 下一句话仍进主控，不被项目经理接走
         n = len(self.pm_prompts()); self.layers(['CTRL-在'], []); self.say('不是先定方案吗')
         self.assertEqual(len(self.pm_prompts()), n); self.assertIn('CTRL-在', self.said())
+        self.layers(['CTRL-前缀也进主控'], []); self.say('proj：进度呢')   # 写项目名也先到主控
+        self.assertEqual(len(self.pm_prompts()), n); self.assertIn('CTRL-前缀也进主控', self.said())
 
     def test_parallel_deps_and_closing(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/b') + block(self.e.repo, '丙', 'src/c', '甲') + block(self.e.repo, '收口', deps='甲、乙、丙', closing=True)])
@@ -75,6 +77,15 @@ class ReplayTest(Base):
         self.e.tick(); self.assertEqual(st()['收口'], 'running')
         self.assertIn('只建这一个合并请求', self.t.first_prompt(self.by('收口'), 'origin/main'))
         self.assertIn('不建合并请求', self.t.first_prompt(self.by('甲'), 'origin/main'))
+
+    def test_small_task_not_sized_by_full_build(self):
+        sp = importlib.util.spec_from_file_location('r3', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
+        c = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}
+        hist = [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]
+        t = {'id': 2, 'repo': 'x', 'role': '开发'}
+        self.assertEqual(r.estimate(dict(t, plan='p'), hist, c)[0], 2 * r.GB)
+        self.assertEqual(r.estimate(dict(t, plan='p', closing=True), hist, c)[0], 7 * r.GB)
+        self.assertEqual(r.estimate(t, hist, c)[0], 7 * r.GB)
 
     def test_same_files_wait(self):
         pl = "[方案] 整改\n任务:\n- 甲 | src/a |\n- 乙 | src/a/x.ts |\n"
@@ -137,6 +148,15 @@ class HoldTest(Base):
         self.say('/resume proj')
         self.assertEqual(self.by('甲')['status'], 'approved'); self.assertTrue(self.t.inbox_items(self.by('甲')['id']))
         self.e.tick(); self.assertEqual(self.by('甲')['status'], 'running')
+
+    def test_bare_stop_word(self):
+        """主人只说一个“停”：不经过主控，程序直接停；同事说、没在干活时说，照常聊天。"""
+        self.start(); n = len(self.e.streams); self.say('先停！')
+        self.assertEqual((self.by('甲')['status'], len(self.e.streams)), ('waiting', n)); self.assertIn('停了', self.said())
+
+    def test_stop_word_in_sentence_is_chat(self):
+        self.start(); self.layers(['好'], []); self.say('停车场那个页面改一下')
+        self.assertEqual(self.by('甲')['status'], 'running')
 
     def test_coworker_cannot_stop(self):
         self.start(); self.layers(['[停] proj'], []); self.say('停', sender=A.MATE, chat='oc_mate')

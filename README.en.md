@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 2.0.1 · 2026-11-23 · MIT · [中文](README.md) | English
+> 3.0.0 · 2026-11-23 · MIT · [中文](README.md) | English
 
 **Bring your Claude Code into Feishu/Lark and WeCom group chats, and run it as a dev team that takes tasks, checks its own work, and remembers what it decided.**
 
@@ -50,9 +50,9 @@ Not a fit if you want a web console, have no always-on machine, or want to run i
 ## How it works
 
 1. You or a teammate say something in chat.
-2. The **coordinator** (one per chat) decides. A small question gets an answer now. A big job gets its goal, scope and "done" criteria agreed first, then a written brief.
+2. The **coordinator** (one per chat) decides. A small question gets an answer now. A big job gets its goal, scope and "done" criteria agreed first, then goes to the **project manager**, who reads the code, writes a plan and splits it into small tasks.
 3. If a teammate asked for the job, the service asks you to approve it.
-4. The **owner** of that piece of work does the job in the background on its own branch. When it needs a decision, it asks, and the coordinator answers what it can.
+4. **Developers** work on the small tasks in parallel, each on its own files and branch; a final task merges and tests them together. When it needs a decision, it asks, and the coordinator answers what it can.
 5. The service re-runs the verify command. On failure the task goes back for rework. On success it opens a draft pull request.
 6. The coordinator reads the report, finishes what it can, and tells you the result and what needs your decision, in a few lines.
 

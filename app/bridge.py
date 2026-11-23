@@ -1856,8 +1856,12 @@ def freeze_tick():
                "停掉": f"{tasks.ref(t)}（{t['title'][:30]}）{why}，按中断交回。"}.get(act, f"解冻了 {tasks.ref(t)}（{t['title'][:30]}）：{why}。")
         owner_dm(t["origin"].get("channel", "feishu"), msg)
 
+STOP_WORDS = re.compile(r"^(?:先|都|全部|全|赶紧)?(?:停|停下|停下来|停工|暂停|停一下|停掉)(?:吧|了)?[。.!！]*$")
+
 def v2_command(ev, text, owner):
     m = re.match(r"^/(stop|resume)(?:\s+(\S+))?$", text)
+    if STRICT and owner and ev.get("chat_type") == "p2p" and STOP_WORDS.match(text) and any(t["status"] in tasks.ACTIVE and not t.get("schedule") for t in tasks.all_tasks()):
+        m = re.match(r"^/(stop)(?:\s+(\S+))?$", "/stop")   # 主人只说了“停”：程序直接停，不等主控转话；复工发 /resume
     if m:
         if not owner: return f"/{m.group(1)} 只有{OWNER_NAME}能用。"
         live = sorted(p for p in projects() if (team.held(p) if m.group(1) == "resume" else any(t.get("project") == p and t["status"] in tasks.ACTIVE for t in tasks.all_tasks())))
