@@ -106,6 +106,7 @@
     ]
   },
   "deny_extra": [],
+  "allow_extra": [],
   "chat_max_turns": 60,
   "credential_paths": [
     "~/.config/codeup",

@@ -162,6 +162,7 @@
     2. 看门狗定时器只生成不启用。在终端跑：`ln -sf <实例>/<服务名>-yb-watchdog.service <实例>/<服务名>-yb-watchdog.timer ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now <服务名>-yb-watchdog.timer`
     3. 要用设备和不可逆闸门时，在 `config.json` 写 `devices`、`irreversible`，见 [config.md](config.md)。
     4. 带读范围的定时任务要机器上有 bwrap：`apt install bubblewrap`。
+- 1.3.1（2026-11-23）放行和清理：新配置 `allow_extra`，额外的放行规则只写进实例的 `claude-settings.json`（不碰用户级配置），让机器人该自己做的窄操作（删草稿 Release、清已结束任务的工作树和 `bot/` 分支）不再被 auto 模式的自动判断拦下；太宽的规则（`*` 前不足 8 个字符）生成时报错。`git_guard` 不让非主人触发的会话删工作树和本地分支，免得删掉别的任务正在用的。
 - 1.3.0（2026-11-22）命令、后台工具、MCP、升级：
   - 命令统一成英文斜杠命令，中文写法去掉：`/tasks`、`/task 短名#N`、`/task brief|cancel|clean 短名#N`、`/team`、`/approve 短名#N`、`/reject 短名#N`、`/listen on|off|status`、`/new`。新增 `/help`（按身份列命令）、`/status`（主人私聊：额度、在跑的任务、最近报错，服务直接答，不花 token）、`/upgrade`。
   - `/upgrade`：只认主人私聊。服务起一个独立的升级单元：源码仓库要干净、在 main，只做快进；先跑测试，不过就退回；等本机任务单元都停（期间不开新的），备份实例，先回一句再重启，重新生成时不覆盖守则（模板改了会提醒）；新服务起不来就用备份回滚。

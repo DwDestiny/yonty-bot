@@ -125,7 +125,15 @@ deny += CFG.get("deny_extra", [])
 # Claude Code 权限规则里，文件路径以单个 / 开头是相对项目根，绝对路径要写成 //（实测：Read(/abs) 拦不住，Read(//abs) 能拦）
 deny = [re.sub(r"^(Read|Edit|Write)\(/(?!/)", r"\1(//", r) for r in deny]
 hook = lambda f: {"type": "command", "command": f"python3 {os.path.join(INST, 'hooks', f)}"}
-settings = {"permissions": {"deny": list(dict.fromkeys(deny))},
+# 额外放行：auto 模式下命中放行规则的命令不再交给自动判断。只接受窄规则（* 前至少 8 个字符），拒绝规则仍然优先；
+# 放行对所有会话生效，按人限制靠钩子（例如 git_guard 不让同事删 Release、删远端分支）
+allow = []
+for r in CFG.get("allow_extra", []):
+    m = re.match(r"^(\w+)\((.*)\)$", r)
+    if not m or len(m.group(2).split("*")[0].strip()) < 8:
+        sys.exit(f"allow_extra 里的 {r!r} 太宽：括号里 * 前至少写 8 个字符，例如 Bash(gh release delete build-*)")
+    allow.append(r)
+settings = {"permissions": {"deny": list(dict.fromkeys(deny)), **({"allow": list(dict.fromkeys(allow))} if allow else {})},
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook("lark_identity.py"), hook("wecom_guard.py"),
                                                                   hook("git_guard.py")]},
                                      {"matcher": "Read|Grep|Glob|Bash|Edit|Write|NotebookEdit", "hooks": [hook("private_guard.py")]},

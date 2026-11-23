@@ -55,7 +55,8 @@ class ScaffoldTest(unittest.TestCase):
         cls.inst = cls.home / 'bots' / 'demo'
         cls.inst.mkdir(parents=True)
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
-        cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT, workdir='~/work')
+        cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT, workdir='~/work',
+                   allow_extra=['Bash(gh release delete build-*)'])
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
         cls.env = dict(os.environ, HOME=str(cls.home))
         cls.out = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'scaffold.py'), str(cls.inst)],
@@ -191,6 +192,20 @@ class ScaffoldTest(unittest.TestCase):
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +chat-search --as user -q x; lark-cli im +messages-send --help').returncode, 0)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --as user --text "see --help for usage"').returncode, 2)
         self.assertEqual(self.bash('lark_identity.py', o, 'lark-cli im +messages-send --text --help').returncode, 2)
+
+    def test_allow_extra_is_narrow_only(self):
+        st = json.loads((self.inst / 'claude-settings.json').read_text(encoding='utf-8'))
+        self.assertEqual(st['permissions']['allow'], ['Bash(gh release delete build-*)'])   # 只给机器人放行，不碰用户级配置
+        for bad in ('Bash(*)', 'Bash', 'Bash(rm *)', 'Bash(git:*)'):
+            with tempfile.TemporaryDirectory() as d:
+                inst = Path(d) / 'b'; inst.mkdir()
+                cfg = json.loads((self.inst / 'config.json').read_text(encoding='utf-8')); cfg['allow_extra'] = [bad]
+                (inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
+                r = subprocess.run([sys.executable, str(ROOT / 'scripts' / 'scaffold.py'), str(inst), '--no-npm'],
+                                   capture_output=True, text=True, env=dict(self.env, HOME=d))
+                self.assertNotEqual(r.returncode, 0, bad)
+                self.assertIn('太宽', r.stdout + r.stderr)
+                self.assertFalse((inst / 'claude-settings.json').exists(), bad)
 
     def test_scaffold_writes_upgrade_meta(self):
         meta = json.loads((self.inst / 'yonty-bot.json').read_text())   # /upgrade 靠它找源码仓库、用同样的参数重新生成
@@ -1574,13 +1589,17 @@ class TaskTest(unittest.TestCase):
                    'gh pr merge 3', 'gh pr create --title x', 'gh release create v1', 'gh api -X DELETE repos/a/b',
                    'gh auth token', 'cat ~/.config/gh/hosts.yml', 'cd x && gh repo delete a/b --yes',
                    'env -i PATH="$PATH" HOME="$HOME" git push origin bot/1', 'unset GIT_CONFIG_COUNT; git push',
-                   'git push origin HEAD:main', 'git push origin bot/1:refs/heads/release']
+                   'git push origin HEAD:main', 'git push origin bot/1:refs/heads/release',
+                   'git worktree remove /w/.bot-tasks/x/9', 'git -C /r worktree prune', 'git branch -D bot/1-1', 'cd r && git branch --delete bot/2']
         allowed = ['git push origin bot/1-1121', 'git push -u origin HEAD', 'git push origin HEAD:bot/1-1121',
                    'git push git@github.com:a/b.git bot/1', 'git push https://github.com/a/b.git HEAD:refs/heads/bot/2', 'gh pr create --draft --title x --body y',
                    'gh pr view 3', 'gh api repos/a/b/pulls', 'git status', 'ls']
         for c in blocked: self.assertEqual(self.guard(c), 2, c)
         for c in allowed: self.assertEqual(self.guard(c), 0, c)
         self.assertEqual(self.guard('gh pr merge 3', owner=True), 0)
+        for c in ('git worktree remove /w/.bot-tasks/x/9', 'git branch -D bot/1-1', 'gh release delete build-1 --yes'):
+            self.assertEqual(self.guard(c, owner=True), 0, c)   # 清理是主人那边的事
+        self.assertEqual(self.guard('git branch -vv'), 0)
         self.assertEqual(self.guard('git push -f origin main', owner=True), 2)
         self.assertEqual(self.guard('git push --no-verify', owner=True), 2)
 
