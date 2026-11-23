@@ -23,6 +23,8 @@ T = dict({"enabled": True, "root": "~/work/.bot-tasks", "approval_hours": 24, "h
           "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1},
           # 质量：多久没动静算卡住（进程还在吃 CPU 不算）、验证没过最多返工几次
           "stuck_min": 40, "verify_retries": 2, "verify_timeout_min": 20,
+          # 等回复的任务最多挡同一件事的排队多久（分钟）：过了让排队的先跑，并提醒主控一次
+          "wait_block_min": 60,
           # 事的负责人：同一件事上次用过多久以内（缓存还热）、上下文多大以内，新任务就分叉接着它的会话
           "sibling_warm_min": 55, "sibling_max_ctx": 150000,
           "compact": {"idle_min": 50, "min_ctx": 120000},
@@ -129,6 +131,7 @@ def update(tid, _force=False, _touch=True, **kv):
         if not _force and new and old and new != old and new not in TRANSITIONS.get(old, set()):
             raise InvalidTransition(f"{ref(t)} 不能从 {old} 变成 {new}")
         t.update(kv)
+        if new == "waiting" and old != "waiting": t.update(waiting_since=time.time(), wait_nudged=False)
         if _touch or not t.get("updated"): t["updated"] = time.time()
         tmp = os.path.join(tdir(tid), "task.json.tmp")
         with open(tmp, "w") as f: json.dump(t, f, ensure_ascii=False, indent=1)
@@ -582,9 +585,28 @@ def resolve_thing(t):
 
 def thing_busy(t):
     """同一件事同时只有一个负责人在写：已有任务在跑或停在提问（等回复后还要接着写），后来的排队。
-    失败、中断、完成的不挡：失败的要人来定，不能让整件事一直卡着。"""
-    k = sibling_key(t)
-    return any(x["id"] != t["id"] and x.get("status") in ("running", "waiting") and sibling_key(x) == k for x in all_tasks())
+    失败、中断、完成的不挡：失败的要人来定，不能让整件事一直卡着。等回复的最多挡 wait_block_min 分钟：
+    过了让排队的先跑，并给主控补一条提醒（每次进等回复只提醒一次）。"""
+    k, now, busy = sibling_key(t), time.time(), False
+    for x in all_tasks():
+        if x["id"] == t["id"] or sibling_key(x) != k: continue
+        if x.get("status") == "running": busy = True
+        elif x.get("status") == "waiting":
+            since = x.get("waiting_since") or x.get("updated") or now
+            if now - since < T["wait_block_min"] * 60: busy = True
+            elif not x.get("wait_nudged"):
+                update(x["id"], _touch=False, wait_nudged=True)
+                event(x["id"], "question", f"（提醒）{ref(x)} 等回复 {int((now - since) // 60)} 分钟了，同一件事排队的 {ref(t)} 先跑了。"
+                                           "还要它接着干就回答它的问题；不要了就取消。")
+    return busy
+
+def handback_verdict(text):
+    """交回内容自己写了结局的，按它结束，不留在等回复：写了“按失败交回”或结论是失败、卡住 → failed；结论是通过、完成 → done。
+    没写结论返回 None。"""
+    if re.search(r"(?<![不别没])按失败交回", text or ""): return "failed"
+    m = re.search(r"^[\s*#>]*结论\s*\**\s*[:：]\s*(.+)$", text or "", re.M)
+    if not m: return None
+    return "failed" if re.search(r"BLOCKED|FAIL|失败|没过|未通过|不通过|做不了|卡住|放弃", m.group(1), re.I) else "done"
 
 def all_siblings():
     out = []
@@ -1333,14 +1355,21 @@ def run(tid):
             rc = role_check(load(tid))
             if rc: note += "\n\n" + rc
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
-            if re.search(r"^\s*\[提问\]", text, re.M):
+            verdict = handback_verdict(text)
+            if verdict == "failed":   # 写了按失败交回：结束，交回主控，不占着这件事
+                update(tid, status="failed", verify_round=0); event(tid, "failed", text + note)
+                return
+            if verdict is None and re.search(r"^\s*\[提问\]", text, re.M):
                 update(tid, status="waiting")
                 event(tid, "question", re.sub(r"^\s*\[提问\]\s*", "", text, flags=re.M).strip() + note)
             elif final.get("is_error"):
                 update(tid, status="failed"); event(tid, "failed", (text or final.get("subtype", "")) + note)
             else:
                 t = load(tid)
-                if t.get("verify"):   # 验证闸门：服务自己跑派活时定的命令，任务说“做完了”不算数
+                readonly = "Edit" in (roles().get(t.get("role") or "", {}).get("deny") or [])
+                if readonly and t.get("verify"):   # 只读角色不改代码，验证命令只会在基线上跑，基线已知挂的测试会让闸门一挂到底
+                    text = f"结论：只读角色，服务没跑验证闸门（{t['verify']}）\n\n{text}"
+                elif t.get("verify"):   # 验证闸门：服务自己跑派活时定的命令，任务说“做完了”不算数
                     bad = accept_tampered(t)
                     ok, out = (False, f"验收测试被改了：{'、'.join(bad)}。用 git checkout {t['accept_commit'][:10]} -- 这些文件 改回去；"
                                       "觉得测试写错了就用 [提问] 说明") if bad else run_verify(t)
@@ -1352,7 +1381,7 @@ def run(tid):
                     if not ok and rnd < T["verify_retries"]:
                         update(tid, verify_round=rnd + 1)
                         prompt, resume = (f"[验证失败] 派活时定的验证命令没通过（第 {rnd + 1} 次退回）：{t['verify']}\n"
-                                          f"输出末尾：\n{out}\n\n修好再结束这一轮。修不了就写清原因，用 [提问] 交回。"), True
+                                          f"输出末尾：\n{out}\n\n修好再结束这一轮。修不了就写清原因，写“按失败交回”结束这一轮。"), True
                         continue
                     if not ok:
                         update(tid, status="failed", verify_round=0)

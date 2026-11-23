@@ -246,6 +246,55 @@ class DeviceRedlineTest(Base):
         self.assertEqual(run('', str(link)).returncode, 126, 'PATH 最前面的 claude 链接直接拒绝')
 
 
+
+class HandbackEndTest(unittest.TestCase):
+    """第 12 项：只读角色不跑验证闸门；交回写了“按失败交回”或结论就结束，不留在等回复；等回复不无限挡同一件事的排队。"""
+
+    def setUp(self):
+        from test_accept_flow import FAKE_CLAUDE
+        self.e = Inst(self)
+        (self.e.bin / 'claude').write_text(FAKE_CLAUDE.replace("text = '做完了'", "text = os.environ.get('FAKE_TEXT') or '做完了'"))
+        os.environ['FAKE_MODE'] = 'plain'
+        self.addCleanup(os.environ.pop, 'FAKE_TEXT', None)
+
+    def go(self, text, **kw):
+        os.environ['FAKE_TEXT'] = text
+        x = self.e.task(**kw); self.e.t.run(x['id'])
+        return self.e.t.load(x['id']), [e['kind'] for e in self.e.t.events(x['id'])]
+
+    def test_readonly_role_skips_verify(self):
+        x, ev = self.go('看完了，没问题', role='评审', verify='false')
+        self.assertEqual(x['status'], 'done', ev)
+        self.assertIn('只读角色', self.e.t.events(x['id'])[-1]['text'])
+
+    def test_fail_handback_ends_failed(self):
+        x, ev = self.go('[提问] 基线上的测试本来就挂，修不了，按失败交回')
+        self.assertEqual(x['status'], 'failed')
+        self.assertEqual(ev[-1], 'failed')
+
+    def test_conclusion_ends_task(self):
+        x, _ = self.go('结论：PASS，都改完了\n[提问] 要不要顺手把 README 也改了？')
+        self.assertEqual(x['status'], 'done')
+        x, _ = self.go('**结论**：BLOCKED，缺权限\n[提问] 谁能开一下权限？')
+        self.assertEqual(x['status'], 'failed')
+
+    def test_plain_question_still_waits(self):
+        x, ev = self.go('[提问] 方案 A 还是 B？我建议 A')
+        self.assertEqual(x['status'], 'waiting'); self.assertEqual(ev[-1], 'question')
+
+    def test_waiting_blocks_queue_only_for_a_while(self):
+        t = self.e.t
+        w = self.e.task(status='waiting'); q = self.e.task(status='approved')
+        self.assertTrue(t.thing_busy(t.load(q['id'])), '刚进等回复：排队的照旧等')
+        t.update(w['id'], _force=True, waiting_since=time.time() - (t.T['wait_block_min'] + 1) * 60)
+        self.assertFalse(t.thing_busy(t.load(q['id'])), '等太久：排队的先跑')
+        self.assertFalse(t.thing_busy(t.load(q['id'])))
+        nudges = [e for e in t.events(w['id']) if e['kind'] == 'question' and '提醒' in e['text']]
+        self.assertEqual(len(nudges), 1, '提醒主控一次，不刷屏')
+        r = self.e.task(status='running')
+        self.assertTrue(t.thing_busy(t.load(q['id'])), '在跑的照旧挡')
+
+
 CP = '~/.claude' + '/projects'   # 线上钩子按文字拦这两个路径，拼出来写
 PV = '.priv' + 'ate'
 PV_RE = '/' + r'\.' + 'priv' + r'ate(/|\b)'
