@@ -1299,6 +1299,7 @@ def dispatch_one(ev, d):
         why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced") and owner)
+    if pm["auto_model"]: pm = task_judge(d, pm)
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
@@ -1310,7 +1311,7 @@ def dispatch_one(ev, d):
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
                              "message_id": ev["message_id"], "thread": in_topic(ev), "key": session_key(ev),
                              "thread_id": ev.get("thread_id"), "root_id": ev.get("root_id")}, target=d["target"])
-    task_judge(t)
+    if t.get("jev"): dm.record("task", task=t["id"], model=t["model"], effort=t["effort"], **t["jev"])
     note_briefed(session_key(ev), t["id"])   # 任务书是这个会话自己写的，回报时不用再贴
     n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
     log.info("task %s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
@@ -2451,14 +2452,16 @@ def amb_named(msgs):
     names = [x for x in [NAME, OWNER_NAME] + list((CFG.get("decide") or {}).get("wake") or []) if x]
     return any(n in (m.get("content") or "") for m in msgs for n in names)
 
-def task_judge(t):
-    """影子：新任务让决策后端按几个小问题打分，只记，不影响派活；做完后和“验证一次过没过、换没换人”对照。"""
+def task_judge(d, pm):
+    """要用 sonnet 起步的开发活，开工前让决策后端打分：on 按分数定模型和思考档，shadow 只记。出错、超时照脚本的默认。"""
     dc = dm.conf(CFG.get("decide"), "task")
-    if dc["mode"] != "shadow" or not t.get("auto_model"): return
-    def go():
-        try: dm.record("task", task=t["id"], **dm.score(f"{t['title']}\n{t['brief']}", dc))
-        except Exception as e: log.warning("task judge failed: %s", type(e).__name__)
-    threading.Thread(target=go, daemon=True).start()
+    if dc["mode"] not in ("on", "shadow"): return pm
+    t0 = time.time()
+    try: s = dm.score(f"{d['title']}\n{d['brief']}", dc)
+    except Exception as e:
+        log.warning("task judge failed: %s", type(e).__name__)
+        return dict(pm, jev={"error": type(e).__name__, "ms": int((time.time() - t0) * 1000)})
+    return dict(pm, **(dm.pick_task(s) if dc["mode"] == "on" else {}), jev=dict(s, ms=int((time.time() - t0) * 1000)))
 
 HELD_FILE = os.path.join(STATE, "ambient_held.json")
 amb_held = load(HELD_FILE, {})    # 判了不用叫醒、还没给 Claude 看的群消息
