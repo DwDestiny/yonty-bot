@@ -6,7 +6,7 @@ Input:  环境变量 FCB_UPGRADE_TOKEN（要和 state/upgrade.json 里的一致�
 Output: 进度和结果写进 state/upgrade.json（status 依次是 running、announce、restarting，最后 done / failed / rolled_back / uptodate），
         服务读这个文件，向主人回报
 Pos:    实例目录的 upgrade.py，由 scaffold.py 从 app/upgrade.py 复制
-步骤：源码仓库干净、在 main → 只做快进 → 跑测试 → 等任务单元都结束 → 备份实例 → 先让服务回一句再重启 → 重新生成（不重写守则）
+步骤：源码仓库干净、在 main → 只做快进 → 跑测试 → 等任务单元都结束 → 备份实例 → 先让服务回一句再重启 → 重新生成（守则只合并模板改动）
       → 重启服务 → 新服务写出 state/started.json 且版本对上就算好，否则用备份回滚。
 """
 import json, os, subprocess, sys, tarfile, time, uuid
@@ -100,7 +100,8 @@ def main():
     if r.returncode:
         restore(); restart(slug)
         return put(status="rolled_back", detail="重新生成失败，已恢复原来的文件：\n" + tail(r))
-    put(status="restarting")
+    nm = load(os.path.join(INST, "yonty-bot.json"), {})   # 没合进守则的模板改动
+    put(status="restarting", rules_left=nm.get("rules_left") or [])
     t0 = time.time()
     restart(slug)
     if healthy(slug, ver, t0): return put(status="done")

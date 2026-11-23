@@ -48,9 +48,9 @@ def instance_words():
     return tuple(sorted(w for w in ws if len(w) >= 3 and w not in ('/root', '/home/root')))
 
 class VersionAndConfigTest(unittest.TestCase):
-    def test_version_is_2_0_0(self):
-        """完成标准：版本号按方案定，VERSION = 2.0.0。"""
-        self.assertEqual(read(ROOT / 'VERSION').strip(), '2.0.0')
+    def test_version_is_2_x(self):
+        """完成标准：版本号是 2.x（写死补丁号会让每次 /upgrade 的测试都不过）。"""
+        self.assertRegex(read(ROOT / 'VERSION').strip(), r'^2\.\d+\.\d+$')
 
     def test_config_example_drops_old_limits(self):
         """5.4：tasks.max_running 和 tasks.memory_max 删掉。"""

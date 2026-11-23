@@ -59,7 +59,7 @@
 4. 接飞书时运行 `bash ../scripts/ids.sh`，把输出的 `bot_open_id` 和 `owner_open_id` 填进 `config.json`；接企微时按 wecom.md 第 2 节填 `channels.wecom`。再按问到的六件事填 `persona`、`style`、`private`、`identity`、`workdir`、`add_dirs`。
    > **注意**：`workdir` 不能是实例目录，否则 Claude 会加载实例目录的 `CLAUDE.md`。一般填主人放代码仓的目录。
 5. 运行 `python3 ../scripts/scaffold.py <实例目录>`。脚本写出 `bridge.py`、`hooks/`、`rules.md`、`claude-settings.json` 和服务文件，并打印安装命令；启用企微时另写 `wecom_gateway.mjs` 并 `npm install` SDK（需要 Node 18+）。
-6. 读一遍生成的 `rules.md`，按用户的具体情况改：私密内容的具体名单、要找谁拍板、哪些事不在飞书里做。以后改守则直接改 `rules.md`；重跑 `scaffold.py` 不会覆盖它（加 `--rules` 才重写）。
+6. 读一遍生成的 `rules.md`，按用户的具体情况改：私密内容的具体名单、要找谁拍板、哪些事不在飞书里做。以后改守则直接改 `rules.md`；重跑 `scaffold.py` 只把模板的改动合进去，不盖掉你的改动（加 `--rules` 才整份重写）。
 7. 验证缓存：在实例目录运行 `python3 bridge.py --cache-check 3`。结论是“正常”才往下走。看不懂或异常，读 [cache.md](cache.md)。
 8. 按脚本打印的命令安装服务并启动。服务器上还要 `sudo loginctl enable-linger $USER`（要 sudo，交给用户）。
 9. 跑下面的验收清单。
@@ -146,6 +146,7 @@
 
 ## 变更记录
 
+- 2.0.1（2026-11-23）`/upgrade` 自动合守则：模板从上次到现在的改动按整行逐处合进实例的 `rules.md`；实例改过的那一处不动，回报里列出来，其余照合，基线（`yonty-bot.json` 的 `rules_commit`）不前移，下次再试。手工合完加 `--rules-done` 记下。从 2.0.0 之前直接升上来的，老实例按 `commit` 当基线。
 - 2.0.0（2026-11-22）三层智能体、投递、按资源放行、设备和不可逆闸门、定时任务。详见 [architecture.md](architecture.md)、[tasks.md](tasks.md)、[schedules.md](schedules.md)、[boundary.md](boundary.md)。
   - 第二轮补齐：任务回报先到项目经理（处理掉要写理由，不写服务补投给主控）；投递限频真正生效（进展 10 分钟一条、每个任务 5 条，主人私聊 10 分钟 4 条、每小时 12 条，超出的不用回复的进摘要、要回复的排队，同一发送方 2 分钟内的合并，同一对智能体来回 3 次交给主控）；每次投递跳数自动加一，超过 3 跳拦下；内存紧时冻结单元、缓过来解冻；探针在 bwrap 里跑、同事也能写探针；沙箱盖住 `/run/user`。`--cache-check` 实测见 cache.md 第 6 节。
   - 第三轮复审修复（2026-11-23）：命令行（投递、动作、建合并请求、诊断）不再带主人权限，主人专属的改成主人私聊里主控写 `[服务命令] diag|mr|act`，由服务执行；任务单元按 cgroup 路径、轮次、InvocationID、MainPID 认；定时沙箱里只有工作树、发件箱和自己的会话记录可写，租约、动作、回执由服务在箱外办；设备红线和不可逆闸门认得到套着、拆开、替换出来的写法。已经用 `rules.md` 的实例，把“跑 `tasks.py diag`”那句改成写 `[服务命令] diag`。
@@ -163,7 +164,7 @@
   - 状态自动迁移：旧收件箱条目按位置编号 i1、i2…；1.3.0 建的老任务照旧回报给原聊天的主控，新派的才交项目经理。
   - `config.json` 里的 `tasks.max_running`、`tasks.memory_max` 不再生效，启动日志提醒一次，可以删掉。
   - 人工步骤（`/upgrade` 做不了的）：
-    1. `/upgrade` 不重写 `rules.md`。要用主控的新写法，在终端跑 `python3 scripts/scaffold.py <实例> --rules`，或者把 `app/rules/base.md` 新增的“分流和转交（2.0）”一节手工并进去。
+    1. 2.0.0 的 `/upgrade` 不碰 `rules.md`（2.0.1 起自动合并）。要用主控的新写法，在终端跑 `python3 scripts/scaffold.py <实例> --rules`，或者把 `app/rules/base.md` 新增的“分流和转交（2.0）”一节手工并进去。
     2. 看门狗定时器只生成不启用。在终端跑：`ln -sf <实例>/<服务名>-yb-watchdog.service <实例>/<服务名>-yb-watchdog.timer ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now <服务名>-yb-watchdog.timer`
     3. 要用设备和不可逆闸门时，在 `config.json` 写 `devices`、`irreversible`，见 [config.md](config.md)。
     4. 带读范围的定时任务要机器上有 bwrap：`apt install bubblewrap`。

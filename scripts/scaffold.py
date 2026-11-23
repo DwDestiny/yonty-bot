@@ -5,11 +5,11 @@ Input:  实例目录（里面要有 config.json，样例见 app/config.example.j
 Output: 在实例目录写 bridge.py、tasks.py、hooks/（含 hooks/git/ 钩子分发器）、rules.md、claude-settings.json、服务文件（Linux: systemd 用户服务；macOS: launchd plist）；
         启用企微时另写 wecom_gateway.mjs、package.json 并安装 @wecom/aibot-node-sdk
 Pos:    Yonty Bot 的生成器
-用法:   python3 scaffold.py <实例目录> [--rules] [--no-npm] [--confirm-cross-im]
-        默认不覆盖已有 rules.md；加 --rules 才按模板重写。
+用法:   python3 scaffold.py <实例目录> [--rules | --rules-done] [--no-npm] [--confirm-cross-im]
+        已有 rules.md 时，把模板的改动逐处合进去，实例改过的那一处不动并列出来；加 --rules 按模板整份重写；手工合完后加 --rules-done 记下已合。
         config.json 打开 cross_im_read 时，第一次生成要加 --confirm-cross-im（先把提醒给主人看、主人同意后再加）
 """
-import json, os, platform, re, shutil, subprocess, sys, datetime
+import difflib, json, os, platform, re, shutil, subprocess, sys, datetime
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = os.path.join(ROOT, "app")
@@ -76,18 +76,21 @@ for f in sorted(os.listdir(os.path.join(T, "roles"))):
     if f.endswith(".md") and not os.path.exists(os.path.join(INST, "roles", f)):
         shutil.copy(os.path.join(T, "roles", f), os.path.join(INST, "roles", f))
 
-# 2. 守则：已有就不动（实例的守则会按使用反馈改），--rules 才重写
+# 2. 守则：没有或带 --rules 就按模板写；已有就把模板的改动逐处合进去，实例自己改过的那一处不动并列出来
 rules = os.path.join(INST, CFG.get("rules_file", "rules.md"))
-if not os.path.exists(rules) or "--rules" in sys.argv:
+META = json.load(open(os.path.join(INST, "yonty-bot.json"))) if os.path.exists(os.path.join(INST, "yonty-bot.json")) else {}
+HEAD = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+def render(read, version):
     persona = open(os.path.join(T, "rules", f"persona-{CFG.get('persona', 'work')}.md")).read()
     style_raw = open(os.path.join(T, "rules", f"style-{CFG.get('style', 'veteran')}.md")).read()
     label = style_raw.split("label:", 1)[1].split("-->", 1)[0].strip()
     style = style_raw.split("-->", 1)[1].strip()
-    body = open(os.path.join(T, "rules", "base.md")).read()
+    body = read("base.md")
     body = body.replace("{{PERSONA}}", persona.strip()).replace("{{STYLE}}", style)
     names = [n for n, on in (("飞书", FEISHU_ON), ("企业微信", WECOM_ON)) if on]
     heads = [h for h, on in (("`[飞书消息]`", FEISHU_ON), ("`[企微消息]`", WECOM_ON)) if on]
-    wecom_sec = open(os.path.join(T, "rules", "channel-wecom.md")).read() if WECOM_ON else ""
+    wecom_sec = read("channel-wecom.md") if WECOM_ON else ""
     if FEISHU_ON:
         dm = f"`lark-cli im +messages-send --as bot --user-id {CFG['owner_open_id']} --text ...`"
     else:
@@ -99,10 +102,70 @@ if not os.path.exists(rules) or "--rules" in sys.argv:
     body = body.replace("{{PERSONA_LABEL}}", {"work": "工作分身", "personal": "私人助理"}[CFG.get("persona", "work")])
     body = body.replace("{{STYLE_LABEL}}", label).replace("{{DATE}}", datetime.date.today().isoformat()).replace("{{VERSION}}", VERSION)
     body = body.replace("{{NAME}}", CFG["name"]).replace("{{OWNER}}", CFG["owner_name"]).replace("{{OWNER_OPEN_ID}}", CFG.get("owner_open_id", "")).replace("{{INSTANCE}}", INST)
-    open(rules, "w").write(body)
+    return body
+
+def tpl_now(n):
+    with open(os.path.join(T, "rules", n), encoding="utf-8") as f: return f.read()
+
+def tpl_at(commit):
+    return lambda n: subprocess.run(["git", "-C", ROOT, "show", f"{commit}:app/rules/{n}"], capture_output=True, text=True, check=True).stdout
+
+def find_block(lines, block):
+    n = len(block)
+    return [i for i in range(len(lines) - n + 1) if lines[i:i + n] == block] if n else []
+
+def merge_rules(base_commit):
+    """把模板从 base_commit 到现在的改动逐处合进实例守则，返回 (新内容或 None, 没合进的清单或 None)。清单 None 表示基线取不到。
+    守则一行一条，所以按整行对：原来那几行在实例里还在（只有一处）就换成新的；新增的放在原来的上一行或下一行旁边。
+    不用 git merge-file：实例改了紧挨着的另一条，它也算冲突。"""
+    if not base_commit: return None, None
+    # 两边用同一个版本号、日期渲染：开头那行各实例会自己改，不参与合并
+    try: old, new = (render(r, VERSION).split("\n") for r in (tpl_at(base_commit), tpl_now))
+    except Exception: return None, None
+    with open(rules, encoding="utf-8") as f: mine = f.read().split("\n")
+    out, left = list(mine), []
+    for op, a, b, c, d in difflib.SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
+        if op == "equal": continue
+        was, now = old[a:b], new[c:d]
+        body = [l for l in now if l.strip()]
+        if body and all(l in out for l in body) and not any(l.strip() and l not in now and l in out for l in was): continue   # 已经合过
+        if op == "insert" and not body: continue   # 只多了空行
+        if was and any(l.strip() for l in was):
+            at = find_block(out, was)
+            if len(at) == 1: out[at[0]:at[0] + len(was)] = now; continue
+            if op == "delete" and not any(l.strip() and l in out for l in was): continue   # 已经删了
+        elif op == "insert":
+            spot = None
+            for k in (3, 2, 1):   # 上文或下文有一边能唯一对上就行，越长越先
+                up, down = old[max(0, a - k):a], old[a:a + k]
+                hit_up = find_block(out, up) if any(l.strip() for l in up) else []
+                hit_down = find_block(out, down) if any(l.strip() for l in down) else []
+                if len(hit_up) == 1: spot = hit_up[0] + len(up)
+                elif len(hit_down) == 1: spot = hit_down[0]
+                if spot is not None: break
+            if spot is not None: out[spot:spot] = now; continue
+        left.append((body or [l for l in was if l.strip()] or [""])[0][:60])
+    return ("\n".join(out) if out != mine else None), left
+
+# rules_commit：守则已经合到哪个提交的模板。有没合进的就不前移，下次升级还会再试，改动不会漏；已合的认得出，不会合两遍
+rules_commit, rules_left = HEAD, []
+if not os.path.exists(rules) or "--rules" in sys.argv:
+    with open(rules, "w", encoding="utf-8") as f: f.write(render(tpl_now, VERSION))
     print("写了", rules)
+elif "--rules-done" in sys.argv: print("守则记为已合", rules)
 else:
-    print("保留已有", rules, "（加 --rules 按模板重写）")
+    base_commit = META.get("rules_commit", META.get("commit"))
+    merged, left = merge_rules(base_commit)
+    if merged is not None:
+        tmp = rules + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f: f.write(merged)
+        shutil.copymode(rules, tmp); os.replace(tmp, rules)
+        print("守则模板的改动已合并进", rules)
+    if left is None or left: rules_commit = base_commit or ""
+    if left is None: rules_left = ["（取不到上次的守则模板，整份没合）"]
+    elif left: rules_left = left
+    if rules_left: print("守则里没合进的：", *rules_left, sep="\n  ")
+    elif merged is None: print("保留已有", rules, "（模板没有要合的）")
 
 # 3. Claude 设置：权限拒绝表 + 钩子
 # 实例目录里只有守则（行为偏好）机器人能改，且只在主人私聊里（private_guard 再按场景拦）；代码、钩子、配置、运行态一律不能改
@@ -186,8 +249,7 @@ WantedBy=default.target
 """)
     print(f"服务文件：{svc}\n安装：ln -sf {svc} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now {slug}"
           f"\n服务器上还要：sudo loginctl enable-linger $USER")
-# 服务的 /upgrade 靠这份记录：从哪个仓库、哪个提交生成的，下次用同样的参数重新生成（不带 --rules，守则不覆盖）
-_commit = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+# 服务的 /upgrade 靠这份记录：从哪个仓库、哪个提交生成的，下次用同样的参数重新生成（不带 --rules，守则只合并不重写）
 # 动作目录：每个动作一个 json，以 _ 开头的是示例（方案第 8 节）
 os.makedirs(os.path.join(INST, "actions"), exist_ok=True)
 _ex = os.path.join(INST, "actions", "_example.json")
@@ -202,7 +264,7 @@ with open(os.path.join(INST, f"{SLUG}-yb-watchdog.service"), "w") as f:
             f"WorkingDirectory={INST}\nExecStart={sys.executable} {os.path.join(INST, 'scheduler.py')} watchdog\n")
 with open(os.path.join(INST, f"{SLUG}-yb-watchdog.timer"), "w") as f:
     f.write(f"[Unit]\nDescription={SLUG} 看门狗定时器（每 2 分钟）\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n\n[Install]\nWantedBy=timers.target\n")
-json.dump({"version": VERSION, "source": ROOT, "commit": _commit, "service": SLUG,
+json.dump({"version": VERSION, "source": ROOT, "commit": HEAD, "rules_commit": rules_commit, "rules_left": rules_left, "service": SLUG,
            "flags": [a for a in sys.argv[2:] if a in ("--no-npm",)]},
           open(os.path.join(INST, "yonty-bot.json"), "w"), ensure_ascii=False, indent=1)
 open(os.path.join(INST, ".gitignore"), "w").write("state/\nlogs/\ninbox/\nnode_modules/\n_tmp/\n__pycache__/\n")
