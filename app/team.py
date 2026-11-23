@@ -91,7 +91,6 @@ def save_plan(project, name, body):
         name, {"items": items, "text": body[:6000], "at": time.time()}))
     return ""
 
-def paths(s): return [x.strip().rstrip("/") for x in re.split(r"[,，、\s]+", s or "") if x.strip()]
 def _stem(p): return re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/")
 def overlap(a, b):
     for x in a:
@@ -110,19 +109,41 @@ def gate(tk, project, d, c):
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
     if len(mine) >= c["max_tasks"] * 2: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口或换一个方案"
     fs = d.get("files") or []
-    if not d.get("closing"):
+    if not d.get("closing") and d.get("role") != "评审":
         if not fs: return f"“{d['title']}”没写“文件:”：写它独占改的文件或目录"
         if any(_stem(x) in ("", ".") for x in fs): return f"“{d['title']}”的文件范围是整个仓库，要拆小"
     bad = [x for x in d.get("deps") or [] if not x in p["items"] and not tk.resolve(x)[0]]
     return f"“{d['title']}”依赖的 {'、'.join(bad)} 不在任务单里" if bad else ""
 
+DEAD = ("cancelled", "rejected", "expired")
+
+def plan_tasks(t, pool):
+    """同一方案里还算数的任务，一个标题只留最新的。"""
+    by = {}
+    for y in pool:
+        if y.get("plan") == t.get("plan") and y.get("project") == t.get("project") and y["status"] not in DEAD: by[y["title"]] = y
+    return by
+
 def dep_tasks(tk, t, pool=None):
-    """[(依赖写法, 任务或 None)]：按标题在同一方案里找最新的一个，或按短名#N 找。"""
-    pool, out = pool or tk.all_tasks(), []
-    for x in t.get("deps") or []:
-        same = [y for y in pool if y.get("plan") == t.get("plan") and y.get("project") == t.get("project") and y["title"] == x and y["id"] != t["id"]]
-        out.append((x, same[-1] if same else tk.resolve(x)[0]))
+    """[(依赖写法, 任务或 None)]：按标题在同一方案里找最新的一个，或按短名#N 找。收口还等方案里的全部小任务，除了等它的（如评审）。"""
+    pool = pool if pool is not None else tk.all_tasks()
+    by, out = plan_tasks(t, pool), []
+    for x in t.get("deps") or []: out.append((x, by.get(x) if x != t["title"] else None) if x in by else (x, tk.resolve(x, pool)[0]))
+    if t.get("closing"):
+        after, grew = {t["title"]}, True
+        while grew:
+            new = {n for n, y in by.items() if n not in after and after & set(y.get("deps") or [])}
+            after |= new; grew = bool(new)
+        seen = {y["id"] for _, y in out if y}
+        out += [(n, y) for n, y in by.items() if n not in after and y["id"] not in seen and y["id"] != t["id"] and not y.get("closing")]
     return out
+
+def merge_list(tk, t):
+    """开工要先合进来的任务：依赖，加上同一方案里改过同一块文件、已经做完的。"""
+    pool = tk.all_tasks()
+    out = [y for _, y in dep_tasks(tk, t, pool) if y]
+    ids = {y["id"] for y in out} | {t["id"]}
+    return out + [y for y in plan_tasks(t, pool).values() if y["id"] not in ids and y["status"] == "done" and overlap(t.get("files") or [], y.get("files") or [])]
 
 def waits(tk, t, c):
     """这个任务现在为什么先别开；空串就是可以开。"""
@@ -134,8 +155,10 @@ def waits(tk, t, c):
         if y["status"] != "done": return f"等 {tk.ref(y)}"
     mine = [x for x in pool if x.get("project") == t.get("project") and x["id"] != t["id"] and x.get("plan")]
     for x in mine:
-        live = x["status"] in ("running", "waiting") or (x["status"] == "approved" and x["id"] < t["id"])
-        if live and t["id"] not in [y["id"] for _, y in dep_tasks(tk, x, pool) if y] and overlap(t.get("files") or [], x.get("files") or []):
+        if not overlap(t.get("files") or [], x.get("files") or []): continue
+        # 排在前面、自己也能开的才让；它还在等依赖就不让，免得绕一圈互相等
+        if x["status"] in ("running", "waiting") or (x["status"] == "approved" and x["id"] < t["id"]
+                                                     and all(y and y["status"] == "done" for _, y in dep_tasks(tk, x, pool))):
             return f"跟 {tk.ref(x)} 改同一块文件，等它"
     if sum(x["status"] == "running" for x in mine) >= c["max_parallel"]: return f"等名额：项目同时最多 {c['max_parallel']} 个"
     return ""
@@ -143,8 +166,8 @@ def waits(tk, t, c):
 # ---------- 看板 ----------
 def board(tk, project=None, limit=1800):
     """按任务状态生成，主控和项目经理照它汇报。"""
-    st, now, by = load(), time.time(), {}
-    for t in tk.all_tasks():
+    st, now, by, pool = load(), time.time(), {}, tk.all_tasks()
+    for t in pool:
         if t.get("schedule") or (project and t.get("project") != project): continue
         if t["status"] in tk.ACTIVE + ("pending",) or (t["status"] in ("done", "failed", "lost", "cancelled") and now - (t.get("updated") or 0) < 12 * 3600):
             by.setdefault(t.get("project") or "task", []).append(t)
@@ -153,7 +176,7 @@ def board(tk, project=None, limit=1800):
     out = []
     for p, ts in sorted(by.items()):
         out.append(f"{p}" + ("（停工中）" if p in (st.get("held") or {}) else "") + "：" + ((st.get("notes") or {}).get(p) or ""))
-        rest = {n: [i for i in x["items"] if not any(t.get("plan") == n and t["title"] == i for t in tk.all_tasks() if t.get("project") == p)]
+        rest = {n: [i for i in x["items"] if not any(t.get("plan") == n and t["title"] == i for t in pool if t.get("project") == p)]
                 for n, x in ((st.get("plans") or {}).get(p) or {}).items() if now - x["at"] < 7 * 86400}
         act = [t for t in ts if t["status"] in tk.ACTIVE + ("pending",)]
         for t in act + sorted((t for t in ts if t not in act), key=lambda t: -(t.get("updated") or 0))[:4]:

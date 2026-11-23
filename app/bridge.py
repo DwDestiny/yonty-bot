@@ -624,13 +624,15 @@ def handle(ev):
                 prompt = (pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "") + prompt
                 if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
                 with lock: s["pm_intro"] = True; s["team"] = 3
+            extras = []   # 项目经理中途的结果并进最后一条一起办，里面的 [方案]、[派活] 不丢
             if STRICT: prompt = with_board(s, prompt, pm, owner and ev.get("chat_type") == "p2p" or bool(pm and owner))
             result = run_claude(key, s, prompt, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
-                                on_extra=lambda x: None if pm and STRICT and ev.get("chat_type") == "p2p" else deliver(ev, key, x, in_thread, sent), idem=ev.get("message_id"), **({"layer": pm} if pm else {}))
+                                on_extra=lambda x: extras.append(x) if pm and STRICT else deliver(ev, key, x, in_thread, sent), idem=ev.get("message_id"), **({"layer": pm} if pm else {}))
             if pm and (result or "").strip().startswith("[不是我的]"):   # 项目经理退回：主控重新判断这条消息
                 sticky.pop(session_key(ev), None)
                 enqueue(session_key(ev), dict(ev, pm=None, no_route=True)); result = ""
-            elif pm and result and STRICT:
+            elif pm and STRICT and (result or extras):
+                result = "\n\n".join(x for x in extras + [result] if (x or "").strip())
                 redo = lambda note: run_claude(key, s, note, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""), quiet=True, layer=pm)
                 result = with_retry(ev, key, result, redo, pm)
                 direct = ev.get("chat_type") != "p2p"
@@ -655,39 +657,46 @@ def handle(ev):
         deliver(ev, key, result, in_thread, sent, redo)
     if ev.get("channel") != "wecom": unreact(ev["message_id"], rid)
 
-def process(ev, key, result, errs=None, notes=None):
-    """拆出回复里的标记并执行，返回要说的话。errs 给了：没成的写进去；notes：成了的服务说明。"""
-    for what, fn in (("任务指令", lambda r: chat_followups(ev, r)), ("停工", lambda r: hold_marks(ev, r)), ("转交", lambda r: handover(ev, r, errs)),
-                     ("定时任务", lambda r: schedule_directive(ev, r)), ("派活", lambda r: task_directive(ev, r, errs, notes))):
-        try: result = fn(result)   # 先拆 [任务指令]：再派活会在后面接说明，多行指令会把它吞进去
+def run_marks(ev, result, steps):
+    for what, fn in steps:
+        try: result = fn(result)
         except Exception:
             log.exception("%s failed", what); result += f"\n\n（{what}没成，请看日志。）"
     return result
 
-def with_retry(ev, key, result, redo, pm=None):
-    """标记没办成时，回复先不发：把回执交回同一个会话重写，最多两次。人看到的“已派、已转”都是真办成的。"""
-    notes = []
+def process(ev, result):
+    """拆出回复里的标记并执行，返回要说的话。先拆 [任务指令]：再派活会在后面接说明，多行指令会把它吞进去。"""
+    return run_marks(ev, result, (("任务指令", lambda r: chat_followups(ev, r)), ("停工", lambda r: hold_marks(ev, r)), ("转交", lambda r: handover(ev, r)),
+                                  ("定时任务", lambda r: schedule_directive(ev, r)), ("派活", lambda r: task_directive(ev, r))))
+
+def with_retry(ev, key, result, redo, pm=None, follow=True):
+    """[方案]、[转交]、[派活] 没办成时，回复先不发：把回执交回同一个会话重写，最多两次。人看到的“已派、已转”都是真办成的。
+    [任务指令]、[停]、[定时] 等最后定稿那条才执行，重写不会重复执行。follow=False：[任务指令] 由调用方按任务回报的限次处理。"""
+    ev, notes = dict(ev, handed=set(), made=0), []
     for i in range(3):
-        errs, ok = [], len(notes)
+        errs, ev["handed_before"] = [], frozenset(ev["handed"])
         if pm: result, e = pm_notes(pm, key, result); errs.extend(e)
-        result = process(ev, key, result, errs, notes)
+        result = run_marks(ev, result, (("转交", lambda r: handover(ev, r, errs)), ("派活", lambda r: task_directive(ev, r, errs, notes))))
         if not errs: break
         tasks.decide("回执退回", session=key, why="；".join(errs)[:300])
+        done = notes + [f"转交 {p}" for p in sorted(ev["handed"])]
         again = None
         if i < 2:
             try: again = redo("[服务回执] 你上一条回复没发出去。\n没成的：\n" + "\n".join("- " + x for x in errs)
-                              + ("\n已经办成的（不要再写）：\n" + "\n".join("- " + x for x in notes) if notes else "")
-                              + "\n改好没成的标记块，重写整条回复。[转交]、[任务指令] 没列在没成里的都已经办了，也不要再写。没法办就照实说没办成。")
+                              + ("\n已经办成的（不要再写）：\n" + "\n".join("- " + x for x in done) if done else "")
+                              + "\n改好没成的标记块，重写整条回复；[任务指令]、[停]、[继续]、[定时] 还没执行，要的照写。没法办就照实说没办成。")
             except Exception: log.exception("receipt redo failed")
         if again is None:
-            result = (team.visible(result) + "\n\n" + "\n".join(f"（{x}。）" for x in errs)).strip(); break
+            result = (result + "\n\n" + "\n".join(f"（{x}。）" for x in errs)).strip(); break
         result = again
+    steps = ([("任务指令", lambda r: chat_followups(ev, r))] if follow else []) + [("停工", lambda r: hold_marks(ev, r)), ("定时任务", lambda r: schedule_directive(ev, r))]
+    result = run_marks(ev, result, steps)
     return "\n\n".join(x for x in [result] + notes if (x or "").strip())
 
 def deliver(ev, key, result, in_thread, sent, redo=None):
     """一个结果发回聊天：先拆 [任务指令]、[转交]、[派活]，再回复。一轮里中途的结果和最后的结果走同一条路。
     同一条消息第二次起换幂等键；企微第二次起改成往会话里发，不再引用回复。"""
-    if TASKS_ON and result: result = with_retry(ev, key, result, redo) if redo and STRICT else process(ev, key, result)
+    if TASKS_ON and result: result = with_retry(ev, key, result, redo) if redo and STRICT else process(ev, result)
     result = team.visible(result or "")
     if not result:
         if not sent and not ev.get("idem") and not ev.get("no_route") and ev.get("channel") == "wecom": result = "收到。"   # 企微的“思考中”要有收尾
@@ -730,6 +739,7 @@ def hold_marks(ev, result):
     for l in result.split("\n"):
         m = re.match(r"^\s*\[(停|继续)\]\s*(\S+)\s*$", l)
         if not m: out.append(l); continue
+        if ev.get("pm") or (m.group(1) == "继续" and ev.get("idem")): out.append(f"（{l.strip()} 没执行：停工、复工要{OWNER_NAME}亲口说，由主控写。）"); continue
         if not is_owner(ev): out.append("（停工、复工只有主人能定，没执行。）"); continue
         ps = sorted(projects()) if m.group(2) in ("全部", "所有") else [m.group(2)]
         out += [hold_project(p, m.group(1) == "停") if p in projects() else f"（没有项目 {p}，没执行。）" for p in ps]
@@ -1103,10 +1113,13 @@ def task_directive(ev, result, errs=None, notes=None):
     if not ds: return result
     out = [head]
     for i, d in enumerate(ds):
-        bad = dispatch_block(ev, d)
+        # 重送去重的键：方案里的按标题认；别的按第几个办成的认，前一块没成时后面的不占它的键
+        idem, i = ev.get("idem"), ev.get("made", i)
+        e1 = dict(ev, idem=f"{idem}#{d['plan']}/{d['title']}" if d["plan"] and ev.get("pm") else f"{idem}#{i}") if idem and (i or d["plan"]) else ev
+        sent = idem and any(x.get("idem") == e1["idem"] for x in tasks.all_tasks())
+        bad = "" if sent else dispatch_block(ev, d)
         if bad and errs is not None: errs.append("派活没成：" + bad); continue
-        idem = ev.get("idem")
-        e1 = dict(ev, idem=f"{idem}#{i}") if idem and i else ev
+        if not bad and "made" in ev: ev["made"] += 1
         txt = f"（派活没成：{bad}。）" if bad else dispatch_one(e1, d)
         if errs is not None and txt.startswith("（派活没成："): errs.append(txt.strip("（）")); continue
         if notes is not None and not bad: notes.append(txt)
@@ -1157,7 +1170,7 @@ def dispatch_one(ev, d):
     n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
     log.info("task %s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
     head = (head + ("\n\n" + cloud_note if cloud_note else "")).strip()
-    if t.get("plan"): return (head + f"\n\n派了 {n} {t['title']}。").strip()
+    if t.get("plan") and owner: return (head + f"\n\n派了 {n} {t['title']}。").strip()
     head = (head + "\n\n" + thing_line(t)).strip()
     if owner:
         return (head + f"\n\n排上了，任务 {n}。进展在这儿报，{BT}/task {n}{BT} 随时看，@我 {BT}{n} 内容{BT} 补充。").strip()
@@ -1379,16 +1392,16 @@ def route(ev):
     m = re.match(r"^(\S+\.q\d+)\s+\S", text)
     rec = tasks.dl.by_qid(tasks._me(), m.group(1)) if m else None
     if rec and rec["status"] == "open" and can_answer(ev, rec): return ("answer", rec["id"])
-    if STRICT and ev.get("chat_type") == "p2p" and is_owner(ev): return None   # 主人私聊的话都进主控
+    direct = not (STRICT and is_owner(ev))   # 3.0：主人的话都进主控，不按项目名、粘着直接交给项目经理；绑定的群是主人自己选的，照旧
     b = bindings.get(ev.get("chat_id", ""))
     if b and ev.get("chat_type") != "p2p": return ("pm", b, pm_key(b, key))
     m = re.match(r"^\s*([\w.-]+)\s*[:：]", text)
     if m and m.group(1) == "主控": sticky.pop(key, None); return None
-    if m and m.group(1) in projects():
+    if direct and m and m.group(1) in projects():
         if is_owner(ev): sticky[key] = (m.group(1), now)
         return ("pm", m.group(1), pm_key(m.group(1), key))
     st = sticky.get(key)
-    if st and now - st[1] < ROUTING["sticky_min"] * 60 and is_owner(ev):
+    if direct and st and now - st[1] < ROUTING["sticky_min"] * 60 and is_owner(ev):
         sticky[key] = (st[0], now); return ("pm", st[0], pm_key(st[0], key))
     if following.get(key): return None   # 前面还有 短名#N 没处理完，它可能就是答复：这句不抢着当答复
     acts_ = tasks.dl.open_in_chat(tasks._me(), key, ("动作",))
@@ -1509,8 +1522,10 @@ def handover(ev, result, errs=None):
         if ev.get("idem"):   # 投递那一轮重送：转过的不再转
             if (ev["idem"], proj) in HANDED: continue
             HANDED.add((ev["idem"], proj))
+        if proj in ev.get("handed_before", ()): continue   # 退回重写时又写了一遍，前面已经转过
+        if "handed" in ev: ev["handed"].add(proj)
         if is_owner(ev) and not STRICT: sticky[session_key(ev)] = (proj, time.time())
-        enqueue(k, dict(ev, pm=proj, pm_key=k, handover_note=memo, no_route=True))
+        enqueue(k, dict({x: v for x, v in ev.items() if x not in ("handed", "handed_before", "made")}, pm=proj, pm_key=k, handover_note=memo, no_route=True))
         tasks.decide("转交", to=proj, why=memo[:200])
     if errs is not None: errs.extend(bad)
     elif bad: rest += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
@@ -1577,15 +1592,20 @@ def _delivery_turn(ev):
     if result is None: return False   # 这一轮没成：调用方退回重送
     idem = f"dl{rec['id']}-{int(rec['ts'])}"
     if STRICT and pm:   # 项目经理的投递轮：派活按闸门，别的话不直接发人
-        src = t and relay_ev(t) or im or rec.get("src_im")
+        src = t and relay_ev(t) or (im if im and session_key(im) == bk else None) or rec.get("src_im")   # 在别的聊天里答复的：里面的派活、指令不执行
         if src:
             ev2 = dict(src, idem=idem, hop=hop, pm=pm, no_handover=True, **({} if o_owner else {"sender_id": "", "sender_name": f"{pm} 的项目经理"}))
             redo = lambda note: run_claude(key, s, note, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop)
-            result = with_retry(ev2, key, result, redo, pm)
-        team_src = rec.get("src_im")
+            result = with_retry(ev2, key, result, redo, pm, follow=not t)
+        if t and result.strip(): result = turn_directives(t, result, hop, f"{pm} 的项目经理", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
+        team_src = rec.get("src_im") or (im if im and session_key(im) == bk else None)
         result = team.visible(pm_marks(pm, key, o_owner, result, hop, tid, idem, team_src))
-        if result and bk.startswith("p2p:"):
-            tasks.decide("项目经理回报", session=key, text=result[:500]); return
+        if result and bk.startswith("p2p:") and not (im and not team_src):   # 在别的聊天里答复的，照下面的老路只发主人私聊，不带进那个群
+            tasks.decide("项目经理回报", session=key, text=result[:500])
+            if team_src and not t:
+                try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(pm, key, o_owner), "主控", "节点", result, hop, None, {"voice": True, "auto": True, "src_im": team_src}, trusted=True)
+                except ValueError as x: log.warning("pm voice rejected: %s", x)
+            return
     elif pm: result = pm_marks(pm, key, o_owner, result, hop, tid, idem)
     elif STRICT and rec.get("src_im") and not t and not im:   # 项目经理的话，主控转述：发回原来那条消息的聊天
         ev2 = dict(rec["src_im"], idem=idem, hop=hop + 1, no_handover=hop >= 2, **({} if o_owner else {"sender_id": ""}))
@@ -1953,8 +1973,8 @@ def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一�
             f"仓库 {t['repo']}，工作树 {t['worktree']}，分支 {t['branch']}"
             + (f"，基于 {base}" if base else "") + f"；{tasks.model_label(t)}\n"
             + ("定时运行的工作树是独立 clone，里面的 git 配置归任务写：别在它里面跑 git 或 Claude，分支已拉回主仓库，看改动、推送都在主仓库做\n" if t.get("clone") else "") +
-            f"建草稿合并请求：{'跑' if t.get('clone') else '在工作树里跑'} {BT}{tasks.mr_cmd(t, t.get('base', ''), relay=True)}{BT}\n"
-            f"本任务已自动追加指令 {t.get('auto_follow', 0)} 次（上限 {RELAY_MAX}，加预算不算）\n"
+            (f"这是方案“{t['plan']}”的小任务：不建合并请求，由收口任务统一建\n" if tasks.part(t) else f"建草稿合并请求：{'跑' if t.get('clone') else '在工作树里跑'} {BT}{tasks.mr_cmd(t, t.get('base', ''), relay=True)}{BT}\n") +
+                        f"本任务已自动追加指令 {t.get('auto_follow', 0)} 次（上限 {RELAY_MAX}，加预算不算）\n"
             f"花费：已用 {t.get('cost') or 0} 美元当量，检查点 {t.get('budget') or tasks.T['budget_default']}（{t.get('budget_why', '')}）；"
             f"同类参考：{tasks.budget_basis(t.get('role'), t.get('model'))[1]}\n"
             f"这活属于“{t.get('thing') or tasks.MAIN_THING}”"
@@ -2049,10 +2069,12 @@ def pm_relay(ev):
             enqueue(okey, dict(ev, pm=None)); return
         note_briefed(key, n)
         absorbed = ABSORB_RE.search(result)
-        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}")
         if STRICT:
             redo = lambda note: run_claude(key, s, note, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"], quiet=True, layer=pm, hop=t.get("hop") or 0)
-            text = with_retry(dict(relay_ev(t), idem=f"pm{n}e{idx}", pm=pm, no_handover=True), key, text, redo, pm)
+            result = with_retry(dict(relay_ev(t), idem=f"pm{n}e{idx}", pm=pm, no_handover=True), key, result, redo, pm, follow=False)
+            absorbed = ABSORB_RE.search(result)
+        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}")
+        if STRICT: pass
         elif TASKS_ON and tasks.parse_directive(text)[1]:
             if tasks.load(n).get("auto_follow", 0) >= RELAY_MAX:
                 text = tasks.parse_directive(text)[0]; tasks.decide("没派", task=ref, why=f"已经自动追加 {RELAY_MAX} 次，新活要人来派")

@@ -94,7 +94,7 @@ To do it by hand, follow the steps section in [docs/guide.md](docs/guide.md). Th
 
 - Claude Code only. Codex is on the roadmap.
 - Taking over from the record and independent acceptance have automated tests. Data from real projects is still being collected.
-- One task at a time per piece of work. Later tasks queue. This is on purpose: two agents editing the same code at once will conflict.
+- One task at a time per file. Tasks that touch the same files queue. This is on purpose: two agents editing the same code at once will conflict.
 
 ## Security
 

@@ -79,6 +79,7 @@
 | `schedules` | 见说明 | `max_run_min` 120（一次运行从开工算起最长分钟数，续跑的轮次合起来算）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）、`tick_wait_s` 3（到点处理在单独线程，任务线程最多等它这么久）。见 schedules.md |
 | `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |
 | `team` | 见说明 | 组织规矩：`strict` true（主控唯一对话、方案闸门），`max_parallel` 4（每个项目同时几个小任务），`max_tasks` 12（每个方案的任务数，超过两倍拦下） |
+| `tasks.resources.default_small_gb` | `2` | 方案里的小任务没有同类历史时，开工估算按多少 G |
 | `delivery` | 见说明 | 投递：`max_hops` 3、`owner_max_chars` 300、`other_max_chars` 2000、`dedup_min` 30、`progress_gap_min` 10、`progress_max` 5、`owner_per_10min` 4、`owner_per_hour` 12、`pingpong_max` 3 和 `pingpong_min` 10（同一对智能体 10 分钟内来回 3 次后交给主控）、`merge_s` 120（同一发送方发给同一目标，离上次送不到这么多秒就等着合并）。见 architecture.md |
 
 注意：旧字段 `tasks.max_running` 和 `tasks.memory_max` 从 2.0 起不再生效：放行改按资源，内存上限随任务估计走。写了只在启动日志提醒一次，可以删掉。

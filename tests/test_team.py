@@ -87,12 +87,38 @@ class ReplayTest(Base):
         self.assertEqual(r.estimate(dict(t, plan='p', closing=True), hist, c)[0], 7 * r.GB)
         self.assertEqual(r.estimate(t, hist, c)[0], 7 * r.GB)
 
+    def test_closing_waits_for_undeclared_and_review_after(self):
+        pl = "[方案] 整改\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 收口 | | 甲\n- 评审 | | 收口\n"
+        rv = block(self.e.repo, '评审', deps='收口').replace('角色: 开发', '角色: 评审')
+        self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/b') + block(self.e.repo, '收口', deps='甲', closing=True) + rv])
+        self.say('开工'); self.e.tick()
+        self.t.update(self.by('甲')['id'], status='done', posted=9); self.e.tick()
+        self.assertEqual(self.by('收口')['status'], 'approved')
+        self.t.update(self.by('乙')['id'], status='done', posted=9); self.e.tick()
+        self.assertEqual((self.by('收口')['status'], self.by('评审')['status']), ('running', 'approved'))
+        self.assertIn(self.by('乙')['branch'], self.t.first_prompt(self.by('收口'), 'origin/main'))
+
+    def test_prompts_have_no_mr_instruction_for_small_tasks(self):
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '收口', closing=True)])
+        self.say('开工'); self.e.tick(); t = self.t.load(self.by('甲')['id'])
+        self.assertNotIn('tasks.py mr', self.t.first_prompt(t, 'origin/main')); self.assertIn('tasks.py mr', self.t.first_prompt(self.by('收口'), 'origin/main'))
+        e = {'kind': 'done', 'text': 'x'}
+        self.assertNotIn('tasks.py mr', self.b.relay_prompt(t, e)); self.assertIn('tasks.py mr', self.b.relay_prompt(self.seed, e))
+
+    def test_no_circular_wait(self):
+        """甲依赖丙，丙依赖乙，乙跟甲改同一块：乙先开，不互相等。"""
+        pl = "[方案] 整改\n任务:\n- 甲 | src/a | 丙\n- 乙 | src/a |\n- 丙 | src/c | 乙\n"
+        self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a', '丙') + block(self.e.repo, '丙', 'src/c', '乙') + block(self.e.repo, '乙', 'src/a')])
+        self.say('开工'); self.e.tick(); self.assertEqual(self.by('乙')['status'], 'running')
+
     def test_same_files_wait(self):
         pl = "[方案] 整改\n任务:\n- 甲 | src/a |\n- 乙 | src/a/x.ts |\n"
         self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/a/x.ts')])
         self.say('开工'); self.e.tick()
         self.assertEqual((self.by('甲')['status'], self.by('乙')['status']), ('running', 'approved'))
         self.assertIn('同一块文件', self.by('乙')['wait_why'])
+        self.t.update(self.by('甲')['id'], status='done', posted=9)
+        self.assertIn(self.by('甲')['branch'], self.t.first_prompt(self.by('乙'), 'origin/main'))   # 等过的先合进来，不从旧底子开始
 
 
 class GateTest(Base):
@@ -134,6 +160,33 @@ class GateTest(Base):
         self.assertEqual([t['status'] for t in self.new()], ['pending'])
 
 
+    def test_fixed_block_in_report_turn_is_dispatched(self):
+        """回报那一轮有幂等键：第一块成、第二块没成，改好的那块照样派出去。"""
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
+        t = self.by('甲'); self.t.update(t['id'], status='done'); self.t.event(t['id'], 'done', '结论：PASS')
+        self.layers([], [block(self.e.repo, '丙', 'src/c') + block(self.e.repo, '乙'), block(self.e.repo, '乙', 'src/b')]); self.e.tick()
+        self.assertEqual(sorted(x['title'] for x in self.new()), sorted(['甲', '丙', '乙']))
+
+    def test_rewrite_does_not_repeat_handover(self):
+        self.layers(['[转交] proj 甲事\n[转交] nosuch 乙事', '[转交] proj 甲事再写一遍'], ['收到'])
+        self.say('开工')
+        self.assertEqual(len([p for p in self.pm_prompts() if '[主控转交]' in p]), 1)
+
+    def test_coworker_plan_task_asks_owner(self):
+        ev = self.e.ev('做', sender=A.MATE, chat='oc_g', ctype='group') if 'ctype' in A.Inst.ev.__code__.co_varnames else dict(self.e.ev('做', sender=A.MATE, chat='oc_g'), chat_type='group')
+        self.b.team.save_plan('proj', '整改', '任务:\n- 甲 | src/a |\n')
+        out = self.b.task_directive(dict(ev, pm='proj'), block(self.e.repo, '甲', 'src/a'))
+        self.assertEqual(self.by('甲')['status'], 'pending'); self.assertIn('/approve', out)
+
+    def test_interim_pm_result_is_not_lost(self):
+        self.b.run_claude = self.fake_run
+        self.b.handle(dict(self.e.ev('做'), pm='proj', pm_key='proj:proj:p2p:oc_p', no_route=True))
+        self.assertEqual([t['title'] for t in self.new()], ['甲'])
+
+    def fake_run(self, key, s, prompt, *a, on_extra=None, **k):
+        if on_extra: on_extra(PLAN + block(self.e.repo, '甲', 'src/a'))
+        return '[不回]'
+
 class HoldTest(Base):
     def start(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '丙', 'src/c', '甲')])
@@ -157,6 +210,10 @@ class HoldTest(Base):
     def test_stop_word_in_sentence_is_chat(self):
         self.start(); self.layers(['好'], []); self.say('停车场那个页面改一下')
         self.assertEqual(self.by('甲')['status'], 'running')
+
+    def test_pm_cannot_hold(self):
+        ev = dict(self.e.ev('x'), pm='proj')
+        self.assertIn('没执行', self.b.hold_marks(ev, '[停] proj')); self.assertFalse(self.b.team.held('proj'))
 
     def test_coworker_cannot_stop(self):
         self.start(); self.layers(['[停] proj'], []); self.say('停', sender=A.MATE, chat='oc_mate')

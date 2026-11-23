@@ -70,11 +70,24 @@ if WECOM_ON:
         r = subprocess.run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=INST, capture_output=True, text=True)
         print("npm install:", "成功" if r.returncode == 0 else "失败\n" + r.stdout[-800:] + r.stderr[-800:])
 
-# 1.5 角色模板：缺哪个补哪个，已有的不动（主人会按项目改）
+def role_stock(f):
+    """实例里的角色文件是不是某一版模板原样（没被主人改过）：跟仓库历史里的每一版比。"""
+    try: mine = open(os.path.join(INST, "roles", f), encoding="utf-8").read()
+    except OSError: return False
+    repo, rel = os.path.dirname(T), os.path.join(os.path.basename(T), "roles", f)
+    r = subprocess.run(["git", "-C", repo, "log", "--format=%H", "--", rel], capture_output=True, text=True)
+    for c in r.stdout.split():
+        if subprocess.run(["git", "-C", repo, "show", f"{c}:{rel}"], capture_output=True, text=True).stdout == mine: return True
+    return False
+
+# 1.5 角色模板：缺哪个补哪个；没改过的跟着模板更新；主人改过的不动，列出来
 os.makedirs(os.path.join(INST, "roles"), exist_ok=True)
 for f in sorted(os.listdir(os.path.join(T, "roles"))):
     if f.endswith(".md") and not os.path.exists(os.path.join(INST, "roles", f)):
         shutil.copy(os.path.join(T, "roles", f), os.path.join(INST, "roles", f))
+    elif f.endswith(".md") and open(os.path.join(T, "roles", f), encoding="utf-8").read() != open(os.path.join(INST, "roles", f), encoding="utf-8").read():
+        if role_stock(f): shutil.copy(os.path.join(T, "roles", f), os.path.join(INST, "roles", f)); print("角色模板更新：", f)
+        else: print("角色模板改了，实例的这份你改过，没动，请手工合：", f)
 
 # 2. 守则：没有或带 --rules 就按模板写；已有就把模板的改动逐处合进去，实例自己改过的那一处不动并列出来
 rules = os.path.join(INST, CFG.get("rules_file", "rules.md"))
