@@ -168,7 +168,7 @@ class FeishuTasks:
             self.st[g] = {"at": time.time(), "title": title[:120], "mids": [], "seen": [], "steps": {}, "keys": [self.key(t)], "own": True}; self._save()
 
     def history(self, tasks, text, label, ref, now):
-        """第一次打开时把以前结束的活补进来：建成已完成的任务，一次 5 条；补完按项目各发一条清单，带上链接就进会话侧栏。只做一遍，主人不加关注，免得一条条提醒。"""
+        """第一次打开时把以前结束的活补进来：建成已完成的任务，一次 5 条；补完按项目各发一条清单，带上链接就进会话侧栏。只做一遍。主人也是关注人，不加的话“与我相关”里查不到。"""
         if self.lists.get("_history_done"): return
         at = self.lists.setdefault("_history", now); groups = {}
         for t in tasks: groups.setdefault(self.key(t), []).append(t)
@@ -181,7 +181,7 @@ class FeishuTasks:
             word = "" if done else "（已取消）" if all(t["status"] in ("cancelled", "rejected", "expired") for t in ts) else "（没做成）"
             d = self.api("POST", "/tasks", {"summary": (title + word)[:200], "description": "\n".join(f"{ref(t)} {label(t)}：{t['title']}" for t in ts)[:2500],
                                             "completed_at": str(int(max(t.get("updated") or at for t in ts) * 1000)), "client_token": hashlib.sha1(f"history|{k}".encode()).hexdigest(),
-                                            "members": [{"id": self.app, "type": "app", "role": "assignee"}]}).get("task") or {}
+                                            "members": [{"id": self.app, "type": "app", "role": "assignee"}, {"id": self.owner, "type": "user", "role": "follower"}]}).get("task") or {}
             if not d.get("guid"): raise RuntimeError("建飞书任务没返回 guid")
             self.st[d["guid"]] = {"at": now, "title": (title + word)[:120], "mids": [], "seen": [], "steps": {}, "keys": [k], "own": True, "closed": True, "hist": ts[-1].get("project") or "", "url": d.get("url"),
                                   "chat": next((t["origin"].get("chat_id") for t in ts if (t.get("origin") or {}).get("channel") == "feishu"), "")}; self._save()
@@ -318,3 +318,46 @@ class FeishuTasks:
             rec["closed"] = True; rec["filled"] = sig; self._save()
         elif rec.get("own") and rec.get("filled") != sig:
             self.fill(guid, rec, ts, False); rec["filled"] = sig; self._save()
+
+
+class Board:
+    """多维表格仪表盘的数据：一个任务一行，按“任务ID”对应，只写变了的行。表里已有的行每次启动读一遍，所以不用存状态，也不会重复建。"""
+    def __init__(self, lark, base, table, log):
+        self.lark, self.base, self.table, self.log = lark, base, table, log
+        self.recs, self.sent, self.next = None, {}, 0
+
+    def call(self, cmd, *args):
+        r = self.lark(["base", cmd, "--as", "bot", "--base-token", self.base, "--table-id", self.table, *args])
+        if r.returncode: raise RuntimeError((r.stdout + r.stderr)[-300:])
+        return json.loads(r.stdout).get("data") or {}
+
+    def load(self):
+        recs, off = {}, 0
+        while True:
+            d = self.call("+record-list", "--field-id", "任务ID", "--format", "json", "--limit", "200", "--offset", str(off))
+            for rid, row in zip(d.get("record_id_list") or [], d.get("data") or []):
+                if row and row[0] is not None: recs.setdefault(int(row[0]), rid)
+            off += len(d.get("record_id_list") or [])
+            if not d.get("has_more") or not d.get("record_id_list"): break
+        self.recs = recs
+
+    def tick(self, rows):
+        """rows()：{任务ID: {字段: 值}}。60 秒一次；出错 5 分钟后再试，并重读表。"""
+        now = time.time()
+        if now < self.next: return
+        self.next = now + 60
+        try:
+            if self.recs is None: self.load()
+            todo = {i: r for i, r in rows().items() if self.sent.get(i) != r}
+            new, old = [i for i in todo if i not in self.recs], [i for i in todo if i in self.recs]
+            for k in range(0, len(new), 50):
+                part = new[k:k + 50]
+                ids = self.call("+record-batch-create", "--json", json.dumps({"create_records": [todo[i] for i in part]}, ensure_ascii=False)).get("record_id_list") or []
+                if len(ids) != len(part): raise RuntimeError("新建的行数对不上")
+                for i, rid in zip(part, ids): self.recs[i] = rid; self.sent[i] = todo[i]
+            for k in range(0, len(old), 50):
+                part = old[k:k + 50]
+                self.call("+record-batch-update", "--json", json.dumps({"update_records": {self.recs[i]: todo[i] for i in part}}, ensure_ascii=False))
+                for i in part: self.sent[i] = todo[i]
+        except Exception as e:
+            self.recs, self.next = None, now + 300; self.log.warning("feishu board not synced: %s", str(e)[:300])

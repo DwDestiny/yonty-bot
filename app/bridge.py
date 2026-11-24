@@ -2926,7 +2926,35 @@ def ftask_meta(ts):
     return {"start": start, "end": end, "desc": tasks.gate.SECRET_RE.sub(r"\1***", desc),
             "custom": {"项目": t0.get("project") or "", "模型": "、".join(models), "花费（美元当量）": float(cost), "用时（分钟）": float(mins_), "任务数": f"{sum(t['status'] == 'done' for t in ts)}/{len(ts)}", "合并请求": " ".join(mrs[:5])}}
 
+BOARD = None
+def board_rows():
+    """仪表盘每个任务一行；已结束又没变的用缓存，不反复读事件。"""
+    out = {}
+    for t in tasks.all_tasks():
+        key = (t["status"], t.get("updated"), t.get("cost"), t.get("held"))
+        live = t["status"] not in ("done", "failed", "lost", "cancelled", "rejected", "expired")
+        hit = BOARD.cache.get(t["id"])
+        if hit and hit[0] == key and not live: out[t["id"]] = hit[1]; continue
+        s, e = ftask_span(t)
+        st = "停工" if t.get("held") and live else {"done": "完成", "running": "进行中", "waiting": "等你答复", "cancelled": "已取消", "rejected": "已取消", "expired": "已取消", "failed": "没做成", "lost": "没做成"}.get(t["status"], "排队")
+        stamp = lambda x: datetime.fromtimestamp(x, CST).strftime("%Y-%m-%d %H:%M") if x else None
+        mrs = list(dict.fromkeys(u for x in tasks.events(t["id"]) if x["kind"] == "done" for u in MR_URL.findall(x["text"])))
+        row = {"任务ID": t["id"], "任务": tasks.gate.SECRET_RE.sub(r"\1***", f"{tasks.ref(t)} {t['title']}")[:200], "项目": t.get("project") or "（无）", "状态": [st],
+               "模型": t.get("model") or "默认", "角色": t.get("role") or "（无）", "方案": t.get("plan") or "", "开始": stamp(s), "结束": stamp(e),
+               "完成日": datetime.fromtimestamp(e, CST).strftime("%m-%d") if e and st == "完成" else "",
+               "花费（美元当量）": round(t.get("cost") or 0, 2), "用时（分钟）": int((e - s) / 60) if e and s else None, "合并请求": " ".join(mrs[:5])}
+        BOARD.cache[t["id"]] = (key, row); out[t["id"]] = row
+    return out
+
+def board_tick():
+    global BOARD
+    c = (CFG.get("feishu_tasks") or {}).get("board") or {}
+    if not (c.get("base") and c.get("table")): return
+    if BOARD is None: BOARD = _mod("feishu_tasks").Board(lark, c["base"], c["table"], log); BOARD.cache = {}
+    BOARD.tick(board_rows)
+
 def ftask_tick():
+    board_tick()
     if FT: FT.tick(tasks.all_tasks(), lambda t: tasks.gate_text(t) or tasks.LABEL.get(t["status"], t["status"]), tasks.ref, ftask_result, ftask_unplanned,
                    owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta)
 
