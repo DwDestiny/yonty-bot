@@ -1300,6 +1300,9 @@ def dispatch_one(ev, d):
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced") and owner)
     if pm["auto_model"]: pm = task_judge(d, pm)
+    ag, ag_why = tasks.agents.pick(tasks._me(), dict(d, repo=repo), pm, owner, ex)
+    pm = dict(pm, **ag)
+    if d.get("agent") == "zcode" and not ag: cloud_note += f"（ZCode 接不了：{ag_why}，改用 Claude。）"
     t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
@@ -1814,7 +1817,7 @@ def outbox_tick():
     def go():
         try:
             for t in tasks.all_tasks():
-                if not t.get("schedule"): continue
+                if not t.get("scope"): continue
                 try: tasks.outbox_drain(t["id"], slow=lambda fn: threading.Thread(target=fn, daemon=True).start(), budget=float(tasks.T.get("outbox_batch_s", 3)))
                 except Exception: log.exception("outbox of task #%s failed", t["id"])
         finally: OUTBOX_BUSY.release()
