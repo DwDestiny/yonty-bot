@@ -243,6 +243,29 @@ class MarksTest(Base):
         self.b.FT.covers = lambda: False                                       # 同步坏了照旧发
         self.t.event(u['id'], 'progress', '又改完了'); self.b.task_tick(); self.assertTrue(any('又改完了' in x for x in said), said)
 
+    def test_board_rows_sync_only_changes_and_resume(self):
+        calls, store = [], {}
+        def lark(a, stdin=None, timeout=60):
+            calls.append(a[1]); d = {}
+            if a[1] == '+record-list': d = {'record_id_list': list(store), 'data': [[r['任务ID']] for r in store.values()], 'has_more': False}
+            elif a[1] == '+record-batch-create':
+                ids = []
+                for r in json.loads(a[-1])['create_records']: ids.append(f'rec{len(store)}'); store[ids[-1]] = r
+                d = {'record_id_list': ids}
+            else:
+                for k, r in json.loads(a[-1])['update_records'].items(): store[k] = r
+            return types.SimpleNamespace(returncode=0, stdout=json.dumps({'data': d}), stderr='')
+        b, B = self.b, self.b._mod('feishu_tasks').Board
+        t = self.run_task(title='甲', cost=2.5); i = t['id']
+        def tick(): b.BOARD.next = 0; b.BOARD.tick(b.board_rows)
+        b.BOARD = B(lark, 'x', 'y', b.log); b.BOARD.cache = {}; tick(); tick()
+        self.assertEqual(calls, ['+record-list', '+record-batch-create'])                 # 没变不写
+        self.t.event(i, 'done', '好'); self.t.update(i, _force=True, status='done'); tick()
+        self.assertEqual(calls[2:], ['+record-batch-update'])
+        row = list(store.values())[0]; self.assertEqual((row['状态'], row['花费（美元当量）']), (['完成'], 2.5)); self.assertTrue(row['完成日'])
+        b.BOARD = B(lark, 'x', 'y', b.log); b.BOARD.cache = {}; tick()                     # 重启后认得原来的行
+        self.assertEqual(len(store), 1)
+
     def test_feishu_fields_from_events(self):
         t = self.run_task(title='甲', cost=1.25); i = t['id']
         self.t.event(i, 'start', ''); self.t.event(i, 'done', '结论：PASS\nhttps://github.com/o/r/pull/9 token=abc123'); self.t.update(i, _force=True, status='done')
@@ -349,7 +372,7 @@ class FeishuTaskTest(unittest.TestCase):
         ts = [{'id': i, 'status': 'done' if i != 2 else 'cancelled', 'turn': 1, 'title': f't{i}', 'project': 'a', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1} for i in range(1, 8)]
         for _ in range(5): self.tick(ts)
         made = [d for m, p, d in self.lark.calls if (m, p) == ('POST', '/tasks')]
-        self.assertEqual(len(made), 7); self.assertTrue(all(d['completed_at'] != '0' and len(d['members']) == 1 for d in made))
+        self.assertEqual(len(made), 7); self.assertTrue(all(d['completed_at'] != '0' and [m['role'] for m in d['members']] == ['assignee', 'follower'] for d in made))
         self.assertEqual(len(self.lines), 1); self.assertEqual(len(self.lines[0][1]['zh_cn']['content']), 7); self.assertIn('t2（已取消）', json.dumps(self.lines, ensure_ascii=False))
         self.assertEqual(self.sent('append'), [])
 
