@@ -2901,7 +2901,7 @@ def ftask_loop(stopping):
 def feishu_task_loop(stopping):
     """注册成任务智能体，收任务事件。权限没开通就每 10 分钟再试，开通了不用重启。"""
     global FT, ftask_proc
-    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit, ftask_post, CFG["name"]), ""
+    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit, ftask_post), ""
     threading.Thread(target=ftask_loop, args=(stopping,), daemon=True).start()
     while not stopping.is_set():
         try: ft.register()

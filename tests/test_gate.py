@@ -274,8 +274,9 @@ class FakeLark:
         out = {}
         if p.endswith('register_agent'): out = {'agent': {'app_id': 'cli_me'}}
         elif m == 'GET' and p.startswith('/tasks/'): out = {'task': self.task}
+        elif m == 'GET' and p == '/sections': out = {'items': [{'name': 'b', 'guid': 'S-old'}]}
         elif m == 'GET': out = {'items': self.comments}
-        elif m == 'POST' and p == '/tasklists': out = {'tasklist': {'guid': 'L-' + d['name']}}
+        elif m == 'POST' and p == '/sections': out = {'section': {'guid': 'S-' + d['name']}}
         elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}'}}
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({'data': out}), stderr='')
 
@@ -286,7 +287,7 @@ class FeishuTaskTest(unittest.TestCase):
         self.lark, self.said, self.sub, self.lines = FakeLark(), [], [], []
         import logging
         self.f = mod('feishu_tasks').FeishuTasks(self.lark, 'ou_me', d.name + '/s.json', lambda p, o: Path(p).write_text(json.dumps(o)), logging.getLogger('x'),
-                                                 lambda t: self.said.append(t) or ('om1', 'oc1'), lambda *a: self.sub.append(a), lambda *a: self.lines.append(a) or 'om_line', '助理')
+                                                 lambda t: self.said.append(t) or ('om1', 'oc1'), lambda *a: self.sub.append(a), lambda *a: self.lines.append(a) or 'om_line')
         self.f.register()
         self.lark.task = {'summary': '写报告', 'creator': {'id': 'ou_me'}, 'members': [{'id': 'cli_me', 'type': 'app', 'role': 'assignee'}], 'completed_at': '0'}
         self.ev = {'header': {'app_id': 'cli_me'}, 'event': {'task_guid': 'G', 'event_types': ['task_create']}}
@@ -314,22 +315,21 @@ class FeishuTaskTest(unittest.TestCase):
         self.f.on_event(e); self.f.on_event(e)
         self.assertEqual(len(self.sub), 2); self.assertIn('改成表格', self.sub[1][3]); self.assertNotIn('删库', self.sub[1][3])
 
-    def test_line_sent_once_and_project_list(self):
-        self.lark.task['url'] = 'https://applink/x'
+    def test_line_sent_once_and_project_section(self):
+        self.lark.task.update(url='https://applink/x', tasklists=[{'tasklist_guid': 'L'}])
         ts = [{'id': i, 'status': 'running', 'turn': 1, 'title': f't{i}', 'project': p, 'plan': p.upper(), 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1} for i, p in ((1, 'a'), (2, 'a'), (3, 'b'))]
         self.tick(ts); self.tick(ts)
         self.tick([dict(ts[0], status='done')] + ts[1:])
         self.assertEqual(len(self.lines), 2)                                              # 两个方案各一行，只发一次
         self.assertIn('https://applink/x', json.dumps(self.lines[0][1]))
-        self.assertEqual([d['name'] for m, p, d in self.lark.calls if (m, p) == ('POST', '/tasklists')], ['助理 · a', '助理 · b'])
-        self.assertEqual(len(self.sent('add_tasklist')), 2)
+        self.assertEqual([d['section_guid'] for d in self.sent('add_tasklist')], ['S-a', 'S-old'])   # 一个项目一个分组，已有同名的用已有的
 
-    def test_no_list_permission_does_not_block(self):
+    def test_no_section_permission_does_not_block(self):
         real = self.f.api
         def api(m, p, d=None, **k):
-            if p == '/tasklists': raise RuntimeError('99991672')
+            if 'sections' in p: raise RuntimeError('99991672')
             return real(m, p, d, **k)
-        self.f.api = api; self.lark.task['url'] = 'https://applink/x'
+        self.f.api = api; self.lark.task.update(url='https://applink/x', tasklists=[{'tasklist_guid': 'L'}])
         self.tick([{'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}])
         self.assertEqual((len(self.lines), len(self.sent('append')), self.f.st['g1']['want'][0]), (1, 1, 2))
 
