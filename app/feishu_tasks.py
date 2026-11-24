@@ -36,9 +36,10 @@ class FeishuTasks:
     def status(self, guid, n, progress):
         self.api("PATCH", f"/tasks/{guid}", {"task": {"agent_task_status": n, "agent_task_progress": progress[:40]}, "update_fields": ["agent_task_status", "agent_task_progress"]})
 
-    def step(self, guid, text, key):
+    def steps(self, guid, texts, key):   # 一次写一批：这个接口限频很紧，一条条写会被拦
+        now = int(time.time() * 1000)
         self.api("POST", "/agent_task_step_info/append_task_steps", {"task_guid": guid, "idempotent_key": hashlib.sha1(key.encode()).hexdigest(),
-                                                                       "task_steps": [{"content": text[:500], "timestamp": int(time.time())}]})
+                                                                       "task_steps": [{"content": x[:500], "timestamp": now + i} for i, x in enumerate(texts)]})
 
     def comment(self, guid, text):
         self.api("POST", "/comments", {"content": text[:3000], "resource_type": "task", "resource_id": guid})
@@ -67,7 +68,7 @@ class FeishuTasks:
             if rec and not rec.get("skipped"): rec.pop("closed", None); rec.pop("user_closed", None); return self._comments(guid, rec, t)
             c = t.get("creator") or {}
             others = [m for m in ms if m.get("type") != "app" and m.get("id") != self.owner]
-            why = "不是你建的" if c.get("id") != self.owner else "还有别人参与，内容别人也能改" if others else "它在任务清单里，清单成员也能改" if t.get("tasklists") else ""
+            why = "不是你建的" if c.get("id") != self.owner else "还有别人参与，内容别人也能改" if others else "它在任务清单里，清单成员也能改" if {x.get("tasklist_guid") for x in t.get("tasklists") or []} - self.own_lists() else ""
             if why:
                 if not rec:
                     self.st[guid] = {"at": time.time(), "skipped": True}; self._save()
@@ -77,6 +78,14 @@ class FeishuTasks:
             files = [a.get("name") or "附件" for a in t.get("attachments") or []]
             self._start(guid, t, "[飞书任务] 主人在飞书任务里指派给你的，做完的结果会自动写回那条任务。\n" + body + (f"\n（带附件：{'、'.join(files)}，服务不下载，要看请主人发到聊天里）" if files else "")
                         + (f"\n任务链接：{t['url']}" if t.get("url") else ""), f"收到飞书任务：{(t.get('summary') or '')[:80]}")
+
+    def own_lists(self):
+        """飞书给智能体的任务自动挂的清单（机器人自己的）：从服务自己建的任务上认，不算别人的清单。"""
+        for g, r in list(self.st.items()):
+            if r.get("own") and "lists" not in r:
+                try: r["lists"] = [x.get("tasklist_guid") for x in (self.api("GET", f"/tasks/{g}").get("task") or {}).get("tasklists") or []]; self._save()
+                except Exception as e: self.log.warning("feishu task lists unknown: %s", str(e)[:200])
+        return {x for r in self.st.values() if r.get("own") for x in r.get("lists") or []}
 
     def _start(self, guid, t, text, head):
         mid, chat = self.notify(head)
@@ -141,17 +150,19 @@ class FeishuTasks:
                 if rec.get("skipped") or rec.get("closed") or now - rec.get("at", 0) > 30 * 86400 or now < rec.get("retry", 0): continue
                 try: self._sync(guid, rec, [t for t in tasks if self.of(rec, t)], label, ref, result, unplanned, now)
                 except Exception as e:
-                    rec["retry"] = now + 300; self._save(); self.log.warning("feishu task %s sync failed: %s", guid, str(e)[:200])
+                    rec["retry"] = now + (60 if "99991400" in str(e) or "frequency" in str(e) else 300); self._save(); self.log.warning("feishu task %s sync failed: %s", guid, str(e)[:200])
 
     def _sync(self, guid, rec, ts, label, ref, result, unplanned, now):
         while rec.get("out"):
             self.comment(guid, rec["out"][0]); rec["out"].pop(0); self._save()
+        texts, steps, prog = [], dict(rec["steps"]), dict(rec.get("prog") or {})
         for t in ts:
             s = f"{t['status']}-{t.get('turn') or 0}"
-            if rec["steps"].get(str(t["id"])) != s:
-                self.step(guid, f"{ref(t)} {label(t)}：{t['title']}", f"{guid}-{t['id']}-{s}"); rec["steps"][str(t["id"])] = s; self._save()
-            for i, x in list(enumerate(self.progress(t)))[rec.setdefault("prog", {}).get(str(t["id"]), 0):]:   # 任务输出里的 [进展]，服务本来就在解析
-                self.step(guid, f"{ref(t)} {x}", f"{guid}-{t['id']}-p{i}"); rec["prog"][str(t["id"])] = i + 1; self._save()
+            first = rec.get("own") and str(t["id"]) not in rec["steps"] and t["status"] in ENDED   # 建这条之前就做完的：只记一行结果
+            if rec["steps"].get(str(t["id"])) != s: texts.append(f"{ref(t)} {label(t)}：{t['title']}"); steps[str(t["id"])] = s
+            got = self.progress(t); n = prog.get(str(t["id"]), 0)
+            if not first: texts += [f"{ref(t)} {x}" for x in got[n:]]   # 任务输出里的 [进展]，服务本来就在解析
+            prog[str(t["id"])] = len(got)
         live = [t for t in ts if t["status"] not in ENDED and not t.get("held")]
         done = [t for t in ts if t["status"] == "done"]
         if not ts: want = (CONFIRM, "已答复") if rec.get("replied") and now - rec["replied"] > GRACE_S else (DOING, "正在处理")
@@ -165,6 +176,12 @@ class FeishuTasks:
         sig = "|".join(sorted(f"{t['id']}:{t['status']}:{t.get('turn') or 0}" for t in ts))
         if ts and want[0] != DOING and not live and not any(t.get("held") for t in ts) and rec.get("told") != sig:
             self.comment(guid, "\n".join(f"{ref(t)} {label(t)}：{t['title']}\n{result(t)}".strip() for t in ts)); rec["told"] = sig; self._save()
+        if want[0] == DOING and rec.get("want") != list(want):   # 先标“正在执行”，步骤写不进去也不耽误状态
+            self.status(guid, *want); rec["want"] = list(want); self._save()
+        for i in range(0, len(texts), 20):
+            part = texts[i:i + 20]
+            self.steps(guid, part, guid + "|" + "|".join(part) + json.dumps(steps, sort_keys=True))
+        if texts or steps != rec["steps"] or prog != (rec.get("prog") or {}): rec["steps"], rec["prog"] = steps, prog; self._save()
         if rec.get("want") != list(want):
             self.status(guid, *want); rec["want"] = list(want); self._save()
         if rec.get("own") and want[0] == FINISHED:   # 服务自己建的，做完就勾掉；主人指派的留给主人勾
