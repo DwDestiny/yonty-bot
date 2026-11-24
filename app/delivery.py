@@ -179,7 +179,10 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
     nh, now = hop + 1, time.time()   # 服务给每次投递的跳数自动加一：人发的消息触发的那一轮是 0
     if nh > c["max_hops"] and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
         why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {c['max_hops']} 跳（delivery.max_hops）"
-        if sender["type"] == "ctrl": reroute("记录", why + "，主控发的只进运行记录")
+        if sender["type"] == "ctrl" and tg["to"] == "项目经理" and (sender.get("key") or "").startswith("p2p:"):   # 没人会看运行记录，流程就断在这里：改发主人私聊
+            text = f"主控给 {tg.get('project')} 项目经理的留言没送到（转了 {nh} 次，到上限），流程停在这里：{text}\n要接着就回“继续 {tg.get('project')}”。"
+            reroute("主人", why + "，改发主人私聊，别再说已经交给项目经理")
+        elif sender["type"] == "ctrl": reroute("记录", why + "，主控发的只进运行记录")
         elif tg["to"] != "主控": reroute("主控", why + "，停下交给主控")
         else: tk.decide("超跳", sender=sender["ref"], category=kind, why=why + "，本来就是给主控的，照送"); notes.append(why + "，照送主控")
     a, b = node(sender), node(tg, True)

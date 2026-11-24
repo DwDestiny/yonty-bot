@@ -4,6 +4,7 @@ Input:  test_accept_flow 的临时实例（Claude、systemd、lark-cli 都是假
 Output: unittest 结果
 Pos:    tests/ 下的行为测试，内容全是虚构的
 """
+import json
 import importlib.util, os, sys, unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_accept_flow as A
@@ -201,6 +202,44 @@ class GateTest(Base):
     def fake_run(self, key, s, prompt, *a, on_extra=None, **k):
         if on_extra: on_extra(PLAN + block(self.e.repo, '甲', 'src/a'))
         return '[不回]'
+
+class LostDispatchTest(Base):
+    """2026-11-24：主控命令行留言叫起项目经理，它写的三条 [派活] 被悄悄丢掉，“已派”却投给了主控，流程停了一小时没人知道。"""
+    def send(self, pm, ctrl=()):
+        self.layers(list(ctrl), pm)
+        self.t.dl.submit(self.t, {'type': 'ctrl', 'ref': '主控', 'label': '主控', 'key': 'p2p:oc_p', 'owner': False, 'hop': 1}, '项目经理 proj', '留言', '合好了，接着派', extra={'via': 'cli'})
+        for _ in range(3):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+
+    def test_dispatch_returned_and_nothing_lands(self):
+        self.send([PLAN + block(self.e.repo, '甲', 'src/a') + '[/派活]\n[投递 主控 节点]\nALREADY-派了\n[/投递]\n[看板] 已派甲', '[投递 主控 问题]\nNEED-要派甲'])
+        self.assertEqual(self.new(), [])
+        self.assertTrue(any('[服务回执]' in p and '[派活]' in p for p in self.pm_prompts()))
+        txt = json.dumps(self.t.dl.load(self.t), ensure_ascii=False)
+        self.assertNotIn('ALREADY', txt); self.assertIn('NEED-要派甲', txt)
+        self.assertNotIn('已派甲', json.dumps(self.b.team.load(), ensure_ascii=False))
+
+    def test_stubborn_pm_controller_told(self):
+        x = PLAN + block(self.e.repo, '甲', 'src/a') + '[/派活]\n[投递 主控 节点]\nALREADY-派了'
+        self.send([x, x, x])
+        txt = json.dumps(self.t.dl.load(self.t), ensure_ascii=False)
+        self.assertEqual(self.new(), []); self.assertNotIn('ALREADY', txt); self.assertIn('没有派出去', txt)
+
+    def test_hop_limit_tells_owner(self):
+        out = self.t.dl.submit(self.t, {'type': 'ctrl', 'ref': '主控', 'label': '主控', 'key': 'p2p:oc_p', 'owner': False, 'hop': 3}, '项目经理 proj', '留言', 'STAGED')
+        r = self.t.dl.load(self.t)[-1]; self.assertEqual(r['to']['to'], '主人'); self.assertIn('STAGED', r['text']); self.assertIn('没送到', r['text']); self.assertIn('主人私聊', out)
+        self.b.delivery_tick(); self.e.drain(); self.assertIn('STAGED', self.e.out())
+
+    def test_stall_told_once(self):
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工')
+        t = self.by('甲'); self.t.update(t['id'], _force=True, status='done')
+        posts = []; self.b.owner_post = lambda c, text, key=None, tries=0: (posts.append(text), ('feishu', True))[1]
+        self.b.STALL_AFTER_S = -1; self.b.stall_tick(); self.assertEqual(posts, [])
+        s = self.b.stall_seen['proj']; self.b.stall_seen['proj'] = (s[0], s[1] - 300)
+        self.b.stall_tick(); self.b.stall_tick()
+        self.assertEqual(len(posts), 1); self.assertIn('乙', posts[0]); self.assertNotIn('甲', posts[0].split('没派')[1].split('）')[0])
+        self.t.update(t['id'], _force=True, status='running'); self.b.save(self.b.STALL_FILE, {}); self.b.stall_tick(); self.assertNotIn('proj', self.b.stall_seen)
+
 
 class HoldTest(Base):
     def start(self):

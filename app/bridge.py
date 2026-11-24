@@ -1841,6 +1841,8 @@ def _delivery_turn(ev):
             ev2 = dict(src, idem=idem, hop=hop, pm=pm, no_handover=True, **({} if o_owner else {"sender_id": "", "sender_name": f"{pm} 的项目经理"}))
             redo = lambda note: run_claude(key, s, note, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop)
             result = with_retry(ev2, key, result, redo, pm, follow=not t)
+        else:
+            result = unrunnable(pm, key, hop, result, lambda note: run_claude(key, s, note, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop), idem)
         if t and result.strip(): result = turn_directives(t, result, hop, f"{pm} 的项目经理", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
         team_src = rec.get("src_im") or (im if im and session_key(im) == bk else None)
         result = team.visible(pm_marks(pm, key, o_owner, result, hop, tid, idem, team_src))
@@ -1868,6 +1870,32 @@ def _delivery_turn(ev):
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dlr{rec['id']}")   # 跟投递本身的引用（dl 开头加编号）分开
 
+def pending_marks(result):
+    """回复里要执行才算数的标记：[派活]、[任务指令]、[转交]、[定时]。返回名字列表。"""
+    out = ["[派活]"] if tasks.parse_directive(result)[1] else []
+    out += ["[任务指令]"] if [s for s, _ in split_taskcmds(tasks.parse_directive(result)[0]) if s is not None] else []
+    out += ["[转交]"] if team.blocks(result, "转交")[1] else []
+    return out + (["[定时]"] if sch.parse_block(result)[1] else [])
+
+def unrunnable(pm, key, hop, result, redo, idem):
+    """没有来源消息的投递轮（主控用 tasks.py send 叫起来的）没有派活的身份：里面的派活、指令不执行。
+    退回重写，最多两次，这期间 [投递]、[看板]、[方案] 都不落地，免得别人当成已经派了；还写，就不收这条，告诉主控。"""
+    for i in range(3):
+        bad = pending_marks(result)
+        if not bad: return result
+        tasks.decide("回执退回", session=key, why=f"这一轮没有来源消息，{'、'.join(bad)} 没执行")
+        again = None
+        if i < 2:
+            try: again = redo(f"[服务回执] 你上一条回复没生效，一条都没发出去，也没登记。\n{'、'.join(bad)} 在这一轮执行不了：这一轮是留言叫起来的，不带派活人的身份。\n"
+                              f"重写整条回复，不写这些标记，也不要说已经派了。要接着派活，写 [投递 主控 问题]，说清要派哪几条，请主控告诉{OWNER_NAME}；{OWNER_NAME}说继续，主控会 [转交] 给你，那一轮再派。[方案]、[看板]、[交接] 照写。")
+            except Exception: log.exception("receipt redo failed")
+        if again is None: break
+        result = again
+    tell = f"{pm} 的项目经理要{'、'.join(bad)}，这一轮执行不了，没有派出去，流程停在这里。告诉{OWNER_NAME}：要接着就回“继续 {pm}”，你再 [转交]。"
+    try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(pm, key, False), "主控", "问题", tell, hop, False, {"auto": True, "idem": f"{idem}:lost"}, trusted=True)
+    except ValueError as x: log.warning("lost dispatch notice rejected: %s", x)
+    return talk_only(result)
+
 def talk_only(result):
     """去掉 [派活]、[任务指令]、[转交]、[定时]，只留说的话。"""
     head = tasks.parse_directive(sch.parse_block(result)[0])[0]
@@ -1891,6 +1919,8 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
         if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
             tasks.decide("超跳不转", task=tasks.ref(t), why=f"这一轮是第 {hop} 跳，到了上限 {mx}，里面的任务指令和派活不转")
             result = "\n".join(b for s, b in split_taskcmds(tasks.parse_directive(result)[0]) if s is None)
+            if owner_dm_task(t):
+                owner_dm(t["origin"].get("channel", "feishu"), f"{tasks.ref(t)} 这条流程停下了：转了 {hop} 次，里面的派活和指令没转出去。要接着就回“继续 {t.get('project')}”。")
         return result
     text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop, idem, cli)
     if TASKS_ON and tasks.parse_directive(text)[1]:
@@ -2101,9 +2131,30 @@ def v2_tick():
     except OSError: pass
     for name, fn in (("service acts", service_unfinished), ("freeze", freeze_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
-                     ("schedules", schedules_tick)):
+                     ("schedules", schedules_tick), ("stall", stall_tick)):
         try: fn()
         except Exception: log.exception("%s tick failed", name)
+
+STALL_FILE, STALL_AFTER_S, stall_seen = os.path.join(STATE, "stalls.json"), 900, {}
+
+def stall_tick():
+    """兜底：主人私聊的项目，最近一个方案还有没派的活，又没有任务、投递、会话在动，15 分钟后告诉主人一句。不走模型，同一个状态只说一次。"""
+    if not STRICT: return
+    allt, now, told = tasks.all_tasks(), time.time(), load(STALL_FILE, {})
+    moving = {x["to"].get("project") or x["from"].get("project") for x in tasks.dl.load(tasks._me()) if x["status"] in ("new", "handing")}
+    with lock: busy = {k.split(":")[1] for k, q in workers.items() if k.startswith("proj:") and q.unfinished_tasks}
+    for p, plans in (team.load().get("plans") or {}).items():
+        name, pl = max(plans.items(), key=lambda kv: kv[1].get("at") or 0)
+        ts = [t for t in allt if t.get("project") == p and not t.get("schedule")]
+        left = [i for i in pl["items"] if not any(t.get("plan") == name and t["title"] == i for t in ts)]
+        mine = [t for t in ts if owner_dm_task(t)]
+        idle = now - max([pl.get("at") or 0] + [t.get("updated") or 0 for t in ts])
+        sig = f"{name}|{'、'.join(left)}"
+        if (not left or not mine or team.held(p) or p in moving or p in busy or idle < STALL_AFTER_S or idle > 2 * 86400
+                or any(t["status"] in ("pending", "approved", "running", "waiting") for t in ts) or told.get(p) == sig): stall_seen.pop(p, None); continue
+        if stall_seen.setdefault(p, (sig, now))[0] != sig or now - stall_seen[p][1] < 120: continue   # 连着看到两分钟才算，错开刚收尾那一下
+        if owner_post("feishu", f"{p}：方案“{name}”还有 {len(left)} 条没派（{'、'.join(left[:6])}），已经 {int(idle / 60)} 分钟没有任务在跑。要接着就回“继续 {p}”。", f"stall{int(pl.get('at') or 0)}-{len(left)}")[1] is not False:
+            told[p] = sig; save(STALL_FILE, told); tasks.decide("停滞提醒", to=p, why=sig[:200])
 
 SCH_BUSY = threading.Lock()
 
