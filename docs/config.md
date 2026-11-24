@@ -38,6 +38,8 @@
 | `tasks.stuck_min` | `40` | 本机任务多少分钟没有任何动作（没调工具、没输出、进程 CPU 平均不到 5%）算卡住：叫项目经理处置，15 分钟没动静叫主控，120 分钟没人管才停；`0` 关闭 |
 | `tasks.verify_retries` | `2` | `[派活]` 写了验证命令时，验证没过最多退回返工几次 |
 | `tasks.verify_timeout_min` | `20` | 验证命令跑多久叫上级处置（不停；120 分钟没人管才停）。云端任务的复跑到点直接停 |
+| `retro` | 关 | 每周复盘：`enabled`、`weekday`（0 周一，默认 6 周日）、`hour`（默认 20）、`days`（默认 7）、`min_tasks`（默认 5，少于就不跑）。没标原因的返工让 sonnet 标，再让 opus 写分析私聊主人，两次都不带工具；只给建议，不改配置。`/retro [天数]` 看数据，不花钱 |
+| `feishu_tasks.board.retro` | `false` | 仪表盘表加返工字段，先在表里建好：思考、返工原因、一次过（文本），轮数、返工轮数、验证没过、提问次数、执行分钟（数字） |
 | `feishu_tasks.enabled` | `false` | 主人私聊派的活同步成飞书任务，也接主人在飞书任务里的指派。应用要开通机器人身份的 `task:task:read`、`task:task:write`、`task:comment:read`、`task:comment:write`，并订阅 `task.task.update_user_access_v2`（长连接）。没开通每 10 分钟再试 |
 | `tasks.cloud.environment_id` | 空 | Claude 云端环境 ID（`RemoteTrigger` 列出的 `env_…`）。空着就没有云端执行 |
 | `tasks.cloud.timeout_min` | `180` | 云端任务多久没交结果算中断 |
