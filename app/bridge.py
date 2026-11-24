@@ -15,6 +15,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
 """
 import contextlib, hashlib, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
+from datetime import datetime, timedelta, timezone
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
                                                os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.py"))
@@ -2893,9 +2894,41 @@ def ftask_text(t):
     if t.get("plan"): return f"{t.get('project')} · {t['plan']}", (team.plan_of(t.get("project"), t["plan"]) or {}).get("text", "")
     return f"{tasks.ref(t)} {t['title']}", short(t.get("brief") or "", 800)
 
+CST = timezone(timedelta(hours=8))
+def cst(ts): return datetime.fromtimestamp(ts, CST).strftime("%m-%d %H:%M") if ts else ""
+
+def ftask_span(t):
+    """任务真正的开始、结束时间：看事件；还没结束的结束时间是 0。"""
+    evs = tasks.events(t["id"])
+    start = next((e["ts"] for e in evs if e["kind"] == "start" and e.get("ts")), 0) or t.get("started") or t.get("launched") or t.get("created") or 0
+    if t["status"] in tasks.ACTIVE + ("pending",): return start, 0
+    end = next((e["ts"] for e in reversed(evs) if e["kind"] in ("done", "failed", "lost") and e.get("ts")), 0) or t.get("finished") or t.get("updated") or 0
+    return start, max(start, end)
+
+MR_URL = re.compile(r"https?://[^\s)）]+/(?:pull|merge_requests|change)/\d+")
+
+def ftask_meta(ts):
+    """飞书任务里能给的字段：说明、开始结束时间、自定义字段。"""
+    spans = [ftask_span(t) for t in ts]
+    start, live = min((s for s, _ in spans if s), default=0), any(not e for _, e in spans)
+    end = 0 if live else max(e for _, e in spans)
+    cost, models = sum(t.get("cost") or 0 for t in ts), list(dict.fromkeys(tasks.model_label(t) for t in ts))
+    mrs = list(dict.fromkeys(u for t in ts for e in tasks.events(t["id"]) if e["kind"] == "done" for u in MR_URL.findall(e["text"])))
+    t0, mins_ = ts[0], int(((end or time.time()) - start) / 60) if start else 0
+    plan = team.plan_of(t0.get("project"), t0["plan"]) if t0.get("plan") else None
+    lines = [f"项目：{t0.get('project')}" + (f"　方案：{t0['plan']}" if t0.get("plan") else ""), f"派活人：{t0['requester'].get('name')}",
+             f"时间（北京时间）：{cst(start)} 开始" + (f"，{cst(end)} 结束，共 {mins_} 分钟" if end else "，还在进行"),
+             f"模型：{'、'.join(models)}", f"花费：{cost:.2f} 美元当量", f"仓库：{os.path.basename(t0.get('repo') or '')}　目标分支：{t0.get('target') or (t0.get('base') or '').split('/', 1)[-1] or '默认'}"]
+    if mrs: lines.append("合并请求：" + " ".join(mrs[:5]))
+    lines += ["", "任务："] + [f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])}　{t['title']}　{cst(s)}" + (f"–{cst(e)}" if e else "") + (f"　{t['branch']}" if t.get("branch") else "") for t, (s, e) in zip(ts, spans)]
+    body = (plan or {}).get("text") or t0.get("brief") or ""
+    desc = "\n".join(lines) + ("\n\n" + short(body, 1200) if body else "")
+    return {"start": start, "end": end, "desc": tasks.gate.SECRET_RE.sub(r"\1***", desc),
+            "custom": {"项目": t0.get("project") or "", "模型": "、".join(models), "花费（美元当量）": float(cost), "用时（分钟）": float(mins_), "任务数": f"{sum(t['status'] == 'done' for t in ts)}/{len(ts)}", "合并请求": " ".join(mrs[:5])}}
+
 def ftask_tick():
     if FT: FT.tick(tasks.all_tasks(), lambda t: tasks.gate_text(t) or tasks.LABEL.get(t["status"], t["status"]), tasks.ref, ftask_result, ftask_unplanned,
-                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"])
+                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta)
 
 def ftask_loop(stopping):
     """单独一个线程写飞书：网络慢不拖住任务调度。"""

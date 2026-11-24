@@ -243,6 +243,15 @@ class MarksTest(Base):
         self.b.FT.covers = lambda: False                                       # 同步坏了照旧发
         self.t.event(u['id'], 'progress', '又改完了'); self.b.task_tick(); self.assertTrue(any('又改完了' in x for x in said), said)
 
+    def test_feishu_fields_from_events(self):
+        t = self.run_task(title='甲', cost=1.25); i = t['id']
+        self.t.event(i, 'start', ''); self.t.event(i, 'done', '结论：PASS\nhttps://github.com/o/r/pull/9 token=abc123'); self.t.update(i, _force=True, status='done')
+        m = self.b.ftask_meta([self.t.load(i)])
+        ev = self.t.events(i); self.assertEqual((m['start'], m['end']), (ev[0]['ts'], ev[-1]['ts']))
+        self.assertEqual((m['custom']['花费（美元当量）'], m['custom']['合并请求']), (1.25, 'https://github.com/o/r/pull/9'))
+        self.assertEqual(self.b.cst(0.5), '01-01 08:00'); self.assertNotIn('abc123', m['desc'])
+        live = self.run_task(title='乙'); self.assertEqual(self.b.ftask_meta([live])['end'], 0)
+
     def test_coworker_cannot_loosen_gate(self):
         m = self.run_task(status='approved', verify='npm test', requester={'channel': 'feishu', 'id': A.MATE, 'name': '同事', 'owner': False})
         out = self.b.relay_followups(m, f"[改验证] {self.t.ref(m)} npm run a\n理由：x")
@@ -286,6 +295,7 @@ class FakeLark:
         elif m == 'GET' and p.startswith('/tasks/'): out = {'task': self.task}
         elif m == 'GET' and p == '/sections': out = {'items': [{'name': 'b', 'guid': 'S-old'}]}
         elif m == 'GET': out = {'items': self.comments}
+        elif m == 'POST' and p == '/custom_fields': out = {'custom_field': {'guid': 'F-' + d['name']}}
         elif m == 'POST' and p == '/sections': out = {'section': {'guid': 'S-' + d['name']}}
         elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}', 'url': f'https://applink/{self.n}'}}
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({'data': out}), stderr='')
@@ -343,6 +353,23 @@ class FeishuTaskTest(unittest.TestCase):
         self.assertEqual(len(self.lines), 1); self.assertEqual(len(self.lines[0][1]['zh_cn']['content']), 7); self.assertIn('t2（已取消）', json.dumps(self.lines, ensure_ascii=False))
         self.assertEqual(self.sent('append'), [])
 
+    def test_fields_filled_live_and_final_and_history(self):
+        self.lark.task['tasklists'] = [{'tasklist_guid': 'L'}]
+        meta = lambda ts: {'start': 1000, 'end': 2000, 'desc': '说明', 'custom': {'花费': 1.5, '模型': 'sonnet'}}
+        t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}
+        h = dict(t, id=2, plan='H', status='done')
+        def tick(ts):
+            self.f.next = 0
+            self.f.tick(ts, lambda t: t['status'], lambda t: f"p#{t['id']}", lambda t: '结论', lambda t: False, lambda t: True, lambda t: (t['title'], ''), lambda t: [], meta)
+        for _ in range(3): tick([t, h])
+        full = [d['task'] for d in self.sent('/tasks/g') if 'description' in (d.get('task') or {})]
+        live, hist = [x for x in full if 'completed_at' not in x], [x for x in full if 'completed_at' in x]
+        self.assertEqual((len(live), len(hist)), (1, 1))                                   # 没变不重写
+        self.assertEqual((live[0]['start']['timestamp'], hist[0]['due']['timestamp'], hist[0]['completed_at']), ('1000000', '2000000', '2000000'))
+        self.assertEqual([c.get('number_value') or c['text_value'] for c in live[0]['custom_fields']], ['1.50', 'sonnet'])
+        tick([dict(t, status='done'), h]); self.assertTrue(self.f.st['g1']['closed'])
+        self.assertEqual(sum('completed_at' in (d.get('task') or {}) for d in self.sent('/tasks/g1')), 1)
+
     def test_own_result_not_commented(self):
         t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}
         self.tick([t]); self.tick([dict(t, status='done')])
@@ -380,7 +407,7 @@ class FeishuTaskTest(unittest.TestCase):
         self.tick([t]); self.tick([t])
         got = self.sent('append_task_steps')
         self.assertEqual([[s['content'] for s in d['task_steps']] for d in got], [['p#7 running：x', 'p#7 改完了']])   # 一次写一批
-        self.assertGreater(got[0]['task_steps'][0]['timestamp'], 10 ** 12)                                             # 毫秒
+        self.assertLess(got[0]['task_steps'][0]['timestamp'], 10 ** 11)                                                # 秒：真接口不收毫秒
         self.tick([dict(t, status='done')])
         self.assertEqual([d['task']['agent_task_status'] for d in self.sent('/tasks/G')], [2, 4])
         self.assertEqual(len(self.sent('/comments')), 1)

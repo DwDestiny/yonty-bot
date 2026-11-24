@@ -9,7 +9,8 @@ Pos:    实例目录的 upgrade.py，由 scaffold.py 从 app/upgrade.py 复制
 步骤：源码仓库干净、在 main → 只做快进 → 跑测试 → 备份实例（不等任务：代码按版本放，只换一个链接；发布说明写了要等的、3.1 之前升上来的才等） → 先让服务回一句再重启 → 重新生成（守则只合并模板改动）
       → 重启服务 → 新服务写出 state/started.json 且版本对上就算好，否则用备份回滚。
 """
-import fcntl, json, os, subprocess, sys, tarfile, time, uuid
+from concurrent.futures import ThreadPoolExecutor
+import fcntl, json, os, subprocess, sys, tarfile, tempfile, time, uuid
 
 INST = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(INST, "state")
@@ -38,6 +39,19 @@ def git(src, *a, timeout=120):
     return r.stdout.strip()
 
 def tail(r, n=1200): return (r.stdout + r.stderr).strip()[-n:]
+
+def run_file(src, f):
+    with tempfile.TemporaryFile("w+") as out:   # 写文件不用管道：测试留下的后台进程握着管道，会一直等不到头
+        r = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-p", f, "-q"], cwd=src, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, timeout=1800)
+        out.seek(0); r.stdout, r.stderr = out.read(), ""
+    return r
+
+def run_tests(src):
+    """每个测试文件一个进程，最多 3 个一起跑（单进程全量要 7 分钟）；有没过的，返回第一个没过的结果。"""
+    fs = sorted((f for f in os.listdir(os.path.join(src, "tests")) if f.startswith("test") and f.endswith(".py")), key=lambda f: -os.path.getsize(os.path.join(src, "tests", f)))
+    with ThreadPoolExecutor(3) as ex:
+        rs = list(ex.map(lambda f: run_file(src, f), fs))
+    return next((r for r in rs if r.returncode), rs[0] if rs else sh(sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q", cwd=src))
 
 def task_units(slug):
     r = sh("systemctl", "--user", "list-units", "--type=service", "--state=active", "--plain", "--no-legend", f"{slug}-task-*")
@@ -103,7 +117,7 @@ def main():
         try: fcntl.flock(hf, fcntl.LOCK_EX | fcntl.LOCK_NB); break
         except OSError: time.sleep(5)
     put(stage="跑测试", to=ver, commit=new[:10])
-    r = sh(sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q", cwd=src, timeout=1800)
+    r = run_tests(src)
     hf.close()
     if r.returncode:
         if old != new: git(src, "reset", "-q", "--hard", old)

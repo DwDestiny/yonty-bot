@@ -22,7 +22,7 @@ class FeishuTasks:
         try:
             with open(self.lists_path, encoding="utf-8") as f: self.lists = json.load(f)
         except (OSError, ValueError): self.lists = {}
-        self.lock, self.next, self.app = threading.RLock(), 0, ""
+        self.lock, self.next, self.app, self.meta = threading.RLock(), 0, "", None
         try:
             with open(path, encoding="utf-8") as f: self.st = json.load(f)
         except (OSError, ValueError): self.st = {}
@@ -42,9 +42,9 @@ class FeishuTasks:
         self.api("PATCH", f"/tasks/{guid}", {"task": {"agent_task_status": n, "agent_task_progress": progress[:40]}, "update_fields": ["agent_task_status", "agent_task_progress"]})
 
     def steps(self, guid, texts, key):   # 一次写一批：这个接口限频很紧，一条条写会被拦
-        now = int(time.time() * 1000)
+        now = int(time.time())   # 秒：文档例子写的是毫秒，真接口只收秒（2026-11-24 实测，毫秒报 9499）
         self.api("POST", "/agent_task_step_info/append_task_steps", {"task_guid": guid, "idempotent_key": hashlib.sha1(key.encode()).hexdigest(),
-                                                                       "task_steps": [{"content": x[:500], "timestamp": now + i} for i, x in enumerate(texts)]})
+                                                                       "task_steps": [{"content": x[:500], "timestamp": now} for x in texts]})
 
     def comment(self, guid, text):
         self.api("POST", "/comments", {"content": text[:3000], "resource_type": "task", "resource_id": guid})
@@ -198,16 +198,55 @@ class FeishuTasks:
             self._save()
         self.lists["_history_done"] = True; self.save(self.lists_path, self.lists)
 
+    def refill(self, tasks):
+        """以前补进来、字段还不全的历史任务，一次补 5 条。"""
+        n = 0
+        for g, r in list(self.st.items()):
+            if not r.get("hist") or r.get("filled") or not self.meta: continue
+            if n >= 5: return
+            n += 1; ts = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
+            self.own_lists(); self.fill(g, r, ts, True); r["filled"] = "1"; self._save()
+
+    def custom(self, lst, values):
+        """清单上的自定义字段（没有就建），返回写任务要的格式。values：{名字: 值}，数字建成数字字段，别的是文本。"""
+        out = []
+        for name, v in values.items():
+            k = f"cf:{lst}/{name}"
+            if k not in self.lists:
+                if not hasattr(self, "cf_seen"):
+                    self.cf_seen = {x.get("name"): x.get("guid") for x in self.api("GET", "/custom_fields", resource_type="tasklist", resource_id=lst, page_size=100).get("items") or []}
+                num = isinstance(v, (int, float))
+                g = self.cf_seen.get(name) or (self.api("POST", "/custom_fields", dict({"resource_type": "tasklist", "resource_id": lst, "name": name, "type": "number" if num else "text"},
+                                                        **({"number_setting": {"format": "normal", "decimal_count": 2}} if num else {}))).get("custom_field") or {}).get("guid")
+                if not g: raise RuntimeError("建自定义字段没返回 guid")
+                self.lists[k] = g; self.save(self.lists_path, self.lists)
+            out.append({"guid": self.lists[k], **({"number_value": f"{v:.2f}"} if isinstance(v, (int, float)) else {"text_value": str(v)[:1000]})})
+        return out
+
+    def fill(self, guid, rec, ts, final):
+        """把能给的字段都写上：说明、开始时间、自定义字段；final 再加结束时间（截止和完成时间）。时间戳是绝对时间，飞书按看的人的时区显示。"""
+        if not self.meta or not ts: return
+        m = self.meta(ts)
+        task = {"description": m["desc"][:2900]}
+        if m["start"]: task["start"] = {"timestamp": str(int(m["start"] * 1000)), "is_all_day": False}
+        if final:
+            end = max(m["end"] or time.time(), m["start"] or 0)
+            task.update(due={"timestamp": str(int(end * 1000)), "is_all_day": False}, completed_at=str(int(end * 1000)))
+        if rec.get("lists"):
+            try: task["custom_fields"] = self.custom(rec["lists"][0], m["custom"])
+            except Exception as e: self.log.warning("feishu custom fields not ready: %s", str(e)[:200])
+        self.api("PATCH", f"/tasks/{guid}", {"task": task, "update_fields": list(task)})
+
     def covers(self, now=None):
         """飞书任务同步正常：开工、进展这些不用再另发消息。"""
         return bool(self.app) and (now or time.time()) >= getattr(self, "mirror_at", 0)
 
-    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: []):
+    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: [], meta=None):
         """把长任务的状态写回飞书任务。result(t) 取完成时的结论；unplanned(t) 方案里还有没派的；mine(t) 要不要同步出去；progress(t) 任务自己写的 [进展]。"""
         now = time.time()
         if now < self.next: return
         self.next = now + 20
-        self.progress = progress
+        self.progress, self.meta = progress, meta
         with self.lock:
             for rec in self.st.values():   # 从指派的飞书任务里派出来的方案，后面补的活也归它，不另建
                 got = {self.key(t) for t in tasks if (t.get("origin") or {}).get("message_id") in (rec.get("mids") or []) and not rec.get("own")} - set(rec.get("keys") or [])
@@ -216,7 +255,7 @@ class FeishuTasks:
                 try: self.mirror(tasks, mine, text)
                 except Exception as e: self.mirror_at = now + 300; self.log.warning("feishu task not created: %s", str(e)[:200])
             if self.app and text and now >= getattr(self, "hist_at", 0):
-                try: self.history([t for t in tasks if mine(t) and not t.get("schedule")], text, label, ref, now)
+                try: self.refill(tasks); self.history([t for t in tasks if mine(t) and not t.get("schedule")], text, label, ref, now)
                 except Exception as e: self.hist_at = now + 60; self.log.warning("feishu history not synced: %s", str(e)[:200])
             for guid, rec in list(self.st.items()):
                 if rec.get("skipped") or rec.get("closed") or now - rec.get("at", 0) > 30 * 86400 or now < rec.get("retry", 0): continue
@@ -245,11 +284,12 @@ class FeishuTasks:
         elif len(done) == len([t for t in ts if t["status"] not in ("cancelled", "rejected", "expired")]) and done: want = (FINISHED, "执行完成")
         elif not done and all(t["status"] in ("cancelled", "rejected", "expired") for t in ts): want = (FINISHED, "已取消")
         else: want = (CONFIRM, "没做成，等你定")
+        told = None
         sig = "|".join(sorted(f"{t['id']}:{t['status']}:{t.get('turn') or 0}" for t in ts))
         if ts and want[0] != DOING and not live and not any(t.get("held") for t in ts) and rec.get("told") != sig:
             if rec.get("own"): texts += [f"{ref(t)} 结论：{result(t)}" for t in ts if result(t)]   # 结果主控会在私聊里汇报，评论会再提醒主人一次，所以只写进步骤
             else: self.comment(guid, "\n".join(f"{ref(t)} {label(t)}：{t['title']}\n{result(t)}".strip() for t in ts))
-            rec["told"] = sig; self._save()
+            told = sig
         self.put_in_section(guid, rec, ts[0].get("project") if ts else "", now)
         try: self.show(guid, rec, ts)
         except Exception as e: self.log.warning("feishu task line failed: %s", str(e)[:200])
@@ -258,8 +298,13 @@ class FeishuTasks:
         for i in range(0, len(texts), 20):
             part = texts[i:i + 20]
             self.steps(guid, part, guid + "|" + "|".join(part) + json.dumps(steps, sort_keys=True))
-        if texts or steps != rec["steps"] or prog != (rec.get("prog") or {}): rec["steps"], rec["prog"] = steps, prog; self._save()
+        if told: rec["told"] = told   # 步骤写进去了才算说过
+        if texts or told or steps != rec["steps"] or prog != (rec.get("prog") or {}): rec["steps"], rec["prog"] = steps, prog; self._save()
         if rec.get("want") != list(want):
             self.status(guid, *want); rec["want"] = list(want); self._save()
         if rec.get("own") and want[0] == FINISHED:   # 服务自己建的，做完就勾掉；主人指派的留给主人勾
-            self.api("PATCH", f"/tasks/{guid}", {"task": {"completed_at": str(int(now * 1000))}, "update_fields": ["completed_at"]}); rec["closed"] = True; self._save()
+            self.fill(guid, rec, ts, True)
+            if not self.meta: self.api("PATCH", f"/tasks/{guid}", {"task": {"completed_at": str(int(now * 1000))}, "update_fields": ["completed_at"]})
+            rec["closed"] = True; rec["filled"] = sig; self._save()
+        elif rec.get("own") and rec.get("filled") != sig:
+            self.fill(guid, rec, ts, False); rec["filled"] = sig; self._save()
