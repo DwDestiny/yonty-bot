@@ -14,9 +14,14 @@ GRACE_S = 300                               # 主控回了话、没派出任务�
 
 
 class FeishuTasks:
-    def __init__(self, lark, owner, path, save, log, notify, submit):
-        """notify(文字) 私聊主人，返回 (message_id, chat_id)；submit(guid, message_id, chat_id, 文字) 排进主控会话。"""
+    def __init__(self, lark, owner, path, save, log, notify, submit, post=None):
+        """post(chat_id, 富文本, 键) 发一条消息，返回消息 ID。
+        notify(文字) 私聊主人，返回 (message_id, chat_id)；submit(guid, message_id, chat_id, 文字) 排进主控会话。"""
         self.lark, self.owner, self.path, self.save, self.log, self.notify, self.submit = lark, owner, path, save, log, notify, submit
+        self.post, self.lists_path, self.lists_at = post, path[:-5] + "_sections.json", 0
+        try:
+            with open(self.lists_path, encoding="utf-8") as f: self.lists = json.load(f)
+        except (OSError, ValueError): self.lists = {}
         self.lock, self.next, self.app = threading.RLock(), 0, ""
         try:
             with open(path, encoding="utf-8") as f: self.st = json.load(f)
@@ -87,6 +92,35 @@ class FeishuTasks:
                 except Exception as e: self.log.warning("feishu task lists unknown: %s", str(e)[:200])
         return {x for r in self.st.values() if r.get("own") for x in r.get("lists") or []}
 
+    def section(self, lst, project):
+        """智能体自带的清单里，一个项目一个分组；有同名的就用它。"""
+        k = f"{lst}/{project}"
+        if k not in self.lists:
+            got = {x.get("name"): x.get("guid") for x in self.api("GET", "/sections", resource_type="tasklist", resource_id=lst, page_size=100).get("items") or []}
+            g = got.get(project) or (self.api("POST", "/sections", {"name": project[:100], "resource_type": "tasklist", "resource_id": lst}).get("section") or {}).get("guid")
+            if not g: raise RuntimeError("建分组没返回 guid")
+            self.lists[k] = g; self.save(self.lists_path, self.lists)
+        return self.lists[k]
+
+    def put_in_section(self, guid, rec, project, now):
+        """放进项目的分组。没成就过 10 分钟再试，不挡别的同步。"""
+        if not rec.get("own") or rec.get("sect") == project or not project or now < self.lists_at: return
+        try:
+            self.own_lists()
+            if not rec.get("lists"): return
+            lst = rec["lists"][0]
+            self.api("POST", f"/tasks/{guid}/add_tasklist", {"tasklist_guid": lst, "section_guid": self.section(lst, project)}); rec["sect"] = project; self._save()
+        except Exception as e: self.lists_at = now + 600; self.log.warning("feishu section not ready: %s", str(e)[:200])
+
+    def show(self, guid, rec, ts):
+        """私聊里发一行带标题的任务链接，只发一次：这样才进会话侧栏的“任务”（卡片进不去）。进度看侧栏里的任务，不改消息（几分钟后就不让改了）。"""
+        if not self.post or not rec.get("own") or rec.get("post"): return
+        chat = next((t["origin"].get("chat_id") for t in ts if (t.get("origin") or {}).get("channel") == "feishu"), "")
+        url = chat and ((self.api("GET", f"/tasks/{guid}").get("task") or {}).get("url") or "")
+        if not url: return
+        mid = self.post(chat, {"zh_cn": {"title": "", "content": [[{"tag": "text", "text": "任务　"}, {"tag": "a", "text": rec["title"], "href": url}]]}}, guid)
+        if mid: rec["post"] = mid; self._save()
+
     def _start(self, guid, t, text, head):
         mid, chat = self.notify(head)
         if not mid: raise RuntimeError("私聊主人没发出去，任务没接")
@@ -133,6 +167,41 @@ class FeishuTasks:
             if not g: raise RuntimeError("建飞书任务没返回 guid")
             self.st[g] = {"at": time.time(), "title": title[:120], "mids": [], "seen": [], "steps": {}, "keys": [self.key(t)], "own": True}; self._save()
 
+    def history(self, tasks, text, label, ref, now):
+        """第一次打开时把以前结束的活补进来：建成已完成的任务，一次 5 条；补完按项目各发一条清单，带上链接就进会话侧栏。只做一遍，主人不加关注，免得一条条提醒。"""
+        if self.lists.get("_history_done"): return
+        at = self.lists.setdefault("_history", now); groups = {}
+        for t in tasks: groups.setdefault(self.key(t), []).append(t)
+        n = 0
+        for k, ts in groups.items():
+            if any(t["status"] not in ENDED or (t.get("updated") or 0) > at for t in ts) or any(any(self.of(r, t) for t in ts) for r in self.st.values()): continue
+            if n >= 5: return self.save(self.lists_path, self.lists)
+            n += 1
+            title, done = text(ts[-1])[0], sum(t["status"] == "done" for t in ts)
+            word = "" if done else "（已取消）" if all(t["status"] in ("cancelled", "rejected", "expired") for t in ts) else "（没做成）"
+            d = self.api("POST", "/tasks", {"summary": (title + word)[:200], "description": "\n".join(f"{ref(t)} {label(t)}：{t['title']}" for t in ts)[:2500],
+                                            "completed_at": str(int(max(t.get("updated") or at for t in ts) * 1000)), "client_token": hashlib.sha1(f"history|{k}".encode()).hexdigest(),
+                                            "members": [{"id": self.app, "type": "app", "role": "assignee"}]}).get("task") or {}
+            if not d.get("guid"): raise RuntimeError("建飞书任务没返回 guid")
+            self.st[d["guid"]] = {"at": now, "title": (title + word)[:120], "mids": [], "seen": [], "steps": {}, "keys": [k], "own": True, "closed": True, "hist": ts[-1].get("project") or "", "url": d.get("url"),
+                                  "chat": next((t["origin"].get("chat_id") for t in ts if (t.get("origin") or {}).get("channel") == "feishu"), "")}; self._save()
+            self.api("PATCH", f"/tasks/{d['guid']}", {"task": {"agent_task_status": FINISHED, "agent_task_progress": f"{done}/{len(ts)}"}, "update_fields": ["agent_task_status", "agent_task_progress"]})
+            self.put_in_section(d["guid"], self.st[d["guid"]], ts[-1].get("project"), now)
+        if n: return self.save(self.lists_path, self.lists)
+        by = {}
+        for r in self.st.values():
+            if r.get("hist") and not r.get("post") and r.get("chat") and r.get("url"): by.setdefault((r["chat"], r["hist"]), []).append(r)
+        for (chat, project), rs in by.items():
+            mid = self.post and self.post(chat, {"zh_cn": {"title": f"{project} 历史任务 {len(rs)} 条", "content": [[{"tag": "a", "text": r["title"], "href": r["url"]}] for r in rs]}}, hashlib.sha1(f"{chat}{project}".encode()).hexdigest()[:20])
+            if not mid: raise RuntimeError("历史清单没发出去")
+            for r in rs: r["post"] = mid
+            self._save()
+        self.lists["_history_done"] = True; self.save(self.lists_path, self.lists)
+
+    def covers(self, now=None):
+        """飞书任务同步正常：开工、进展这些不用再另发消息。"""
+        return bool(self.app) and (now or time.time()) >= getattr(self, "mirror_at", 0)
+
     def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: []):
         """把长任务的状态写回飞书任务。result(t) 取完成时的结论；unplanned(t) 方案里还有没派的；mine(t) 要不要同步出去；progress(t) 任务自己写的 [进展]。"""
         now = time.time()
@@ -146,6 +215,9 @@ class FeishuTasks:
             if self.app and text and now >= getattr(self, "mirror_at", 0):
                 try: self.mirror(tasks, mine, text)
                 except Exception as e: self.mirror_at = now + 300; self.log.warning("feishu task not created: %s", str(e)[:200])
+            if self.app and text and now >= getattr(self, "hist_at", 0):
+                try: self.history([t for t in tasks if mine(t) and not t.get("schedule")], text, label, ref, now)
+                except Exception as e: self.hist_at = now + 60; self.log.warning("feishu history not synced: %s", str(e)[:200])
             for guid, rec in list(self.st.items()):
                 if rec.get("skipped") or rec.get("closed") or now - rec.get("at", 0) > 30 * 86400 or now < rec.get("retry", 0): continue
                 try: self._sync(guid, rec, [t for t in tasks if self.of(rec, t)], label, ref, result, unplanned, now)
@@ -175,7 +247,12 @@ class FeishuTasks:
         else: want = (CONFIRM, "没做成，等你定")
         sig = "|".join(sorted(f"{t['id']}:{t['status']}:{t.get('turn') or 0}" for t in ts))
         if ts and want[0] != DOING and not live and not any(t.get("held") for t in ts) and rec.get("told") != sig:
-            self.comment(guid, "\n".join(f"{ref(t)} {label(t)}：{t['title']}\n{result(t)}".strip() for t in ts)); rec["told"] = sig; self._save()
+            if rec.get("own"): texts += [f"{ref(t)} 结论：{result(t)}" for t in ts if result(t)]   # 结果主控会在私聊里汇报，评论会再提醒主人一次，所以只写进步骤
+            else: self.comment(guid, "\n".join(f"{ref(t)} {label(t)}：{t['title']}\n{result(t)}".strip() for t in ts))
+            rec["told"] = sig; self._save()
+        self.put_in_section(guid, rec, ts[0].get("project") if ts else "", now)
+        try: self.show(guid, rec, ts)
+        except Exception as e: self.log.warning("feishu task line failed: %s", str(e)[:200])
         if want[0] == DOING and rec.get("want") != list(want):   # 先标“正在执行”，步骤写不进去也不耽误状态
             self.status(guid, *want); rec["want"] = list(want); self._save()
         for i in range(0, len(texts), 20):

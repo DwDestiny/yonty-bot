@@ -1454,8 +1454,12 @@ def blocked_watch(t, pool):
 
 BOOT, SYNC_GAP_S, sync_last = time.time(), 20, {}
 
+def in_feishu_task(t):
+    """这个任务的开工、进展已经在飞书任务里（会话侧栏看得到）：不再另发消息。同步没开、没权限、出错时照旧发。"""
+    return bool(FT and FT.covers() and not t.get("schedule") and t["origin"].get("channel") == "feishu" and owner_dm_task(t))
+
 def plan_sync(now):
-    """方案小任务的变更（开工、进展、完成、失败、等答复、停了）由服务直接发到主人私聊，不走模型；同一个私聊 20 秒合一条。"""
+    """方案小任务的变更（开工、进展、完成、失败、等答复、停了）由服务直接发到主人私聊，不走模型；同一个私聊 20 秒合一条。飞书任务里有的不重复发。"""
     groups, every = {}, tasks.all_tasks()
     for t in every:
         if not t.get("plan") or t.get("schedule") or not owner_dm_task(t): continue
@@ -1472,6 +1476,7 @@ def plan_sync(now):
             word = {"running": "开工" if (t.get("turn") or 0) <= 1 else "接着干", "waiting": "停工" if t.get("held") else "等答复"}.get(st) or tasks.LABEL.get(st, st)
             lines.append(f"{n} {word}：{t['title']}" + (f"（{t['plan']} {sum(x['status'] == 'done' for x in mates)}/{len(mates)}）" if st == "done" else ""))
             if st in ("failed", "lost"): lines[-1] += "，" + short(next((e["text"] for e in reversed(evs) if e["kind"] == st), "").split("\n")[0], 100)
+        if in_feishu_task(t): lines = []
         if lines or sig != seen["sig"] or len(evs) != seen["n"]:
             o = t["origin"]; groups.setdefault((o["channel"], o["chat_id"]), []).append((t, lines, {"sig": sig, "n": len(evs)}))
     for k, g in groups.items():
@@ -1504,7 +1509,7 @@ def task_tick():
                     enqueue(pm_key(pm, origin_key(t)) if pm else origin_key(t),
                             {"relay": True, "task": n, "idx": idx, "event": e, **({"pm": pm} if pm else {})})
                 break                                     # 后面的事件等这条处理完
-            if t.get("plan") and e["kind"] in ("start", "progress"):   # 小任务的开工、进展进看板，不逐条刷屏
+            if e["kind"] in ("start", "progress") and (t.get("plan") or in_feishu_task(t)):   # 小任务的开工、进展进看板，不逐条刷屏
                 t = tasks.update(n, posted=t.get("posted", 0) + 1); continue
             if e["kind"] == "progress" and t.get("v2") and tasks.dl.progress_gate(tasks._me(), t, e["text"]) != "send":
                 t = tasks.update(n, posted=t.get("posted", 0) + 1); continue   # 没到间隔留着到点再发，到了条数上限只进记录（7.5）
@@ -1536,7 +1541,7 @@ def task_tick():
         elif st == "running" and STUCK_S and t.get("exec") != "cloud" and not t.get("frozen") and not t.get("gate") and not t.get("turn_over") and now - last_activity(t) > STUCK_S:
             if tasks.load(n)["status"] == "running": stuck_step(tasks.load(n), now)
         elif st == "running" and t.get("stuck"): tasks.update(n, _touch=False, stuck=None)   # 又动起来了
-        elif (st == "running" and not t.get("plan") and t["origin"]["channel"] == "feishu" and HEARTBEAT_S
+        elif (st == "running" and not t.get("plan") and not in_feishu_task(t) and t["origin"]["channel"] == "feishu" and HEARTBEAT_S
               and now - max(t.get("last_post") or 0, t.get("launched") or 0) > HEARTBEAT_S):
             task_say(t, heartbeat_text(t), f"t{n}h{int(now)}"); tasks.update(n, last_post=now)
     try: plan_sync(now)
@@ -2860,6 +2865,16 @@ def ftask_notify(text):
     try: d = json.loads(r.stdout)["data"]; return d.get("message_id"), d.get("chat_id")
     except Exception: return None, None
 
+def ftask_post(chat, body, key):
+    """发一行任务链接，返回消息 ID，没成返回空。"""
+    body = json.dumps(body, ensure_ascii=False)
+    r = lark(["im", "+messages-send", "--as", "bot", "--chat-id", chat, "--msg-type", "post", "--content", body, "--idempotency-key", ("ftc-" + key)[:50]])
+    try: mid = json.loads(r.stdout)["data"]["message_id"]
+    except Exception: return ""
+    with lock: s = sessions.get("p2p:" + chat)
+    if s is not None: mark_seen(s, [mid])   # 主控有看板，不用从前文里再读
+    return mid
+
 def ftask_submit(guid, mid, chat, text):
     ev = {"channel": "feishu", "message_id": mid, "chat_id": chat, "chat_type": "p2p", "sender_id": OWNER_OPEN_ID, "sender_type": "user", "sender_name": OWNER_NAME,
           "content": text, "create_time": str(int(time.time() * 1000)), "ftask": guid, "no_route": True}
@@ -2891,7 +2906,7 @@ def ftask_loop(stopping):
 def feishu_task_loop(stopping):
     """注册成任务智能体，收任务事件。权限没开通就每 10 分钟再试，开通了不用重启。"""
     global FT, ftask_proc
-    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit), ""
+    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit, ftask_post), ""
     threading.Thread(target=ftask_loop, args=(stopping,), daemon=True).start()
     while not stopping.is_set():
         try: ft.register()

@@ -233,6 +233,16 @@ class MarksTest(Base):
         self.b.plan_sync(now + 60)
         self.assertIn('进展：改完了', said[1]); self.assertIn('（P 1/', said[1]); self.assertEqual(self.e.streams, [])
 
+    def test_no_duplicate_when_in_feishu_task(self):
+        said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
+        self.b.FT = types.SimpleNamespace(covers=lambda: True); self.addCleanup(setattr, self.b, 'FT', None)
+        self.t.alive = lambda t: True
+        t = self.run_task(title='甲', plan='P', thing='主线', last_tool_at=time.time()); u = self.run_task(title='乙', last_tool_at=time.time() - 60)
+        for x in (t, u): self.t.event(x['id'], 'start', ''); self.t.event(x['id'], 'progress', '改完了')
+        self.b.task_tick(); self.assertEqual(said, [])
+        self.b.FT.covers = lambda: False                                       # 同步坏了照旧发
+        self.t.event(u['id'], 'progress', '又改完了'); self.b.task_tick(); self.assertTrue(any('又改完了' in x for x in said), said)
+
     def test_coworker_cannot_loosen_gate(self):
         m = self.run_task(status='approved', verify='npm test', requester={'channel': 'feishu', 'id': A.MATE, 'name': '同事', 'owner': False})
         out = self.b.relay_followups(m, f"[改验证] {self.t.ref(m)} npm run a\n理由：x")
@@ -274,18 +284,20 @@ class FakeLark:
         out = {}
         if p.endswith('register_agent'): out = {'agent': {'app_id': 'cli_me'}}
         elif m == 'GET' and p.startswith('/tasks/'): out = {'task': self.task}
+        elif m == 'GET' and p == '/sections': out = {'items': [{'name': 'b', 'guid': 'S-old'}]}
         elif m == 'GET': out = {'items': self.comments}
-        elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}'}}
+        elif m == 'POST' and p == '/sections': out = {'section': {'guid': 'S-' + d['name']}}
+        elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}', 'url': f'https://applink/{self.n}'}}
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({'data': out}), stderr='')
 
 
 class FeishuTaskTest(unittest.TestCase):
     def setUp(self):
         d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
-        self.lark, self.said, self.sub = FakeLark(), [], []
+        self.lark, self.said, self.sub, self.lines = FakeLark(), [], [], []
         import logging
         self.f = mod('feishu_tasks').FeishuTasks(self.lark, 'ou_me', d.name + '/s.json', lambda p, o: Path(p).write_text(json.dumps(o)), logging.getLogger('x'),
-                                                 lambda t: self.said.append(t) or ('om1', 'oc1'), lambda *a: self.sub.append(a))
+                                                 lambda t: self.said.append(t) or ('om1', 'oc1'), lambda *a: self.sub.append(a), lambda *a: self.lines.append(a) or 'om_line')
         self.f.register()
         self.lark.task = {'summary': '写报告', 'creator': {'id': 'ou_me'}, 'members': [{'id': 'cli_me', 'type': 'app', 'role': 'assignee'}], 'completed_at': '0'}
         self.ev = {'header': {'app_id': 'cli_me'}, 'event': {'task_guid': 'G', 'event_types': ['task_create']}}
@@ -312,6 +324,38 @@ class FeishuTaskTest(unittest.TestCase):
         e = {'event': {'task_guid': 'G', 'event_types': ['task_comment_create']}}
         self.f.on_event(e); self.f.on_event(e)
         self.assertEqual(len(self.sub), 2); self.assertIn('改成表格', self.sub[1][3]); self.assertNotIn('删库', self.sub[1][3])
+
+    def test_line_sent_once_and_project_section(self):
+        self.lark.task.update(url='https://applink/x', tasklists=[{'tasklist_guid': 'L'}])
+        ts = [{'id': i, 'status': 'running', 'turn': 1, 'title': f't{i}', 'project': p, 'plan': p.upper(), 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1} for i, p in ((1, 'a'), (2, 'a'), (3, 'b'))]
+        self.tick(ts); self.tick(ts)
+        self.tick([dict(ts[0], status='done')] + ts[1:])
+        self.assertEqual(len(self.lines), 2)                                              # 两个方案各一行，只发一次
+        self.assertIn('https://applink/x', json.dumps(self.lines[0][1]))
+        self.assertEqual([d['section_guid'] for d in self.sent('add_tasklist')], ['S-a', 'S-old'])   # 一个项目一个分组，已有同名的用已有的
+
+    def test_history_once_grouped_in_one_message(self):
+        self.lark.task['url'] = 'https://applink/x'
+        ts = [{'id': i, 'status': 'done' if i != 2 else 'cancelled', 'turn': 1, 'title': f't{i}', 'project': 'a', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1} for i in range(1, 8)]
+        for _ in range(5): self.tick(ts)
+        made = [d for m, p, d in self.lark.calls if (m, p) == ('POST', '/tasks')]
+        self.assertEqual(len(made), 7); self.assertTrue(all(d['completed_at'] != '0' and len(d['members']) == 1 for d in made))
+        self.assertEqual(len(self.lines), 1); self.assertEqual(len(self.lines[0][1]['zh_cn']['content']), 7); self.assertIn('t2（已取消）', json.dumps(self.lines, ensure_ascii=False))
+        self.assertEqual(self.sent('append'), [])
+
+    def test_own_result_not_commented(self):
+        t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}
+        self.tick([t]); self.tick([dict(t, status='done')])
+        self.assertEqual(self.sent('/comments'), []); self.assertIn('结论', json.dumps(self.sent('append'), ensure_ascii=False))
+
+    def test_no_section_permission_does_not_block(self):
+        real = self.f.api
+        def api(m, p, d=None, **k):
+            if 'sections' in p: raise RuntimeError('99991672')
+            return real(m, p, d, **k)
+        self.f.api = api; self.lark.task.update(url='https://applink/x', tasklists=[{'tasklist_guid': 'L'}])
+        self.tick([{'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}])
+        self.assertEqual((len(self.lines), len(self.sent('append')), self.f.st['g1']['want'][0]), (1, 1, 2))
 
     def test_agents_own_list_is_not_someone_elses(self):
         self.lark.task['tasklists'] = [{'tasklist_guid': 'L'}]
