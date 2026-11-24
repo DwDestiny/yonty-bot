@@ -314,6 +314,13 @@ def peer_pid(conn):
         except OSError: return None
     return None
 
+FOLLOW_NOW = {}   # 会话键 -> 项目：主控正在跑、能用 [转交] 让项目经理接着派的那一轮
+def use_handover(me, to):
+    """主控这一轮能 [转交]，却用命令行给同一个项目经理留言：留言轮派不了活、不能给任务下指令，流程会断在那里。不收，让它改写。"""
+    p = FOLLOW_NOW.get(me.get("key")) if me.get("type") == "ctrl" else None
+    if not p or not to.strip().startswith("项目经理") or (to.split()[1:] and to.split()[1] != p): return ""
+    return f"没送。命令行留言叫起来的那一轮，{p} 的项目经理派不了活、也不能给任务下指令。把这段话写进你的回复：单独一行 [转交] {p}，下一行起写内容。"
+
 def ident_serve(conn):
     try:
         conn.settimeout(10)
@@ -328,9 +335,12 @@ def ident_serve(conn):
         elif req.get("op") == "send":
             if not me: out = {"err": "认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。"}
             else:
-                try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
+                stop = use_handover(me, str(req.get("to") or ""))
+                if stop: out = {"err": stop}
+                else:
+                  try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
                                                   str(req.get("text") or ""), None, req.get("reply"), {"via": "cli"})}
-                except ValueError as e: out = {"err": str(e)}
+                  except ValueError as e: out = {"err": str(e)}
         else: out = {"err": "不认识的请求"}
         conn.sendall((json.dumps(out, ensure_ascii=False) + "\n").encode())
     except Exception: log.exception("ident request failed")
@@ -1437,7 +1447,7 @@ NUDGE_S, TELL_S = 15 * 60, 30 * 60
 def wait_watch(t, now):
     """等上级答复的任务：15 分钟没动静催一次上级，30 分钟还没有就告诉派活人一次。已经在等人的不催。"""
     n, since = t["id"], t.get("waiting_since") or now
-    if not t.get("v2") or t.get("held") or t.get("checkpoint") or now - since < NUDGE_S or (t.get("nudged") or 0) >= 2 or team.held(t.get("project")): return
+    if not t.get("v2") or t.get("held") or t.get("hold") or t.get("checkpoint") or now - since < NUDGE_S or (t.get("nudged") or 0) >= 2 or team.held(t.get("project")): return
     if len(tasks.events(n)) > (t.get("posted") or 0): return   # 提问还排着没处理
     if any((r["from"].get("task") == n or r.get("about") == n) and r.get("ts", 0) >= since - 60 and (r.get("need") or r["kind"] == "问题") for r in tasks.dl.load(tasks._me())): return
     if not t.get("nudged"):
@@ -1508,6 +1518,7 @@ def task_tick():
         n = t["id"]
         for e in tasks.events(n, t.get("posted", 0)):
             idx = t.get("posted", 0)
+            if e.get("quiet"): t = tasks.update(n, _touch=False, posted=idx + 1); continue
             if (e["kind"] in OVERDUE and not tasks.overdue_open(t)) or (e["kind"] == "blocked" and t["status"] != "approved"):   # 等到处理时已经过去了
                 if (n, idx) in relaying: break
                 t = tasks.update(n, posted=idx + 1); continue
@@ -1575,6 +1586,9 @@ def task_tick():
             if why and t.get("plan") and not team.held(t.get("project")):
                 try: blocked_watch(tasks.load(t["id"]), tasks.all_tasks())
                 except Exception: log.exception("task #%s blocked check failed", t["id"])
+        if t.get("hold") and t["status"] in ("waiting", "approved"):
+            try: hold_watch(tasks.load(t["id"]), now)
+            except Exception: log.exception("task #%s hold check failed", t["id"])
         elif t["status"] == "waiting":
             try: wait_watch(t, now)
             except Exception: log.exception("task #%s wait check failed", t["id"])
@@ -1846,8 +1860,10 @@ def _delivery_turn(ev):
            if rec.get("src_im") and not pm else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）") + tip
     if fol:
         prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务；也可以用 [任务指令] 让这些任务补做，不加预算、不改验收。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
-    with sem:
-        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
+    if go_on: FOLLOW_NOW[key] = fr["project"]
+    try:
+        with sem: result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
+    finally: FOLLOW_NOW.pop(key, None)
     if result is None: return False   # 这一轮没成：调用方退回重送
     idem = f"dl{rec['id']}-{int(rec['ts'])}"
     if go_on: result = follow_marks(go_on, fr["project"], key, hop, result, idem)
@@ -1896,7 +1912,7 @@ def pending_marks(result):
     out = ["[派活]"] if tasks.parse_directive(result)[1] else []
     out += ["[任务指令]"] if [s for s, _ in split_taskcmds(tasks.parse_directive(result)[0]) if s is not None] else []
     out += ["[转交]"] if team.blocks(result, "转交")[1] else []
-    out += [f"[{m}]" for m in dict.fromkeys(re.findall(r"^\s*\[(处置|改验证|取消任务|改依赖)\]", result or "", re.M))]
+    out += [f"[{m}]" for m in dict.fromkeys(re.findall(r"^\s*\[(处置|改验证|取消任务|改依赖|挂起)\]", result or "", re.M))]
     return out + (["[定时]"] if sch.parse_block(result)[1] else [])
 
 def follow_ok(src):
@@ -2370,7 +2386,7 @@ RELAY_MAX = 3                     # 每个任务主控最多自动追加几次�
 # [任务指令] 短名#N 内容：从这一行起，取到下一个 [任务指令]、[派活]、[不回]、[/任务指令] 或回复结束，整段原样转。
 # 冒号后面换行也行。给人看的话写在指令前面；非要写在后面，就先单独一行 [/任务指令] 收尾。[派活] 起到结尾都是派活块，不拆。
 TASKCMD_HEAD = re.compile(r"^\s*\[任务指令\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
-TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令|处置|改验证|取消任务|改依赖)\]")
+TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令|处置|改验证|取消任务|改依赖|挂起)\]")
 TASKCMD_END = re.compile(r"^\s*\[/任务指令\]\s*$")
 DISPATCH_LINE = re.compile(r"^\s*\[派活\]\s*$")
 FENCE_LINE = re.compile(r"^\s*(`{3,}|~{3,})\w*\s*$")
@@ -2407,7 +2423,7 @@ def apply_taskcmds(text, fn):
     return "\n".join(parts)
 
 # 上级直接管任务的标记，一行一个：[处置] 短名#N 继续等 30｜重跑｜按失败收 理由；[改验证] 短名#N 命令（下一行 理由：…）；[取消任务] 短名#N 原因；[改依赖] 短名#N 标题、短名#N｜无
-CTL_HEAD = re.compile(r"^\s*\[(处置|改验证|取消任务|改依赖)\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
+CTL_HEAD = re.compile(r"^\s*\[(处置|改验证|取消任务|改依赖|挂起)\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
 
 def apply_ctl(text, pool, who, idem="", pm="", told=True, own=False):
     """执行回复里的管理标记，返回 (剩下的文字, 没办成的说明)。只认代码块、派活块外面的。pool：这一轮能管的任务；pm：只能管这个项目；told：取消要不要告诉派活人；own：主人的话（同事那边不许动验证闸门）。"""
@@ -2428,20 +2444,55 @@ def apply_ctl(text, pool, who, idem="", pm="", told=True, own=False):
         if not t: bad.append(f"[{what}] {s}：" + (ambiguous(s, cands) if len(cands) > 1 else "不归这边管") + "，没办"); continue
         key = f"{idem}:c{n}" if idem else ""
         if key and key in (t.get("ctl_seen") or []): continue   # 这一轮是重送，办过了
-        try: e = {"处置": ctl_dispose, "改验证": ctl_verify, "取消任务": ctl_cancel, "改依赖": ctl_deps}[what](t, arg, why, who, told)
+        try: e = {"处置": ctl_dispose, "改验证": ctl_verify, "取消任务": ctl_cancel, "改依赖": ctl_deps, "挂起": ctl_hold}[what](t, arg, why, who, told)
         except Exception as x: log.exception("ctl failed"); e = f"出错了（{type(x).__name__}）"
         if e: bad.append(f"[{what}] {tasks.ref(t)}：{e}，没办"); continue
         tasks.decide(what, task=tasks.ref(t), why=f"{who}：{arg} {why}".strip()[:300])
         if key: tasks.update(t["id"], _touch=False, ctl_seen=((tasks.load(t["id"]).get("ctl_seen") or []) + [key])[-40:])
     return "\n".join(keep).strip(), bad
 
+def judge_unmet(t, who, why):
+    """上级改判：任务记成了完成，其实没达成。改成失败，等它的不放行。上级自己定的，不再回报一遍。"""
+    tasks.update(t["id"], status="failed"); tasks.event(t["id"], "failed", f"结论：BLOCKED（{who}判没达成：{why}）", quiet=True); return ""
+
+HOLD_REF = re.compile(r"[A-Za-z0-9_.-]+#\d+")
+def hold_task(t, why, who):
+    """挂起；why 里写到的、还没结果的任务（短名#N）都有结果了会叫醒项目经理。"""
+    on = [y["id"] for y in (tasks.resolve(s, tasks.all_tasks())[0] for s in dict.fromkeys(HOLD_REF.findall(why))) if y and y["id"] != t["id"] and not settled(y)]
+    tasks.set_hold(t["id"], why, who, on)
+
+def settled(y): return not y or tasks.accepted(y) or y["status"] not in tasks.ACTIVE + ("pending", "done")
+
+def ctl_hold(t, why, _, who, told):
+    if not why: return "要写等什么（等某个任务就写 短名#N）"
+    if t["status"] not in ("waiting", "approved", "pending"): return f"已经{tasks.LABEL.get(t['status'])}，挂不了"
+    hold_task(t, why, who); return ""
+
+HOLD_H = (1, 4, 12)   # 没写等哪个任务的（等合并、部署），1 小时先提醒一次；写了的有结果会叫，4 小时才提醒
+def hold_watch(t, now):
+    """挂起的任务：等的任务都有结果了叫醒项目经理一次；挂久了提醒两次，12 小时告诉派活人。"""
+    n, h = t["id"], t["hold"]
+    if t.get("held") or team.held(t.get("project")) or len(tasks.events(n)) > (t.get("posted") or 0): return
+    ys = [tasks.load(i) for i in h.get("on") or []]
+    if ys and not h.get("woke") and all(settled(y) for y in ys):
+        tasks.update(n, _touch=False, hold=dict(h, woke=True))
+        tasks.event(n, "nudge", "挂起时等的都有结果了：" + "、".join(f"{tasks.ref(y)} {tasks.LABEL.get(y['status'])}" for y in ys if y) + f"。挂起的理由：{h['why']}"); return
+    k = h.get("told") or 0
+    if k >= 3 or now - h["ts"] < 3600 * (HOLD_H if not ys else (4, 8, 12))[k]: return
+    tasks.update(n, _touch=False, hold=dict(h, told=k + 1))
+    hrs = int((now - h["ts"]) // 3600)
+    if k < 2: tasks.event(n, "nudge", f"已经挂起 {hrs} 小时，等的是：{h['why']}")
+    else: task_say(t, f"{tasks.ref(t)} 挂起 {hrs} 小时了：{t['title']}\n在等：{h['why']}\n要接着就回 {BT}{tasks.ref(t)} 你的意见{BT}", f"t{n}hold{int(h['ts'])}")
+
 def ctl_dispose(t, arg, why, who, told):
-    m = re.match(r"^(继续等|重跑|按失败收)\s*[:：,，]?\s*(\d+)?\s*(?:分钟)?\s*(.*)$", arg)
-    if not m: return "写法是 继续等 分钟数｜重跑｜按失败收 理由"
+    m = re.match(r"^(继续等|重跑|按失败收|没达成)\s*[:：,，]?\s*(\d+)?\s*(?:分钟)?\s*(.*)$", arg)
+    if not m: return "写法是 继续等 分钟数｜重跑｜按失败收 理由｜没达成 理由"
     act, mins, why = m.group(1), int(m.group(2) or 30), m.group(3).strip()
-    if act == "按失败收" and not why: return "按失败收要写理由"
+    if act in ("按失败收", "没达成") and not why: return f"{act}要写理由"
     if act == "继续等" and not 1 <= mins <= 240: return "继续等最多 240 分钟"
     t = tasks.load(t["id"])
+    if t["status"] == "done" and act in ("按失败收", "没达成"): return judge_unmet(t, who, why)
+    if act == "没达成": return f"它{tasks.LABEL.get(t['status'])}，没达成只用在记成完成的任务上"
     if t["status"] != "running": return f"已经{tasks.LABEL.get(t['status'])}，要接着干写 [任务指令]"
     if t.get("gate") or t.get("turn_over"):
         tasks.update(t["id"], _touch=False, ctl={"act": act, "min": mins, "why": why, "who": who, "ts": time.time()}); return ""
@@ -2479,7 +2530,7 @@ def ctl_cancel(t, why, _, who, told):
     return ""
 
 def ctl_deps(t, arg, _, who, told):
-    if t["status"] not in ("approved", "pending"): return f"已经{tasks.LABEL.get(t['status'])}，依赖改不了"
+    if t["status"] not in ("approved", "pending", "waiting") or t.get("checkpoint"): return f"已经{tasks.LABEL.get(t['status'])}，依赖改不了"
     if not t.get("plan"): return "不是方案里的任务"
     ds = [] if arg in ("无", "没有") else [x.strip() for x in re.split(r"[、,，]", arg) if x.strip()]
     if not ds and arg not in ("无", "没有"): return "写新的依赖，没有就写 无"
@@ -2493,6 +2544,11 @@ def ctl_deps(t, arg, _, who, told):
         if y["id"] == t["id"]: return "改完会绕成一圈互相等"
         if y["id"] in seen: continue
         seen.add(y["id"]); todo += [z for _, z in team.dep_tasks(tasks._me(), y, pool) if z]
+    if t["status"] == "waiting":   # 开工早了、停在提问的：退回排队，依赖齐了接着开工
+        if all(tasks.accepted(y) for _, y in team.dep_tasks(tasks._me(), dict(t, deps=ds), pool)): return "这些依赖都收过了，改完会马上接着跑；要它等别的就写 [挂起]"
+        tasks.inbox_add(t["id"], who, bool(t["requester"].get("owner")), f"你开工早了，先退回排队，等：{'、'.join(ds)}。再开工时从头核对前置，不满足就按任务书停下。", upper=True, keep_budget=True)
+        tasks.dl.close_task(tasks._me(), t["id"], lambda r: r["kind"] not in tasks.dl.OWNER_CATS)
+        tasks.update(t["id"], status="approved")
     tasks.update(t["id"], deps=ds, wait_why="", blocked_seen=[]); return ""
 
 def ctl_bad(t, bad):
@@ -2517,8 +2573,9 @@ def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一�
                 f"命令本身不对就写 [改验证] {tasks.ref(t)} 新命令，下一行 理由：…；整个任务不该做了写 [取消任务] {tasks.ref(t)} 原因。\n不写标记它就一直跑，没人管会升级给主控 ---")
     elif e["kind"] == "blocked":
         tail = f"--- 定一个：让上游接着干（[任务指令]）、重新派上游、改依赖（[改依赖] {tasks.ref(t)} 标题或无）、或 [取消任务] {tasks.ref(t)} 原因。要主人定就 [投递 主控 问题] ---"
-    elif e["kind"] == "nudge": tail = "--- 能定的现在定（[任务指令] 回答它）；真要等主人就 [投递 主控 问题] 说清等什么；已经在等主人的写 [处理掉] 等主人 ---"
-    down = team.waiting_on(tasks._me(), t, tasks.all_tasks()) if e["kind"] in ("failed", "lost") else []
+    elif e["kind"] == "nudge": tail = f"--- 能定的现在定（[任务指令] 回答它）；真要等主人就 [投递 主控 问题] 说清等什么；已经在等主人的写 [处理掉] 等主人；有意先不回、在等别的任务或条件的，写 [挂起] {tasks.ref(t)} 等什么（等某个任务写 短名#N，有结果了会叫你） ---"
+    down = team.waiting_on(tasks._me(), t, tasks.all_tasks()) if e["kind"] in ("done", "failed", "lost") else []
+    if e["kind"] == "done" and down: tail = f"--- 这条你收下（不改判、不叫它接着干），等它的就开工。任务自己说的完成不算数：任务书要的结果没拿到，写 [处置] {tasks.ref(t)} 没达成 理由，或 [任务指令] 让它接着干 ---\n" + tail
     brief = t["brief"] if len(t["brief"]) <= 1500 else t["brief"][:1500] + "……（后面省略）"
     brief_part = ("--- 任务书：这个会话前面已经有了，这里不再贴 ---\n" if briefed else f"--- 任务书（节选）---\n{brief}\n")
     base = (t.get("base") or "").split("/", 1)[-1]
@@ -2603,6 +2660,7 @@ def pm_relay(ev):
     try:
         if not t or t.get("posted", 0) != idx: return
         tk, ref = tasks._me(), tasks.ref(t)
+        hop = min(t.get("hop") or 0, 1)   # 任务真干了一轮活才有回报，跳数重新数；来回返工另有每个任务的自动追加上限管着
         okey = origin_key(t); key = pm_key(pm, okey)
         owner = bool(t["requester"].get("owner"))
         last_rec = max([r["id"] for r in tasks.dl.load(tk)] or [0])
@@ -2616,7 +2674,7 @@ def pm_relay(ev):
                 if STRICT: prompt = with_board(s, prompt, pm, owner)
                 with lock: s["pm_intro"] = True; s["team"] = 3
                 result = run_claude(key, s, prompt, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"],
-                                    quiet=True, layer=pm, hop=t.get("hop") or 0)
+                                    quiet=True, layer=pm, hop=hop)
         except Exception:
             log.exception("task #%s pm relay failed", n)
         if result is None:   # 项目经理没跑成：原样交给派活的聊天会话，保证至少送到一次
@@ -2624,9 +2682,9 @@ def pm_relay(ev):
             tasks.decide("回报退回主控", task=ref, why="项目经理这一轮没跑成")
             enqueue(okey, dict(ev, pm=None)); return
         note_briefed(key, n)
-        absorbed = ABSORB_RE.search(result)
+        absorbed, began = ABSORB_RE.search(result), time.time()
         if STRICT:
-            redo = lambda note: run_claude(key, s, note, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"], quiet=True, layer=pm, hop=t.get("hop") or 0)
+            redo = lambda note: run_claude(key, s, note, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"], quiet=True, layer=pm, hop=hop)
             result = with_retry(dict(relay_ev(t), idem=f"pm{n}e{idx}", pm=pm, no_handover=True), key, result, redo, pm, follow=False)
             absorbed = ABSORB_RE.search(result)
         text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}", pm=pm)
@@ -2637,15 +2695,19 @@ def pm_relay(ev):
             else:
                 tasks.update(n, auto_follow=tasks.load(n).get("auto_follow", 0) + 1)
                 text = task_directive(dict(relay_ev(t), idem=f"pm{n}e{idx}"), text)
-        text = pm_marks(pm, key, owner, text, t.get("hop") or 0, n, f"pm{n}e{idx}").strip()
+        text = pm_marks(pm, key, owner, text, hop, n, f"pm{n}e{idx}").strip()
         mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("key") == key
                 and (r["to"]["to"] == "主控" or (e["kind"] == "question" and r["to"]["to"] == "主人"))]
         answered_q = len(tasks.inbox_items(n)) > inbox0
         if t.get("plan") and not t.get("closing") and e["kind"] == "done" and not absorbed and not mine:
             tasks.decide("项目经理处理掉", task=ref, why="方案里的小任务做完，看板上有，不逐个报")
-        elif e["kind"] in OVERDUE or (e["kind"] == "nudge" and answered_q): pass   # 没处置的到点升级给主控，不替它报完成
+        elif e["kind"] in OVERDUE or (e["kind"] == "nudge" and answered_q): pass
+        elif e["kind"] in ("question", "nudge", "blocked") and not mine and ((tasks.load(n).get("hold") or {}).get("at") or 0) >= began: pass   # 挂起了，理由记着   # 没处置的到点升级给主控，不替它报完成
         elif absorbed:
-            tasks.decide("项目经理处理掉", task=ref, why=absorbed.group(1).strip() or "没写理由")
+            why = absorbed.group(1).strip()
+            tasks.decide("项目经理处理掉", task=ref, why=why or "没写理由")
+            if why and not mine and e["kind"] in ("question", "nudge") and tasks.load(n)["status"] == "waiting" and not re.search(r"(?<!不是)(?<!不用)等(?:主人|" + re.escape(OWNER_NAME) + ")", why):
+                hold_task(tasks.load(n), why, f"{pm} 的项目经理")   # 说了理由、有意不回：算挂起，不催，也不告诉主人“没人定”
         elif not mine and not (e["kind"] == "question" and answered_q):
             concl = next((l.strip() for l in e["text"].splitlines() if l.strip()), "")[:160]
             link = (MR_RE.search(e["text"]) or [None])[0]
@@ -2653,7 +2715,7 @@ def pm_relay(ev):
             body = (f"{ref} {RELAY_HEAD[e['kind']]}：{e['text']}" if kind == "问题" else f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "")) + f"\n全文 /task {ref}"
             if kind == "问题": body += f"\n回答写 [任务指令] {ref} 你的回答"
             tasks.decide("替项目经理投递", task=ref, category=kind, why="项目经理这一轮既没上交主控也没写 [处理掉] 理由（7.4 防沉默）")
-            try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, t.get("hop") or 0, None, {"about": n, "auto": True}, trusted=True)
+            try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, hop, None, {"about": n, "auto": True}, trusted=True)
             except ValueError as x: log.warning("auto delivery for task #%s rejected: %s", n, x)
         if text and not text.startswith(AMB_SILENT): tasks.decide("项目经理回报", task=ref, text=text[:500])
         relay_post(t, idx, "")
@@ -2713,7 +2775,9 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
             tasks.update(tid, _touch=False, cap_told=tid * 1000 + len(tasks.events(tid)))
             try: task_say(x, f"{n} 自动追加到上限 {RELAY_MAX} 次，停在这里等你定：{x['title']}\n上级想让它做：{short(body, 200)}\n同意就回 {BT}{n} 继续{BT}，或直接说怎么做。", f"t{tid}cap{len(tasks.events(tid))}")
             except Exception: log.exception("cap notice failed")
+        if why and "已经自动追加" in why and x["status"] == "done" and x.get("plan") and not cli: judge_unmet(x, who or "主控", "还要它接着做，自动追加到上限了：" + short(body, 150))
         if why: return f"（{why}）"
+        again = team.opened_on(tasks._me(), x, tasks.all_tasks()) if x["status"] == "done" and not cli else []
         raise_budget = bool(tasks.BUDGET_RE.search(body))
         tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", owner, body, upper=True, idem=key)
         close_requests(dict(relay_ev(t), **({"sender_id": ""} if cli else {})), x)   # 命令行投递叫起来的那一轮不算人回了
@@ -2721,6 +2785,7 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
         tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
         log.info("task %s auto follow-up from relay", n)
+        for y in again: tasks.event(y["id"], "nudge", f"它依赖的 {n} 又叫回去接着干了，它已经{'在跑' if y['status'] == 'running' else '停在提问'}。停在提问的要它等，写 [改依赖] 或 [挂起]；在跑的先看有没有受影响。")
         return ""
     return apply_taskcmds(text, apply)
 

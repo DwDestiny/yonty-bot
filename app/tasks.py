@@ -124,7 +124,7 @@ TRANSITIONS = {
     "approved":  {"running", "cancelled"},                             # 排队，有名额就开工
     "running":   {"waiting", "done", "failed", "lost", "cancelled"},   # 跑一轮的结果
     "waiting":   {"approved", "cancelled"},                            # 有人回答或加预算后再排队
-    "done":      {"approved"},                                         # 追加要求
+    "done":      {"approved", "failed"},                                         # 追加要求
     "failed":    {"approved"},                                         # 接着干
     "lost":      {"approved"},                                         # 进程没了，接着干
     "cancelled": set(), "rejected": set(), "expired": set(),
@@ -164,7 +164,7 @@ def pick_model(role, verify, ex, model="", effort="", forced=False):
     """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
     除非主人的话派的、写明“主人指定”。没有验证命令或云端跑的没有自动换人的机会，照原来的：写了听写的，没写用角色模板。"""
     if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
-        if not forced: model, effort = cap_tier(model, effort)
+        if not forced: model, effort = cap_tier(model or ((roles().get(role) or {}).get("model") or "" if effort else ""), effort)   # 只写思考档的，按角色的模型算
         return {"model": model, "effort": effort, "auto_model": False}
     return dict(TIERS[0], auto_model=True)
 
@@ -365,10 +365,19 @@ def cut(s, n, tail=False):
     if len(s) <= n: return s
     return f"（前面截掉 {len(s) - n} 字）……" + s[-n:] if tail else s[:n] + f"……（后面截掉 {len(s) - n} 字）"
 
-def event(tid, kind, text=""):
+def event(tid, kind, text="", **kv):
     """kind: start / progress / question / done / failed / lost，加上要上级处理的 overdue / overdue2（超时，等处置）、blocked（等的任务没成）、nudge（催一下）。
-    bridge 按顺序发回原聊天或交给上级。"""
-    _append(tid, "events.jsonl", {"kind": kind, "text": text, "ts": time.time()})
+    bridge 按顺序发回原聊天或交给上级。quiet=True 的只记下来（上级自己改判的，不再回报一遍）。"""
+    _append(tid, "events.jsonl", dict({"kind": kind, "text": text, "ts": time.time()}, **kv))
+
+def accepted(t):
+    """做完，而且上级收过：所有回报都处理完了，没叫它接着干，也没改判。依赖放行只认这个，不认任务自己说的完成。"""
+    return bool(t) and t["status"] == "done" and time.time() - (t.get("finished") or 0) > 5 and (t.get("posted") or 0) >= len(events(t["id"]))   # 先写状态后写回报，隔 5 秒再认
+
+def set_hold(tid, why, who, on=()):
+    """挂起：有意不回、不开工，等 why。on 是要等的任务号，都有结果了 bridge 叫醒上级。续挂不重新计时。"""
+    old = (load(tid) or {}).get("hold") or {}
+    return update(tid, _touch=False, hold={"why": why[:300], "who": who, "on": list(on), "ts": old.get("ts") or time.time(), "at": time.time(), "told": old.get("told") or 0})
 
 def events(tid, start=0): return _read(tid, "events.jsonl")[start:]
 
@@ -392,6 +401,7 @@ def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False, idem=
         update(tid, budget=nb, budget_why=f"{who}追加了要求，续到 {nb}")
     if kind == "指令" and "放开验收" in text and (owner or upper) and t.get("accept_files"):   # 验收测试确实写错了：主人或上级放开
         update(tid, accept_unlocked=True)
+    if kind == "指令" and t.get("hold"): update(tid, _touch=False, hold=None)   # 上级或人发了指令：不再挂着
     with _Lock(os.path.join(tdir(tid), ".lock")):
         n = 1 + len(_read(tid, "inbox.jsonl"))
         fsio.append(os.path.join(tdir(tid), "inbox.jsonl"),
@@ -753,6 +763,7 @@ def handback_verdict(text, readonly=False):
     """交回内容自己写了结局的，按它结束，不留在等回复：写了“按失败交回”或结论是失败、卡住 → failed；结论是通过、完成 → done。
     没写结论返回 None。"""
     if re.search(r"(?<![不别没])按失败交回", text or ""): return "failed"
+    if re.search(r"^[\s*#>]*结果\s*\**\s*[:：][\s*]*BLOCKED", text or "", re.M): return "failed"
     m = re.search(r"^[\s*#>]*结论\s*\**\s*[:：]\s*(.+)$", text or "", re.M)
     if not m: return None
     line = ZERO_FAIL.sub("", m.group(1))
@@ -1663,7 +1674,8 @@ def accept_note(t):
             + ran + (t.get("accept_precheck") or ""))
 
 def verify_line(t):
-    if not t.get("verify"): return "- 派活时没定验证命令：按仓库自己的测试验，结果写进总结。"
+    if not t.get("verify"): return ("- 派活时没定验证命令：按仓库自己的测试验，结果写进总结。\n"
+                                    "- 任务书要的结果没拿到（没做成、没测成、前置没满足停下）：最后一条第一行写“结论: BLOCKED 原因”，不要只在正文里说；没写服务会记成完成，等它的任务就会开工。")
     return (f"- 验证命令：{t['verify']}。结束前自己先跑通。你说做完后，服务会在工作树里再跑一遍，"
             f"没过会把输出退回给你返工（最多 {T['verify_retries']} 次），再不过就按失败交回。")
 
@@ -2098,6 +2110,7 @@ def overdue_open(t):
     return t.get("status") == "running" and bool((t.get("gate") or {}).get("asked") or t.get("turn_over") or (t.get("stuck") or {}).get("asked"))
 
 def gate_text(t, full=False):
+    if t.get("hold") and t.get("status") == "waiting": return f"挂起：{t['hold']['why'][:80]}"
     g = t.get("gate") if t.get("status") == "running" else None
     if not g: return "超时等处置" if overdue_open(t) else ""
     m = int((time.time() - g["at"]) // 60)
