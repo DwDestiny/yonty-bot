@@ -2860,6 +2860,16 @@ def ftask_notify(text):
     try: d = json.loads(r.stdout)["data"]; return d.get("message_id"), d.get("chat_id")
     except Exception: return None, None
 
+def ftask_post(chat, body, key):
+    """发一行任务链接，返回消息 ID，没成返回空。"""
+    body = json.dumps(body, ensure_ascii=False)
+    r = lark(["im", "+messages-send", "--as", "bot", "--chat-id", chat, "--msg-type", "post", "--content", body, "--idempotency-key", ("ftc-" + key)[:50]])
+    try: mid = json.loads(r.stdout)["data"]["message_id"]
+    except Exception: return ""
+    with lock: s = sessions.get("p2p:" + chat)
+    if s is not None: mark_seen(s, [mid])   # 主控有看板，不用从前文里再读
+    return mid
+
 def ftask_submit(guid, mid, chat, text):
     ev = {"channel": "feishu", "message_id": mid, "chat_id": chat, "chat_type": "p2p", "sender_id": OWNER_OPEN_ID, "sender_type": "user", "sender_name": OWNER_NAME,
           "content": text, "create_time": str(int(time.time() * 1000)), "ftask": guid, "no_route": True}
@@ -2891,7 +2901,7 @@ def ftask_loop(stopping):
 def feishu_task_loop(stopping):
     """注册成任务智能体，收任务事件。权限没开通就每 10 分钟再试，开通了不用重启。"""
     global FT, ftask_proc
-    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit), ""
+    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit, ftask_post, CFG["name"]), ""
     threading.Thread(target=ftask_loop, args=(stopping,), daemon=True).start()
     while not stopping.is_set():
         try: ft.register()
