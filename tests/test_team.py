@@ -154,6 +154,21 @@ class GateTest(Base):
         self.say('开工')
         self.assertEqual([t['title'] for t in self.new()], ['甲', '乙'])
 
+    def test_third_review_needs_owner(self):
+        """评审一个方案最多两轮：取消的、失败的不算；第三轮退回，写了主人同意才放行。"""
+        pl = "[方案] 整改\n任务:\n- 评一 | |\n- 评二 | |\n- 评三 | |\n- 评四 | |\n"
+        rv = lambda x: block(self.e.repo, x).replace('角色: 开发', '角色: 评审')
+        self.layers(['[转交] proj 做'], [pl + rv('评一') + rv('评二') + rv('评三'), '[不回]'])
+        self.say('开工')
+        self.assertEqual([t['title'] for t in self.new()], ['评一', '评二'])
+        self.assertTrue(any('[服务回执]' in p and '评审过 2 轮' in p for p in self.pm_prompts()))
+        self.t.update(self.by('评一')['id'], _force=True, status='failed')
+        self.layers(['[转交] proj 做'], [rv('评三')]); self.say('开工')
+        self.assertEqual(self.by('评三')['title'], '评三')
+        ok = rv('评四').replace('角色: 评审', '角色: 评审\n再审: 主人同意')
+        self.layers(['[转交] proj 做'], [rv('评四'), ok]); self.say('开工')
+        self.assertEqual([t['title'] for t in self.new()], ['评一', '评二', '评三', '评四'])
+
     def test_coworker_still_needs_approval(self):
         self.layers([block(self.e.repo, '甲', 'src/a')], [])
         self.say('帮我改', sender=A.MATE, chat='oc_mate')
@@ -271,6 +286,24 @@ class ParseTest(Base):
         parts = self.b.split_taskcmds(text)
         self.assertEqual([p for p in parts if p[0]], [('proj#1', '去做')])
         self.assertIn('[任务指令] a#1 示例', self.t.parse_directives(text)[1][0]['brief'])
+
+
+class KilledCostTest(Base):
+    def test_cancelled_turn_is_charged_once(self):
+        """停掉的那一轮没有 result：按最后一个 result 之后的用量估一笔，同一条消息多行只算一次，再停不重复记。"""
+        import json
+        t = self.e.task(status='running'); n = t['id']; self.t.update(n, cost=1.0, unit='', pid=0)
+        msg = lambda i, rd: {'type': 'assistant', 'message': {'id': i, 'model': 'claude-sonnet-5-5', 'usage': {
+            'input_tokens': 0, 'output_tokens': 0, 'cache_read_input_tokens': rd, 'cache_creation_input_tokens': 0}}}
+        p = os.path.join(self.t.tdir(n), 'stream.log')
+        with open(p, 'w') as f:
+            for o in (msg('m1', 9_000_000), {'type': 'result'}, msg('m2', 1_000_000), msg('m2', 1_000_000)): f.write(json.dumps(o) + '\n')
+        before = self.t.spent_today()
+        self.say('/task cancel ' + self.t.ref(t))
+        self.assertEqual(self.t.load(n)['status'], 'cancelled')
+        self.assertAlmostEqual(self.t.load(n)['cost'], 1.1); self.assertAlmostEqual(self.t.spent_today() - before, 0.1)
+        self.t.stop(self.t.load(n))
+        self.assertAlmostEqual(self.t.load(n)['cost'], 1.1)
 
 
 class QuotaTest(Base):

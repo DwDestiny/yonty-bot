@@ -9,7 +9,7 @@ import importlib.util, json, os, re, threading, time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 F = os.path.join(ROOT, "state", "team3.json")
 LK = threading.RLock()
-DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 12}
+DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 12, "max_reviews": 2}
 
 def conf(cfg): return dict(DEFAULTS, **(cfg.get("team") or {}))
 
@@ -108,6 +108,9 @@ def gate(tk, project, d, c):
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
     if len(mine) >= c["max_tasks"] * 2: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口或换一个方案"
+    if d.get("role") == "评审" and not d.get("review_ok"):   # 一轮全面看、一轮复核必修就够；再多是花钱磨，要人定
+        n = sum(t.get("role") == "评审" and t["status"] not in DEAD + ("failed", "lost") for t in mine)
+        if n >= c["max_reviews"]: return f"方案“{d['plan']}”已经评审过 {n} 轮，不自动开下一轮：剩下的必修项自己核对修没修好就收，拿不准写 [投递 主控 问题] 请主人定；主人同意再审，派活里加一行“再审: 主人同意”"
     if d.get("role") == "开发" and not d.get("verify") and not d.get("verify_said"): return f"“{d['title']}”没写“验证:”：写一条能判断做没做成的命令，实在没有写 无"
     fs = d.get("files") or []
     if not d.get("closing") and d.get("role") != "评审":
