@@ -2007,7 +2007,8 @@ def run_verify(t, cmd=None):
 def _gate_once(t, cmd, box):
     tid, sup = t["id"], t.get("exec") != "cloud"   # 云端复跑在 bridge 的轮询里跑，没人能处置，照旧到点停
     n = ((load(tid) or {}).get("gate_n") or 0) + 1
-    log = os.path.join(tdir(tid), f"gate-{n}.log")
+    gd = os.path.join(TASK_ROOT, "gates", str(tid)); os.makedirs(gd, mode=0o700, exist_ok=True)   # 不放 state：那里会话读不到，上级查不了
+    log = os.path.join(gd, f"gate-{n}.log")
     key = hashlib.sha1(f"{t.get('repo')}|{cmd}".encode()).hexdigest()[:16]
     st = {"n": n, "cmd": gate.mask(cmd, 160), "at": time.time(), "log": log}
     update(tid, _touch=False, gate=dict(st, queued=True), gate_n=n, verify_log=log, ctl=None)
@@ -2037,7 +2038,7 @@ def _gate_once(t, cmd, box):
         update(tid, _touch=False, gate=None, ctl=None)
         for i in range(max(1, n - 8), n - 4):   # 只留最近 5 次的输出
             for p in (f"gate-{i}.log", f"gate-{i}.log.trace"):
-                try: os.remove(os.path.join(tdir(tid), p))
+                try: os.remove(os.path.join(gd, p))
                 except OSError: pass
 
 def SECRET(s): return gate.SECRET_RE.sub(r"\1***", s)
@@ -2052,7 +2053,7 @@ def watch_turn(tid, p, st, limit, over):
             if c and c["act"] == "继续等":
                 due, asked, level = now + c.get("min", 30) * 60, 0, 0; update(tid, _touch=False, turn_over=None); continue
             if c and c["act"] == "按失败收":
-                update(tid, status="failed"); event(tid, "failed", f"结论：BLOCKED（{c.get('who', '上级')}让按失败收：{c.get('why')}）"); p.terminate(); return
+                update(tid, status="failed", **({} if (load(tid) or {}).get("agent_out") else {"agent_out": "infra"})); event(tid, "failed", f"结论：BLOCKED（{c.get('who', '上级')}让按失败收：{c.get('why')}）"); p.terminate(); return
             if c or (level and now - asked > gate.HARD_MIN * 60):
                 st.trouble = f"一轮超过 {int(limit // 60)} 分钟，" + (f"{c.get('who', '上级')}让换人重来" if c else "没人处置"); p.terminate(); return
             if now < due: continue
@@ -2222,6 +2223,7 @@ def remove_worktree(t):
         if why: return False, "分支没拉回主仓库，先不删：" + why
         shutil.rmtree(t["worktree"], ignore_errors=True)
         return not os.path.isdir(t["worktree"]), "目录删不掉"
+    shutil.rmtree(os.path.join(TASK_ROOT, "gates", str(t["id"])), ignore_errors=True)
     r = git(t["repo"], "worktree", "remove", t["worktree"])
     return r.returncode == 0, r.stderr.strip()[-200:]
 

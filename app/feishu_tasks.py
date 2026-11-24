@@ -67,7 +67,7 @@ class FeishuTasks:
             if rec and not rec.get("skipped"): rec.pop("closed", None); rec.pop("user_closed", None); return self._comments(guid, rec, t)
             c = t.get("creator") or {}
             others = [m for m in ms if m.get("type") != "app" and m.get("id") != self.owner]
-            why = "不是你建的" if c.get("id") != self.owner else "还有别人参与，内容别人也能改" if others else ""
+            why = "不是你建的" if c.get("id") != self.owner else "还有别人参与，内容别人也能改" if others else "它在任务清单里，清单成员也能改" if t.get("tasklists") else ""
             if why:
                 if not rec:
                     self.st[guid] = {"at": time.time(), "skipped": True}; self._save()

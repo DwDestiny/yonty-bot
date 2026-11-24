@@ -13,7 +13,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
         python3 bridge.py --cache-check 3 # 用服务同款参数开 3 个新会话，检查缓存是否跨会话命中
 来源:   feishu-claude-bot skill 的 assets/templates/bridge.py
 """
-import contextlib, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
+import contextlib, hashlib, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
@@ -737,7 +737,7 @@ def hold_project(p, on):
         if on and t["status"] == "running" and t.get("exec") != "cloud":
             tasks.update(t["id"], status="waiting", held=True); tasks.stop(t); n.append(tasks.ref(t))
         elif not on and t.get("held"):
-            tasks.update(t["id"], held=False)
+            tasks.update(t["id"], held=False, waiting_since=time.time(), nudged=0)
             if t["status"] == "waiting":
                 tasks.inbox_add(t["id"], "服务", True, "复工了，接着干，先看工作树里做到哪。", upper=True)
                 tasks.update(t["id"], status="approved"); n.append(tasks.ref(t))
@@ -1242,7 +1242,7 @@ def chat_followups(ev, result):
     """聊天回复里的 [任务指令] 短名#N 内容：主控替发消息的人转给任务。权限跟这个人自己发 短名#N 一样（只能管他能管的任务）。"""
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
     pool, count = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)], {}
-    result, bad = apply_ctl(result, pool, f"{ev['pm']} 的项目经理" if ev.get("pm") else f"主控（替{name}）", f"chat{ev.get('idem') or ev.get('message_id') or ''}", ev.get("pm") or "", told=bool(ev.get("pm")))
+    result, bad = apply_ctl(result, pool, f"{ev['pm']} 的项目经理" if ev.get("pm") else f"主控（替{name}）", f"chat{ev.get('idem') or ev.get('message_id') or ''}", ev.get("pm") or "", told=bool(ev.get("pm")), own=is_owner(ev))
     if bad: result += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     def apply(s, body):
         t, cands = tasks.resolve(s, pool)
@@ -1428,7 +1428,7 @@ NUDGE_S, TELL_S = 15 * 60, 30 * 60
 def wait_watch(t, now):
     """等上级答复的任务：15 分钟没动静催一次上级，30 分钟还没有就告诉派活人一次。已经在等人的不催。"""
     n, since = t["id"], t.get("waiting_since") or now
-    if not t.get("v2") or t.get("held") or now - since < NUDGE_S or (t.get("nudged") or 0) >= 2 or team.held(t.get("project")): return
+    if not t.get("v2") or t.get("held") or t.get("checkpoint") or now - since < NUDGE_S or (t.get("nudged") or 0) >= 2 or team.held(t.get("project")): return
     if len(tasks.events(n)) > (t.get("posted") or 0): return   # 提问还排着没处理
     if any((r["from"].get("task") == n or r.get("about") == n) and r.get("ts", 0) >= since - 60 and (r.get("need") or r["kind"] == "问题") for r in tasks.dl.load(tasks._me())): return
     if not t.get("nudged"):
@@ -1451,6 +1451,41 @@ def blocked_watch(t, pool):
         if hit: also.append(tasks.ref(x)); tasks.update(x["id"], _touch=False, blocked_seen=sorted(set(x.get("blocked_seen") or []) | hit))
     tasks.update(t["id"], _touch=False, blocked_seen=sorted(set(t.get("blocked_seen") or []) | {b[0] for b in new}))
     tasks.event(t["id"], "blocked", "在等的上游没成：\n" + "\n".join("· " + b[2] for b in new) + (f"\n一起等着的还有：{'、'.join(also)}" if also else ""))
+
+BOOT, SYNC_GAP_S, sync_last = time.time(), 20, {}
+
+def plan_sync(now):
+    """方案小任务的变更（开工、进展、完成、失败、等答复、停了）由服务直接发到主人私聊，不走模型；同一个私聊 20 秒合一条。"""
+    groups, every = {}, tasks.all_tasks()
+    for t in every:
+        if not t.get("plan") or t.get("schedule") or not owner_dm_task(t): continue
+        evs = tasks.events(t["id"])
+        sig, seen = f"{t['status']}-{t.get('turn') or 0}", t.get("dm_seen")
+        if seen is None:
+            seen = {"sig": sig, "n": len(evs)} if t["created"] < BOOT else {"sig": "", "n": 0}   # 升级前就有的不补发
+            tasks.update(t["id"], _touch=False, dm_seen=seen)
+        n, st, lines = tasks.ref(t), t["status"], []
+        for e in evs[seen["n"]:]:
+            if e["kind"] == "progress": lines.append(f"{n} 进展：{short(e['text'], 150)}")
+        if sig != seen["sig"] and st in ("running", "waiting", "done", "failed", "lost", "cancelled"):
+            mates = [x for x in every if x.get("plan") == t["plan"] and x.get("project") == t.get("project") and x["status"] not in team.DEAD]
+            word = {"running": "开工" if (t.get("turn") or 0) <= 1 else "接着干", "waiting": "停工" if t.get("held") else "等答复"}.get(st) or tasks.LABEL.get(st, st)
+            lines.append(f"{n} {word}：{t['title']}" + (f"（{t['plan']} {sum(x['status'] == 'done' for x in mates)}/{len(mates)}）" if st == "done" else ""))
+            if st in ("failed", "lost"): lines[-1] += "，" + short(next((e["text"] for e in reversed(evs) if e["kind"] == st), "").split("\n")[0], 100)
+        if lines or sig != seen["sig"] or len(evs) != seen["n"]:
+            o = t["origin"]; groups.setdefault((o["channel"], o["chat_id"]), []).append((t, lines, {"sig": sig, "n": len(evs)}))
+    for k, g in groups.items():
+        lines = [tasks.gate.SECRET_RE.sub(r"\1***", l) for _, ls, _ in g for l in ls]
+        if lines:
+            if now - sync_last.get(k, 0) < SYNC_GAP_S: continue
+            sync_last[k] = now
+            key = "ps" + hashlib.sha1("|".join(f"{t['id']}:{s['sig']}:{s['n']}" for t, _, s in g).encode()).hexdigest()[:16]
+            try: out = task_say(g[0][0], "\n".join(lines), key)
+            except Exception: log.exception("plan sync failed"); continue
+            if not out: continue   # 没发出去：下一拍再发
+            with lock: s = sessions.get(origin_key(g[0][0]))
+            if s is not None and isinstance(out, str): mark_seen(s, [out])   # 主控有看板，不用再从前文里读一遍
+        for t, _, s in g: tasks.update(t["id"], _touch=False, dm_seen=s)
 
 def task_tick():
     now = time.time()
@@ -1504,6 +1539,8 @@ def task_tick():
         elif (st == "running" and not t.get("plan") and t["origin"]["channel"] == "feishu" and HEARTBEAT_S
               and now - max(t.get("last_post") or 0, t.get("launched") or 0) > HEARTBEAT_S):
             task_say(t, heartbeat_text(t), f"t{n}h{int(now)}"); tasks.update(n, last_post=now)
+    try: plan_sync(now)
+    except Exception: log.exception("plan sync failed")
     running = sum(1 for t in tasks.all_tasks() if t["status"] == "running" and t.get("exec") != "cloud")   # 云端的不占本机名额
     quota_check(now)
     for t in tasks.all_tasks():
@@ -1842,7 +1879,7 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
     mx = tasks.dl.conf(CFG)["max_hops"]
     if hop >= mx and not cli:   # 管理标记不算再转一跳，照办
         ow = bool(t["requester"].get("owner"))
-        result, bad = apply_ctl(result, [x for x in tasks.all_tasks() if ow or x["requester"].get("id") == t["requester"].get("id")], who, idem or "")
+        result, bad = apply_ctl(result, [x for x in tasks.all_tasks() if ow or x["requester"].get("id") == t["requester"].get("id")], who, idem or "", own=ow)
         if bad: result += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     if hop >= mx:
         if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
@@ -2164,8 +2201,8 @@ def apply_taskcmds(text, fn):
 # 上级直接管任务的标记，一行一个：[处置] 短名#N 继续等 30｜重跑｜按失败收 理由；[改验证] 短名#N 命令（下一行 理由：…）；[取消任务] 短名#N 原因；[改依赖] 短名#N 标题、短名#N｜无
 CTL_HEAD = re.compile(r"^\s*\[(处置|改验证|取消任务|改依赖)\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
 
-def apply_ctl(text, pool, who, idem="", pm="", told=True):
-    """执行回复里的管理标记，返回 (剩下的文字, 没办成的说明)。只认代码块、派活块外面的。pool：这一轮能管的任务；pm：只能管这个项目；told：取消要不要告诉派活人。"""
+def apply_ctl(text, pool, who, idem="", pm="", told=True, own=False):
+    """执行回复里的管理标记，返回 (剩下的文字, 没办成的说明)。只认代码块、派活块外面的。pool：这一轮能管的任务；pm：只能管这个项目；told：取消要不要告诉派活人；own：主人的话（同事那边不许动验证闸门）。"""
     if not text or not any(CTL_HEAD.match(l) for l in text.split("\n")): return text, []
     keep, bad, lines, i, fence, block, n = [], [], text.split("\n"), 0, False, False, 0
     while i < len(lines):
@@ -2178,6 +2215,7 @@ def apply_ctl(text, pool, who, idem="", pm="", told=True):
         what, s, arg, why = m.group(1), m.group(2), m.group(3).strip().strip(BT), ""
         if what == "改验证" and i < len(lines) and re.match(r"^\s*理由\s*[:：]", lines[i]): why = re.sub(r"^\s*理由\s*[:：]\s*", "", lines[i]).strip(); i += 1
         n += 1
+        if what == "改验证" and not (pm or own): bad.append(f"[改验证] {s}：只有项目经理和{OWNER_NAME}能换，没办"); continue
         t, cands = tasks.resolve(s, [x for x in pool if not pm or x.get("project") == pm])
         if not t: bad.append(f"[{what}] {s}：" + (ambiguous(s, cands) if len(cands) > 1 else "不归这边管") + "，没办"); continue
         key = f"{idem}:c{n}" if idem else ""
@@ -2450,7 +2488,7 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
     idem：这一轮的幂等键，同一轮重跑（529、服务重启）再出一次同一条指令不转两次。cli 见 turn_directives。"""
     owner = bool(t["requester"].get("owner")) and not cli
     pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or owner] if not cli else [t]
-    text, bad = apply_ctl(text, [] if cli else pool, who or f"主控（替{t['requester']['name']}）", idem or "", pm, told=bool(who))
+    text, bad = apply_ctl(text, [] if cli else pool, who or f"主控（替{t['requester']['name']}）", idem or "", pm, told=bool(who), own=owner)
     if bad and pm: ctl_bad(t, bad)
     elif bad: text += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     count = {}

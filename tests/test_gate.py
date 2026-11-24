@@ -149,6 +149,54 @@ class VerifyTest(Base):
         self.b.stuck_step(self.t.load(t['id']), time.time()); self.assertEqual(self.t.load(t['id'])['status'], 'failed')
 
 
+class RelayTest(Base):
+    """从叫上级到处置生效，走真的 task_tick 和项目经理会话。"""
+    def test_overdue_reaches_pm_and_its_mark_takes_effect(self):
+        self.t.alive = lambda t: True
+        self.t.T['verify_timeout_min'] = 0.3 / 60
+        t = self.run_task(verify='sleep 60', last_tool_at=time.time())
+        self.e.respond = lambda prompt, env, cmd: f"查了，卡死\n[处置] {self.t.ref(t)} 按失败收 卡死" if env.get('FCB_LAYER') == 'pm' else '[不回]'
+        out = []
+        th = threading.Thread(target=lambda: out.append(self.t.run_verify(self.t.load(t['id'])))); th.start()
+        end = time.time() + 20
+        while time.time() < end and not self.t.overdue_open(self.t.load(t['id'])): time.sleep(0.1)
+        self.e.tick(); th.join(20)
+        s = self.e.streams[0]
+        self.assertEqual(s['env'].get('FCB_LAYER'), 'pm'); self.assertIn(f"[处置] {self.t.ref(t)} 继续等", s['prompt']); self.assertIn('sleep 60', s['prompt'])
+        self.assertEqual(out[0].kind, 'infra'); self.assertIn('卡死', out[0][1])
+        log = self.t.load(t['id'])['verify_log']; self.assertNotIn(str(self.t.STORE), log); self.assertTrue(os.path.exists(log))   # state 里会话读不到
+
+    def test_stuck_escalates_through_ticks(self):
+        stopped = []; self.t.stop = lambda t: stopped.append(t['id']); self.t.alive = lambda t: True
+        self.b.STUCK_S = 60
+        self.e.respond = lambda prompt, env, cmd: '再看看'
+        t = self.run_task(launched=time.time() - 9000, last_tool_at=time.time() - 8000)
+        for _ in range(3): self.e.tick()
+        self.assertEqual(self.kinds(t), ['overdue']); self.assertTrue(self.t.overdue_open(self.t.load(t['id'])))
+        self.assertEqual([s['env'].get('FCB_LAYER') for s in self.e.streams], ['pm'])
+        self.t.update(t['id'], stuck={'asked': time.time() - 1000}); self.e.tick(); self.e.tick()
+        self.assertEqual(self.kinds(t), ['overdue', 'overdue2']); self.assertNotEqual(self.e.streams[-1]['env'].get('FCB_LAYER'), 'pm')
+        self.t.update(t['id'], stuck={'asked': time.time() - 7300, 'level2': True}); self.e.tick()
+        self.assertEqual((self.kinds(t)[-1], stopped), ('failed', [t['id']]))
+
+    def test_watch_turn_orders(self):
+        def go(act):
+            t = self.run_task(); killed, st, over = [], types.SimpleNamespace(trouble=''), threading.Event()
+            class P:
+                def terminate(s): killed.append(1); over.set()
+            wait = over.wait; over.wait = lambda s: wait(0.05)
+            th = threading.Thread(target=self.t.watch_turn, args=(t['id'], P(), st, 0.1, over)); th.start()
+            end = time.time() + 10
+            while time.time() < end and not self.t.load(t['id']).get('turn_over'): time.sleep(0.02)
+            self.assertIn('overdue', self.kinds(t)); self.pm(f"[处置] {self.t.ref(t)} {act}", t, act)
+            if act.startswith('继续等'): time.sleep(0.5); over.set()
+            th.join(10)
+            return self.t.load(t['id']), killed, st.trouble
+        t, killed, tr = go('重跑 卡了'); self.assertEqual((t['status'], len(killed)), ('running', 1)); self.assertIn('换人', tr)
+        t, killed, tr = go('按失败收 不做了'); self.assertEqual((t['status'], len(killed), tr), ('failed', 1, ''))
+        t, killed, tr = go('继续等 30'); self.assertEqual((t['status'], killed, tr), ('running', [], '')); self.assertIsNone(t['turn_over'])
+
+
 class MarksTest(Base):
     def test_cancel_once_and_tells_requester(self):
         said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
@@ -172,6 +220,23 @@ class MarksTest(Base):
             self.pm(bad, t, bad); self.assertEqual(self.t.load(t['id'])['verify'], 'npm test')
         self.assertIn('nudge', self.kinds(t))                                          # 没办成的再叫它一次
         self.pm(f"[改验证] {n} npm run a\n理由：全量归 CI", t, 'ok'); self.assertEqual(self.t.load(t['id'])['verify'], 'npm run a')
+
+    def test_plan_changes_go_to_owner_dm_by_service(self):
+        said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
+        kw = dict(plan='P', thing='主线', last_tool_at=time.time()); t = self.run_task(title='甲', **kw); u = self.run_task(title='乙', **kw)
+        self.run_task(title='同事的', requester={'channel': 'feishu', 'id': A.MATE, 'name': '同事', 'owner': False}, **kw)
+        self.run_task(title='群里的', chat_type='group', **kw)
+        for x in (t, u): self.t.update(x['id'], origin=dict(x['origin'], message_id='om_1'))
+        now = time.time(); self.b.plan_sync(now); self.b.plan_sync(now + 30)
+        self.assertEqual(len(said), 1); self.assertIn('开工：甲', said[0]); self.assertIn('开工：乙', said[0])   # 合成一条，不重发
+        self.t.event(t['id'], 'progress', '改完了'); self.t.update(t['id'], _force=True, status='done')
+        self.b.plan_sync(now + 60)
+        self.assertIn('进展：改完了', said[1]); self.assertIn('（P 1/', said[1]); self.assertEqual(self.e.streams, [])
+
+    def test_coworker_cannot_loosen_gate(self):
+        m = self.run_task(status='approved', verify='npm test', requester={'channel': 'feishu', 'id': A.MATE, 'name': '同事', 'owner': False})
+        out = self.b.relay_followups(m, f"[改验证] {self.t.ref(m)} npm run a\n理由：x")
+        self.assertIn('只有项目经理', out); self.assertEqual(self.t.load(m['id'])['verify'], 'npm test')
 
     def test_marks_never_shown(self):
         self.assertEqual(self.b.team.visible('好\n[处置] p#1 重跑\n[改依赖] p#1 无'), '好')

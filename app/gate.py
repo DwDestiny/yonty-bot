@@ -113,7 +113,7 @@ def run(cmd, box, cwd, env, log, mark, soft_s, ask, ctl, alive=lambda: True, har
     with os.fdopen(os.open(log, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600), "wb") as out:
         tfd = os.open(trace, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_APPEND | os.O_NOFOLLOW, 0o600)
         # 分段计时：同一个 shell 里开 xtrace，单独写一个 fd，不混进输出，也不改命令本身
-        pre = f"BASH_XTRACEFD={tfd}; PS4='+$EPOCHREALTIME '; set -x\n"
+        pre = f"if ((BASH_VERSINFO[0]>=5)); then BASH_XTRACEFD={tfd}; PS4='+$EPOCHREALTIME '; set -x; fi\n"   # 老 bash（macOS 自带的）不记时
         try:
             p = subprocess.Popen(box + ["bash", "-c", pre + cmd], cwd=cwd, env=dict(env, YB_GATE=mark), stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT,
                                  start_new_session=True, pass_fds=(tfd,))
