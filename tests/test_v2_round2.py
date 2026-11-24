@@ -110,7 +110,7 @@ class PmRelayTest(Base):
         self.e.tick()
         inbox = (self.e.inst / 'state' / 'tasks' / str(t['id']) / 'inbox.jsonl').read_text(encoding='utf-8')
         self.assertIn('用 LRU', inbox); self.assertIn('项目经理', inbox)
-        self.assertEqual(self.e.t.load(t['id'])['status'], 'approved')
+        self.assertIn(self.e.t.load(t['id'])['status'], ('approved', 'running'))   # 放行和开工可能在同一拍
         self.assertFalse([r for r in self.recs() if r['to']['to'] == '主控'])
 
     def test_unanswered_question_escalates_as_question(self):
