@@ -1236,6 +1236,24 @@ class TaskTest(unittest.TestCase):
         self.assertEqual((t['model'], t['verify_fails'], t['cost']), ('opus', 2, 1.0))       # 两个会话的花费都算上
         self.assertNotIn('sonnet', self.t.sibling(t).get('heads', {}))
 
+    def test_advisor_off_for_sonnet_dev_only(self):
+        """开发用 sonnet 跑的轮次（含续跑、压缩）不带顾问，换 opus 那一轮带上；别的角色不受影响。"""
+        rec = 'open(os.path.join(%r, "adv"), "a").write(os.environ.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "0"))\n' % self.tmp.name
+        adv = Path(self.tmp.name) / 'adv'; adv.unlink(missing_ok=True)
+        n = self.new_task(verify='test -f ok.txt', role='开发', auto_model=True, model='sonnet', effort='high', thing='顾问')
+        self.run_with(self.fake_bin(rec + self.FAKE_UP), n)
+        self.assertEqual((adv.read_text(), self.t.load(n)['model']), ('110', 'opus'))
+        for role, model, want in (('开发', 'sonnet', '1'), ('开发', 'opus', '0'), ('评审', 'sonnet', '0'), ('', 'sonnet', '0')):
+            adv.unlink()
+            self.assertEqual(self.t.roles()['开发']['deny'], [])   # 空的“禁用工具”不把下一行当成值
+            k = self.new_task(status='waiting', session_started=True, role=role, model=model, thing='顾问')
+            self.t.update(k, worktree=str(self.repo))
+            b = self.fake_bin(rec + 'sys.stdin.read()\nprint(json.dumps({"type": "result", "result": "", "total_cost_usd": 0}))\n')
+            old = os.environ['PATH']; os.environ['PATH'] = f'{b}:{old}'
+            try: self.t.compact_task(k)
+            finally: os.environ['PATH'] = old
+            self.assertEqual(adv.read_text(), want, (role, model))
+
     def test_sonnet_giving_up_after_rework_escalates(self):
         os.environ['GIVEUP'] = '1'
         try: t, sid, c = self.escalated()
