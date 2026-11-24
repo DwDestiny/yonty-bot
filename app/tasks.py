@@ -8,7 +8,7 @@ Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（�
 Pos:    bridge.py 的任务层。bridge 管收消息、审批、往聊天里发；本文件管任务存储和后台运行。
         后台任务跑在独立的 systemd 用户单元里（macOS 用独立进程组），bridge 重启不影响任务，重启后接着看事件。
 """
-import json, os, re, subprocess, sys, threading, time, uuid, shutil, shlex, platform, signal, fcntl, socket
+import hashlib, json, os, re, subprocess, sys, threading, time, uuid, shutil, shlex, platform, signal, fcntl, socket
 
 import importlib.util, types
 ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -51,7 +51,7 @@ def _mod(name):
 
 def _me(): return types.SimpleNamespace(**globals())   # 交给 delivery、scheduler、actions 的本模块
 
-fsio, outbox, res, dl, agents = _mod("fsio"), _mod("outbox"), _mod("resources"), _mod("delivery"), _mod("agents")
+fsio, outbox, res, dl, agents, gate = _mod("fsio"), _mod("outbox"), _mod("resources"), _mod("delivery"), _mod("agents"), _mod("gate")
 def agent_of(t): return agents.get(_me(), t)
 DECISIONS = os.path.join(ROOT, "state", "decisions.jsonl")
 
@@ -139,7 +139,7 @@ def update(tid, _force=False, _touch=True, **kv):
         if not _force and new and old and new != old and new not in TRANSITIONS.get(old, set()):
             raise InvalidTransition(f"{ref(t)} 不能从 {old} 变成 {new}")
         t.update(kv)
-        if new == "waiting" and old != "waiting": t.update(waiting_since=time.time(), wait_nudged=False)
+        if new == "waiting" and old != "waiting": t.update(waiting_since=time.time(), wait_nudged=False, nudged=0)
         if _touch or not t.get("updated"): t["updated"] = time.time()
         fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
         return t
@@ -350,7 +350,8 @@ def cut(s, n, tail=False):
     return f"（前面截掉 {len(s) - n} 字）……" + s[-n:] if tail else s[:n] + f"……（后面截掉 {len(s) - n} 字）"
 
 def event(tid, kind, text=""):
-    """kind: start / progress / question / done / failed / lost。bridge 按顺序发回原聊天。"""
+    """kind: start / progress / question / done / failed / lost，加上要上级处理的 overdue / overdue2（超时，等处置）、blocked（等的任务没成）、nudge（催一下）。
+    bridge 按顺序发回原聊天或交给上级。"""
     _append(tid, "events.jsonl", {"kind": kind, "text": text, "ts": time.time()})
 
 def events(tid, start=0): return _read(tid, "events.jsonl")[start:]
@@ -1785,8 +1786,8 @@ def run(tid):
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
                 p.stdin.write(stdin); p.stdin.close()
                 if ag.conf.get("max_min"):
-                    def _late(p=p, st=st, m=ag.conf["max_min"]): st.trouble = f"一轮超过 {m} 分钟"; p.terminate()
-                    timer = threading.Timer(float(ag.conf["max_min"]) * 60, _late); timer.daemon = True; timer.start()
+                    timer = threading.Event()   # 到点不直接停：叫上级看，等处置
+                    threading.Thread(target=watch_turn, args=(tid, p, st, float(ag.conf["max_min"]) * 60, timer), daemon=True).start()
                 for obj in agent_events(p, st, raw):
                     if obj.get("type") == "system" and obj.get("subtype") == "init" and not load(tid).get("session_started"):
                         update(tid, session_started=True, **({"session_id": obj["session_id"]} if ag.boxed else {}))   # CLI 已经建好会话才算开了；没起来的下一轮还按新会话开
@@ -1809,7 +1810,7 @@ def run(tid):
                     elif obj.get("type") == "result":
                         final = obj
                 p.wait(); p.stdout.close()
-                if timer: timer.cancel()
+                if timer: timer.set()
             if t.get("scope"):
                 end = time.time() + 20   # 收尾：没办完的 bridge 接着办
                 while time.time() < end and outbox_drain(tid, budget=2): pass
@@ -1893,33 +1894,45 @@ def run(tid):
                     text = f"结论：只读角色，服务没跑验证闸门（{t['verify']}）\n\n{text}"
                 elif t.get("verify"):   # 验证闸门：服务自己跑派活时定的命令，任务说“做完了”不算数
                     bad = accept_tampered(t)
-                    ok, out = (False, f"验收测试被改了：{'、'.join(bad)}。用 git checkout {t['accept_commit'][:10]} -- 这些文件 改回去；"
-                                      "觉得测试写错了就用 [提问] 说明") if bad else run_verify(t)
+                    vr = Verdict(False, f"验收测试被改了：{'、'.join(bad)}。用 git checkout {t['accept_commit'][:10]} -- 这些文件 改回去；"
+                                        "觉得测试写错了就用 [提问] 说明") if bad else run_verify(t)
                     ac = t.get("accept_cmd") if t.get("accept_files") and not t.get("accept_unlocked") else ""
-                    if ok and ac and ac != t["verify"]:   # 验证命令不一定跑得到验收测试：单独再跑一遍
-                        ok, out = run_verify(t, ac)
-                        if not ok: out = f"验收命令没通过：{ac}\n{out}"
+                    if vr[0] and ac and ac != t["verify"]:   # 验证命令不一定跑得到验收测试：单独再跑一遍
+                        vr = run_verify(t, ac)
+                        if not vr[0]: vr = Verdict(False, f"验收命令没通过：{ac}\n{vr[1]}", getattr(vr, "kind", ""), getattr(vr, "names", ()))
+                    (ok, out), kind, names = vr, getattr(vr, "kind", ""), list(getattr(vr, "names", ()))
+                    if load(tid).get("status") != "running": return   # 验证的时候被取消、停工了
+                    t = load(tid)   # 上级可能换过验证命令
+                    if not ok and kind == "infra":   # 没跑完不等于没通过：不返工、不换模型、不算智能体没做成，交给上级
+                        if ag.boxed:
+                            why = clone_fetch(t)
+                            if why: note += f"\n\n分支没拉回主仓库：{why}"
+                            if not t.get("agent_out"): update(tid, agent_out="infra")
+                        update(tid, status="failed", verify_round=0)
+                        event(tid, "failed", f"结论：BLOCKED（验证没跑完，不是没通过，没返工）\n验证命令：{t['verify']}\n{out}\n\n任务最后的总结：\n{text}{note}")
+                        return
                     rnd = t.get("verify_round", 0)
+                    same = rnd and names and names == t.get("verify_names")   # 返工过还是同一批失败：再退回一次也是白跑
                     if not ok:
-                        t = update(tid, verify_fails=t.get("verify_fails", 0) + 1, verify_out=out[-1500:])
+                        t = update(tid, verify_fails=t.get("verify_fails", 0) + 1, verify_out=out[-1500:], verify_names=names)
                         if can_up and (rnd >= 1 or ag.boxed):
                             prompt, resume = up(tid, f"验证 {rnd + 1} 次没过", out, text), False
                             continue
-                    if not ok and rnd < T["verify_retries"]:
+                    if not ok and rnd < T["verify_retries"] and not same:
                         update(tid, verify_round=rnd + 1)
                         prompt, resume = (f"[验证失败] 派活时定的验证命令没通过（第 {rnd + 1} 次退回）：{t['verify']}\n"
                                           f"输出末尾：\n{out}\n\n修好再结束这一轮。修不了就写清原因，写“按失败交回”结束这一轮。"), True
                         continue
                     if not ok:
                         update(tid, status="failed", verify_round=0)
-                        event(tid, "failed", f"结论：BLOCKED（返工 {rnd} 次后验证仍没过）\n验证命令：{t['verify']}\n"
-                                             f"输出末尾：\n{out[-800:]}\n\n任务最后的总结：\n{text}{note}")
+                        event(tid, "failed", f"结论：BLOCKED（返工 {rnd} 次后验证仍没过{'，失败的还是同一批' if same else ''}）\n验证命令：{t['verify']}\n"
+                                             f"输出末尾：\n{cut(out, 1500, True)}\n完整输出：{t.get('verify_log') or '没有'}\n\n任务最后的总结：\n{text}{note}")
                         return
                     unf = inbox_unfetched(tid, "指令")
                     if unf and late < 2:   # 跑验证的这段时间又来了指令：不收“完成”，带编号续跑
                         late += 1; prompt, resume = inbox_hint(unf, gate=True), True
                         continue
-                    text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）" + accept_note(t) + f"\n\n{text}"
+                    text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）" + (f"（验证命令中途换过，原来是 {t['verify_was']}）" if t.get("verify_was") else "") + accept_note(t) + f"\n\n{text}"
                 else:
                     text = "结论：没定验证命令，服务没复核" + accept_note(t) + "\n\n" + text
                 if ag.boxed:
@@ -1951,23 +1964,119 @@ def guard_check(cmd, t):
             except re.error: hit = None
             if not hit: continue
         for h in g.get("hooks", []):
-            r = subprocess.run(h["command"], shell=True, input=data, capture_output=True, text=True, env=env, cwd=ROOT if t.get("clone") else t["worktree"])
+            r = subprocess.run(h["command"], shell=True, input=data, capture_output=True, text=True, env=env, cwd=ROOT if t.get("clone") or not os.path.isdir(t["worktree"]) else t["worktree"])
             if r.returncode == 2: return (r.stderr or "被护栏拦下").strip()[-300:]
     return None
 
+class Verdict(tuple):
+    """验证结果，当 (通过?, 输出末尾) 用；kind 分 ok / fail（真没通过）/ infra（没跑完：超时停了、护栏拦了、沙箱没搭成）；names 是失败的测试。"""
+    def __new__(cls, ok, out, kind="", names=()):
+        v = super().__new__(cls, (ok, out)); v.kind, v.names = kind or ("ok" if ok else "fail"), tuple(names); return v
+
+HEAVY_LOCK = os.path.join(ROOT, "state", "heavy.lock")   # 全机同时只有一份重测试：闸门、升级、终端都取这一把
+GATE_HIST = os.path.join(STORE, "gate_hist.json")
+
+def take_ctl(tid):
+    """取走上级的处置（bridge 写进 task.json 的 ctl）。"""
+    if not (load(tid) or {}).get("ctl"): return None
+    with _Lock(os.path.join(tdir(tid), ".lock")):
+        t = load(tid) or {}; c = t.pop("ctl", None)
+        if c: fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
+    return c
+
 def run_verify(t, cmd=None):
-    """在工作树里跑验证命令（默认派活定的那条）。返回 (通过?, 输出末尾)。"""
-    cmd = cmd or t["verify"]
-    why = guard_check(cmd, t)
-    if why: return False, "验证命令被护栏拦下：" + why
-    box = sandbox(t)   # 定时运行的验证命令跟运行在同一个沙箱里；普通任务是 []
-    if box is None: return False, f"定时任务的验证命令要在沙箱里跑，可沙箱没搭成：{box_why(t)}"
+    """在工作树里跑验证命令（默认派活定的那条），返回 Verdict。到 verify_timeout_min 没跑完叫上级处置，不直接判死；重测试排队，排队不计时。"""
+    tid, main = t["id"], cmd is None
+    for _ in range(6):   # 上级让重跑的最多再跑 5 次
+        if main: cmd = (load(tid) or {}).get("verify") if _ else t["verify"]   # 重跑时读最新的：上级可能换了命令
+        why = guard_check(cmd, t)
+        if why: return Verdict(False, "验证命令被护栏拦下：" + why, "infra")
+        box = sandbox(t)   # 定时运行的验证命令跟运行在同一个沙箱里；普通任务是 []
+        if box is None: return Verdict(False, f"定时任务的验证命令要在沙箱里跑，可沙箱没搭成：{box_why(t)}", "infra")
+        r, log = _gate_once(t, cmd, box)
+        if r["kind"] != "rerun": break
+    else: return Verdict(False, "重跑了 5 次还没有结果", "infra")
+    names = gate.failed_names(log) if r["kind"] == "fail" else []
+    out = gate.tail(log) or f"（没有输出，退出码 {r['code']}）"
+    if names: out = "失败的测试：" + "、".join(names[:15]) + (f" 等 {len(names)} 个" if len(names) > 15 else "") + "\n" + out
+    if r["kind"] in ("infra", "gone"):
+        slow = sorted(gate.segments(log + ".trace", time.time()), key=lambda x: -x[1])[:3]
+        out = r["why"] + (("\n耗时最长的几段：" + "；".join(f"{c} {s:.0f} 秒" for c, s in slow)) if slow else "") + f"\n完整输出：{log}\n输出末尾：\n{cut(out, 800, True)}"
+    return Verdict(r["kind"] == "ok", out, "infra" if r["kind"] == "gone" else r["kind"], names)
+
+def _gate_once(t, cmd, box):
+    tid, sup = t["id"], t.get("exec") != "cloud"   # 云端复跑在 bridge 的轮询里跑，没人能处置，照旧到点停
+    n = ((load(tid) or {}).get("gate_n") or 0) + 1
+    log = os.path.join(tdir(tid), f"gate-{n}.log")
+    key = hashlib.sha1(f"{t.get('repo')}|{cmd}".encode()).hexdigest()[:16]
+    st = {"n": n, "cmd": gate.mask(cmd, 160), "at": time.time(), "log": log}
+    update(tid, _touch=False, gate=dict(st, queued=True), gate_n=n, verify_log=log, ctl=None)
+    held = None
+    alive = lambda: not sup or (load(tid) or {}).get("status") == "running"
     try:
-        r = subprocess.run(box + ["bash", "-c", cmd], cwd=t["worktree"], env=run_env(t), capture_output=True, text=True,
-                           timeout=T["verify_timeout_min"] * 60)
-        return r.returncode == 0, (r.stdout + r.stderr).strip()[-1500:] or f"（没有输出，退出码 {r.returncode}）"
-    except subprocess.TimeoutExpired:
-        return False, f"超过 {T['verify_timeout_min']} 分钟没跑完"
+        while sup and gate.is_heavy(GATE_HIST, key, cmd):
+            held = gate.lock(HEAVY_LOCK)
+            if held: break
+            c = take_ctl(tid)
+            if c and c["act"] == "按失败收": return {"kind": "infra", "why": f"排队等重测试的时候{c.get('who', '上级')}让按失败收：{c.get('why')}", "code": None, "secs": 0}, log
+            if c and c["act"] == "重跑": return {"kind": "rerun", "why": "", "code": None, "secs": 0}, log   # 换了验证命令：按新命令重新排
+            if not alive(): return {"kind": "gone", "why": "任务已经不在跑了", "code": None, "secs": 0}, log
+            time.sleep(3)
+        update(tid, _touch=False, gate=dict(st, at=time.time()))
+        def ask(level, secs, seg):
+            update(tid, _touch=False, gate=dict((load(tid) or {}).get("gate") or st, asked=time.time(), level=level))
+            quiet = int((time.time() - os.path.getmtime(log)) // 60)
+            event(tid, "overdue" if level == 1 else "overdue2",
+                  f"第 {n} 次验证跑了 {int(secs // 60)} 分钟还没完，没停，等你处置。\n命令：{gate.mask(cmd, 300)}\n" + (f"正跑到：{seg[0]}（{seg[1]:.0f} 秒）\n" if seg[0] else "")
+                  + (f"{quiet} 分钟没有新输出\n" if quiet >= 2 else "一直有新输出\n") + f"输出末尾：\n{SECRET(gate.tail(log, 800))}\n完整输出：{log}")
+        r = gate.run(cmd, box, t["worktree"], run_env(t), log, f"{tid}-{n}", int(T["verify_timeout_min"] * 60), ask, lambda: take_ctl(tid), alive, supervised=sup)
+        if r["kind"] in ("ok", "fail"): gate.remember(GATE_HIST, key, r["secs"], fsio.write_json)
+        return r, log
+    finally:
+        if held: held.close()
+        update(tid, _touch=False, gate=None, ctl=None)
+        for i in range(max(1, n - 8), n - 4):   # 只留最近 5 次的输出
+            for p in (f"gate-{i}.log", f"gate-{i}.log.trace"):
+                try: os.remove(os.path.join(tdir(tid), p))
+                except OSError: pass
+
+def SECRET(s): return gate.SECRET_RE.sub(r"\1***", s)
+
+def watch_turn(tid, p, st, limit, over):
+    """别的智能体一轮超过 max_min：先叫上级，按处置重跑（换 Claude 接手）、按失败收、继续等；没人管到兜底时间才换人。"""
+    due, asked, level = time.time() + limit, 0, 0
+    try:
+        while not over.wait(5):
+            c = take_ctl(tid) if level else None
+            now = time.time()
+            if c and c["act"] == "继续等":
+                due, asked, level = now + c.get("min", 30) * 60, 0, 0; update(tid, _touch=False, turn_over=None); continue
+            if c and c["act"] == "按失败收":
+                update(tid, status="failed"); event(tid, "failed", f"结论：BLOCKED（{c.get('who', '上级')}让按失败收：{c.get('why')}）"); p.terminate(); return
+            if c or (level and now - asked > gate.HARD_MIN * 60):
+                st.trouble = f"一轮超过 {int(limit // 60)} 分钟，" + (f"{c.get('who', '上级')}让换人重来" if c else "没人处置"); p.terminate(); return
+            if now < due: continue
+            if not level: asked, level = now, 1
+            elif level == 1 and now - asked >= gate.ASK_MIN * 60: level = 2
+            else: continue
+            update(tid, _touch=False, turn_over={"asked": asked, "level": level}, ctl=None)
+            x = load(tid) or {}
+            event(tid, "overdue" if level == 1 else "overdue2", f"{agent_of(x).label} 这一轮超过 {int(limit // 60)} 分钟，没停，等你处置。已调工具 {x.get('tools', 0)} 次，"
+                  f"最近一次 {x.get('last_tool') or '没有'}（{int((now - (x.get('last_tool_at') or now)) // 60)} 分钟前）。重跑会换 Claude 接手。")
+    finally:
+        if (load(tid) or {}).get("turn_over"): update(tid, _touch=False, turn_over=None)
+
+def overdue_open(t):
+    """这个任务现在有没有等处置的超时。"""
+    return t.get("status") == "running" and bool((t.get("gate") or {}).get("asked") or t.get("turn_over") or (t.get("stuck") or {}).get("asked"))
+
+def gate_text(t, full=False):
+    g = t.get("gate") if t.get("status") == "running" else None
+    if not g: return "超时等处置" if overdue_open(t) else ""
+    m = int((time.time() - g["at"]) // 60)
+    if g.get("queued"): return f"第 {g['n']} 次验证排队，等别的全量测试" + (f" {m} 分钟" if full else "")
+    seg = (gate.segments(g["log"] + ".trace") or [("", 0)])[-1]
+    return f"第 {g['n']} 次验证" + ("超时等处置" if g.get("asked") else "中") + (f"，{m} 分钟" + (f"，跑到 {seg[0]}" if seg[0] else "") if full else "")
 
 # ---------- 云端执行：活儿在 Claude 官方云端的一次性例程里跑，不占本机；本机只查分支头（不花 token） ----------
 CLOUD = T.get("cloud") or {}

@@ -717,6 +717,9 @@ def deliver(ev, key, result, in_thread, sent, redo=None):
         out_id = reply(ev, result, in_thread, key=f"x{n}" if n else None)
     with lock: cur_s = sessions.get(key)
     if cur_s is not None and isinstance(out_id, str): mark_seen(cur_s, [out_id])
+    if ev.get("ftask") and FT:
+        try: FT.replied(ev["ftask"], result)
+        except Exception: log.exception("feishu task reply not recorded")
 
 def with_board(s, prompt, pm, show):
     """看板接在消息末尾：变了才带，不改会话里已有的内容，不动缓存前缀。"""
@@ -914,7 +917,8 @@ def age_text(t):
 def task_line(t, who=False):
     """列表里的一行：编号、状态、标题，等人的写等什么。"""
     st = tasks.LABEL.get(t["status"], t["status"]) + (f" {age_text(t)}" if t["status"] == "running" else "")
-    why = f"：{t['wait_why']}" if t["status"] == "approved" and t.get("wait_why") else ""
+    g = tasks.gate_text(t, True)
+    why = f"：{t['wait_why']}" if t["status"] == "approved" and t.get("wait_why") else f"：{g}" if g else ""
     return f"{tasks.ref(t)} {st} · {short(t['title'])}" + why + (f"（{t['requester']['name']}）" if who else "")
 
 def tasks_text(mine):
@@ -969,6 +973,7 @@ def task_detail(t, owner, full=False):
     st = tasks.LABEL.get(t["status"], t["status"])
     if t["status"] == "approved" and t.get("wait_why"): st += f"（{t['wait_why']}）"
     lines = [f"{n} {t['title']}", st + (f"，已经 {age_text(t)}" if t.get("started") and t["status"] in tasks.ACTIVE else "")]
+    if tasks.gate_text(t): lines.append(tasks.gate_text(t, True))
     need = {"pending": f"要{OWNER_NAME}批：{BT}/approve {n}{BT} 或 {BT}/reject {n}{BT}", "waiting": f"等人答：回 {BT}{n} 你的意见{BT}",
             "failed": f"要接着干就回 {BT}{n} 继续{BT}", "lost": f"要接着干就回 {BT}{n} 继续{BT}"}.get(t["status"])
     if t.get("held"): need = f"停工中，{BT}/resume {t.get('project')}{BT} 复工"
@@ -1155,10 +1160,7 @@ def task_command(ev):
         if arg[0] == "cancel":
             if not can_steer(t, ev): return f"{n} 不是你派的，取消找{t['requester']['name']}或{OWNER_NAME}。"
             if t["status"] not in tasks.ACTIVE + ("pending",): return f"{n} 已经{tasks.LABEL.get(t['status'])}了。"
-            tasks.update(t["id"], status="cancelled")
-            if t["status"] == "running": tasks.stop(t)
-            try: tasks.dl.close_ended(tasks._me())   # 取消了马上关，不等下一拍
-            except Exception: log.exception("requests of task #%s not closed", t["id"])
+            cancel_task(t)
             return f"{n} 停了。" + (f"分支 {BT}{t['branch']}{BT} 留着。" if t.get("session_started") else "")
         if not owner: return f"清理只有{OWNER_NAME}能做。"
         if t["status"] in tasks.ACTIVE: return f"{n} 还没结束。"
@@ -1240,6 +1242,8 @@ def chat_followups(ev, result):
     """聊天回复里的 [任务指令] 短名#N 内容：主控替发消息的人转给任务。权限跟这个人自己发 短名#N 一样（只能管他能管的任务）。"""
     name = ev.get("sender_name") or sender_name(ev.get("sender_id", ""))
     pool, count = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)], {}
+    result, bad = apply_ctl(result, pool, f"{ev['pm']} 的项目经理" if ev.get("pm") else f"主控（替{name}）", f"chat{ev.get('idem') or ev.get('message_id') or ''}", ev.get("pm") or "", told=bool(ev.get("pm")))
+    if bad: result += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     def apply(s, body):
         t, cands = tasks.resolve(s, pool)
         if not t: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
@@ -1360,6 +1364,8 @@ def task_event_text(t, e):
     if k == "question": return f"{at}{n} 有事要你定：\n{e['text']}\n\n" + ("" if o["chat_type"] == "p2p" else "@我 ") + f"回 {BT}{n} 你的意见{BT}"
     if k == "done":
         return f"{at}{n} 完成：{t['title']}\n{e['text']}"
+    if k in OVERDUE: return f"{at}{n} 跑太久了，没停：{t['title']}\n{e['text']}\n要停就 {BT}/task cancel {n}{BT}"
+    if k in ("blocked", "nudge"): return f"{at}{n} {RELAY_HEAD[k]}：{t['title']}\n{e['text']}"
     return f"{at}{n} {'挂了' if k == 'failed' else '中断了'}：{t['title']}\n{e['text']}\n" + ("" if o["chat_type"] == "p2p" else "@我 ") + f"回 {BT}{n} 继续{BT} 接着干"
 
 def heartbeat_text(t):
@@ -1404,6 +1410,48 @@ def quota_check(now):
         sent[key] = now
         save(QUOTA_SENT, dict(list(sent.items())[-50:]))
 
+def stuck_step(t, now):
+    """进程还在，但很久没有任何动作：先叫项目经理看，再叫主控，一直没人处置才停。"""
+    s, n, idle = t.get("stuck") or {}, t["id"], int((now - last_activity(t)) / 60)
+    if now < (s.get("until") or 0): return
+    def ask(kind, **kv):
+        tasks.update(n, _touch=False, stuck=dict({"asked": now}, **kv))
+        tasks.event(n, kind, f"{idle} 分钟没有任何动作（没调工具、没输出、CPU 没动），多半卡住了，没停，等你处置。最近一次工具：{t.get('last_tool') or '没有'}。重跑会停掉这一轮，同一个会话接着干。")
+    if not s.get("asked"): ask("overdue")
+    elif not s.get("level2") and now - s["asked"] > tasks.gate.ASK_MIN * 60: ask("overdue2", asked=s["asked"], level2=True)
+    elif now - s["asked"] > tasks.gate.HARD_MIN * 60:
+        tasks.stop(t); tasks.update(n, status="failed", stuck=None)
+        tasks.event(n, "failed", f"结论：BLOCKED（{idle} 分钟没有任何动作，叫了人没人处置，已停）。分支和会话都留着，可以接着干。")
+
+NUDGE_S, TELL_S = 15 * 60, 30 * 60
+
+def wait_watch(t, now):
+    """等上级答复的任务：15 分钟没动静催一次上级，30 分钟还没有就告诉派活人一次。已经在等人的不催。"""
+    n, since = t["id"], t.get("waiting_since") or now
+    if not t.get("v2") or t.get("held") or now - since < NUDGE_S or (t.get("nudged") or 0) >= 2 or team.held(t.get("project")): return
+    if len(tasks.events(n)) > (t.get("posted") or 0): return   # 提问还排着没处理
+    if any((r["from"].get("task") == n or r.get("about") == n) and r.get("ts", 0) >= since - 60 and (r.get("need") or r["kind"] == "问题") for r in tasks.dl.load(tasks._me())): return
+    if not t.get("nudged"):
+        tasks.update(n, _touch=False, nudged=1)
+        tasks.event(n, "nudge", f"它等答复 {int((now - since) // 60)} 分钟了，还没人回。"); return
+    if now - since < TELL_S: return
+    tasks.update(n, _touch=False, nudged=2)
+    q = [e for e in tasks.events(n) if e["kind"] == "question"]
+    task_say(t, f"{tasks.ref(t)} 等答复 {int((now - since) // 60)} 分钟了，上级没定下来：{t['title']}\n" + (f"问的是：{short(q[-1]['text'], 300)}\n" if q else "") + f"你来定就回 {BT}{tasks.ref(t)} 你的意见{BT}", f"t{n}wait{int(since)}")
+
+def blocked_watch(t, pool):
+    """上游失败、取消了还在干等：叫项目经理定，同一个上游只叫一次（等它的几个任务合成一条）。"""
+    tk = tasks._me()
+    new = [b for b in team.blockers(tk, t, pool) if b[0] not in (t.get("blocked_seen") or [])]
+    if not new: return
+    also = []
+    for x in pool:
+        if x["id"] == t["id"] or x["status"] != "approved" or not x.get("plan") or x.get("project") != t.get("project"): continue
+        hit = {b[0] for b in team.blockers(tk, x, pool)} & {b[0] for b in new}
+        if hit: also.append(tasks.ref(x)); tasks.update(x["id"], _touch=False, blocked_seen=sorted(set(x.get("blocked_seen") or []) | hit))
+    tasks.update(t["id"], _touch=False, blocked_seen=sorted(set(t.get("blocked_seen") or []) | {b[0] for b in new}))
+    tasks.event(t["id"], "blocked", "在等的上游没成：\n" + "\n".join("· " + b[2] for b in new) + (f"\n一起等着的还有：{'、'.join(also)}" if also else ""))
+
 def task_tick():
     now = time.time()
     cands = []
@@ -1411,10 +1459,13 @@ def task_tick():
         n = t["id"]
         for e in tasks.events(n, t.get("posted", 0)):
             idx = t.get("posted", 0)
+            if (e["kind"] in OVERDUE and not tasks.overdue_open(t)) or (e["kind"] == "blocked" and t["status"] != "approved"):   # 等到处理时已经过去了
+                if (n, idx) in relaying: break
+                t = tasks.update(n, posted=idx + 1); continue
             if RELAY_ON and e["kind"] in RELAY_KINDS:   # 完成、提问、失败先交给项目经理（2.0）或主控会话，收尾后再对人说
                 if (n, idx) not in relaying:
                     relaying.add((n, idx))
-                    pm = t.get("project") if t.get("v2") and t.get("project") else None
+                    pm = t.get("project") if t.get("v2") and t.get("project") and e["kind"] != "overdue2" else None
                     enqueue(pm_key(pm, origin_key(t)) if pm else origin_key(t),
                             {"relay": True, "task": n, "idx": idx, "event": e, **({"pm": pm} if pm else {})})
                 break                                     # 后面的事件等这条处理完
@@ -1447,11 +1498,9 @@ def task_tick():
                 tasks.stop(t); tasks.update(n, status="failed")
                 tasks.event(n, "failed", f"结论：BLOCKED（定时运行超过 schedules.max_run_min "
                                          f"{(CFG.get('schedules') or {}).get('max_run_min', 120)} 分钟，已停）")
-        elif st == "running" and STUCK_S and t.get("exec") != "cloud" and not t.get("frozen") and now - last_activity(t) > STUCK_S:
-            if tasks.load(n)["status"] == "running":   # 进程还在，但很久没有任何动作：按卡住处理，停掉交回主控
-                tasks.stop(t); tasks.update(n, status="failed")
-                tasks.event(n, "failed", f"结论：BLOCKED（{int((now - last_activity(t)) / 60)} 分钟没有任何动作，判定卡住，已停）。"
-                                         "分支和会话都留着，可以接着干。")
+        elif st == "running" and STUCK_S and t.get("exec") != "cloud" and not t.get("frozen") and not t.get("gate") and not t.get("turn_over") and now - last_activity(t) > STUCK_S:
+            if tasks.load(n)["status"] == "running": stuck_step(tasks.load(n), now)
+        elif st == "running" and t.get("stuck"): tasks.update(n, _touch=False, stuck=None)   # 又动起来了
         elif (st == "running" and not t.get("plan") and t["origin"]["channel"] == "feishu" and HEARTBEAT_S
               and now - max(t.get("last_post") or 0, t.get("launched") or 0) > HEARTBEAT_S):
             task_say(t, heartbeat_text(t), f"t{n}h{int(now)}"); tasks.update(n, last_post=now)
@@ -1472,6 +1521,12 @@ def task_tick():
             why = team.waits(tasks._me(), t, TEAM) if STRICT else ""
             if not why: cands.append(t)
             elif t.get("wait_why") != why: tasks.update(t["id"], _touch=False, wait_why=why)
+            if why and t.get("plan") and not team.held(t.get("project")):
+                try: blocked_watch(tasks.load(t["id"]), tasks.all_tasks())
+                except Exception: log.exception("task #%s blocked check failed", t["id"])
+        elif t["status"] == "waiting":
+            try: wait_watch(t, now)
+            except Exception: log.exception("task #%s wait check failed", t["id"])
         if t.get("schedule") and t["status"] in ("done", "failed", "lost") and not t.get("sched_after"):
             tasks.update(t["id"], _touch=False, sched_after=True)
             done = [e["text"] for e in tasks.events(t["id"]) if e["kind"] in ("done", "failed")]
@@ -1785,6 +1840,10 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
     这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。
     cli：这一轮是命令行投递叫起来的，不带主人权限：[派活] 一律等主人批；[任务指令] 只能回给发来的那个任务，不改预算、不放开验收。"""
     mx = tasks.dl.conf(CFG)["max_hops"]
+    if hop >= mx and not cli:   # 管理标记不算再转一跳，照办
+        ow = bool(t["requester"].get("owner"))
+        result, bad = apply_ctl(result, [x for x in tasks.all_tasks() if ow or x["requester"].get("id") == t["requester"].get("id")], who, idem or "")
+        if bad: result += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     if hop >= mx:
         if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
             tasks.decide("超跳不转", task=tasks.ref(t), why=f"这一轮是第 {hop} 跳，到了上限 {mx}，里面的任务指令和派活不转")
@@ -2059,13 +2118,14 @@ def v2_command(ev, text, owner):
 
 # ---------- 任务回报交给主控：后台任务的完成、提问、失败先进派活的那个会话，主控自己收尾，再对人汇报 ----------
 RELAY_ON = tasks.T.get("relay", True)
-RELAY_KINDS = ("question", "done", "failed", "lost")
-RELAY_HEAD = {"done": "完成", "question": "有提问", "failed": "失败", "lost": "中断"}
+OVERDUE = ("overdue", "overdue2")   # 跑太久，没停，等上级处置：先项目经理，没动静再主控
+RELAY_KINDS = ("question", "done", "failed", "lost", "blocked", "nudge") + OVERDUE
+RELAY_HEAD = {"done": "完成", "question": "有提问", "failed": "失败", "lost": "中断", "blocked": "上游没成", "nudge": "要处理", "overdue": "超时，等处置", "overdue2": "超时，等处置"}
 RELAY_MAX = 3                     # 每个任务主控最多自动追加几次指令，超了交给人
 # [任务指令] 短名#N 内容：从这一行起，取到下一个 [任务指令]、[派活]、[不回]、[/任务指令] 或回复结束，整段原样转。
 # 冒号后面换行也行。给人看的话写在指令前面；非要写在后面，就先单独一行 [/任务指令] 收尾。[派活] 起到结尾都是派活块，不拆。
 TASKCMD_HEAD = re.compile(r"^\s*\[任务指令\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
-TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令)\]")
+TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令|处置|改验证|取消任务|改依赖)\]")
 TASKCMD_END = re.compile(r"^\s*\[/任务指令\]\s*$")
 DISPATCH_LINE = re.compile(r"^\s*\[派活\]\s*$")
 FENCE_LINE = re.compile(r"^\s*(`{3,}|~{3,})\w*\s*$")
@@ -2101,6 +2161,100 @@ def apply_taskcmds(text, fn):
         if s is None or r: parts.append(r)
     return "\n".join(parts)
 
+# 上级直接管任务的标记，一行一个：[处置] 短名#N 继续等 30｜重跑｜按失败收 理由；[改验证] 短名#N 命令（下一行 理由：…）；[取消任务] 短名#N 原因；[改依赖] 短名#N 标题、短名#N｜无
+CTL_HEAD = re.compile(r"^\s*\[(处置|改验证|取消任务|改依赖)\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
+
+def apply_ctl(text, pool, who, idem="", pm="", told=True):
+    """执行回复里的管理标记，返回 (剩下的文字, 没办成的说明)。只认代码块、派活块外面的。pool：这一轮能管的任务；pm：只能管这个项目；told：取消要不要告诉派活人。"""
+    if not text or not any(CTL_HEAD.match(l) for l in text.split("\n")): return text, []
+    keep, bad, lines, i, fence, block, n = [], [], text.split("\n"), 0, False, False, 0
+    while i < len(lines):
+        l = lines[i]; i += 1
+        if FENCE_LINE.match(l): fence = not fence
+        if DISPATCH_LINE.match(l): block = True
+        elif block and tasks.DISPATCH_END.match(l): block = False
+        m = None if fence or block else CTL_HEAD.match(l)
+        if not m: keep.append(l); continue
+        what, s, arg, why = m.group(1), m.group(2), m.group(3).strip().strip(BT), ""
+        if what == "改验证" and i < len(lines) and re.match(r"^\s*理由\s*[:：]", lines[i]): why = re.sub(r"^\s*理由\s*[:：]\s*", "", lines[i]).strip(); i += 1
+        n += 1
+        t, cands = tasks.resolve(s, [x for x in pool if not pm or x.get("project") == pm])
+        if not t: bad.append(f"[{what}] {s}：" + (ambiguous(s, cands) if len(cands) > 1 else "不归这边管") + "，没办"); continue
+        key = f"{idem}:c{n}" if idem else ""
+        if key and key in (t.get("ctl_seen") or []): continue   # 这一轮是重送，办过了
+        try: e = {"处置": ctl_dispose, "改验证": ctl_verify, "取消任务": ctl_cancel, "改依赖": ctl_deps}[what](t, arg, why, who, told)
+        except Exception as x: log.exception("ctl failed"); e = f"出错了（{type(x).__name__}）"
+        if e: bad.append(f"[{what}] {tasks.ref(t)}：{e}，没办"); continue
+        tasks.decide(what, task=tasks.ref(t), why=f"{who}：{arg} {why}".strip()[:300])
+        if key: tasks.update(t["id"], _touch=False, ctl_seen=((tasks.load(t["id"]).get("ctl_seen") or []) + [key])[-40:])
+    return "\n".join(keep).strip(), bad
+
+def ctl_dispose(t, arg, why, who, told):
+    m = re.match(r"^(继续等|重跑|按失败收)\s*[:：,，]?\s*(\d+)?\s*(?:分钟)?\s*(.*)$", arg)
+    if not m: return "写法是 继续等 分钟数｜重跑｜按失败收 理由"
+    act, mins, why = m.group(1), int(m.group(2) or 30), m.group(3).strip()
+    if act == "按失败收" and not why: return "按失败收要写理由"
+    if act == "继续等" and not 1 <= mins <= 240: return "继续等最多 240 分钟"
+    t = tasks.load(t["id"])
+    if t["status"] != "running": return f"已经{tasks.LABEL.get(t['status'])}，要接着干写 [任务指令]"
+    if t.get("gate") or t.get("turn_over"):
+        tasks.update(t["id"], _touch=False, ctl={"act": act, "min": mins, "why": why, "who": who, "ts": time.time()}); return ""
+    if not (t.get("stuck") or {}).get("asked"): return "没有在等处置的超时"
+    if act == "继续等": tasks.update(t["id"], _touch=False, stuck={"until": time.time() + mins * 60}); return ""
+    if act == "按失败收":
+        tasks.update(t["id"], status="failed", stuck=None); tasks.stop(t)
+        tasks.event(t["id"], "failed", f"结论：BLOCKED（卡住，{who}让按失败收：{why}）"); return ""
+    tasks.update(t["id"], status="waiting", stuck=None); tasks.stop(t)
+    tasks.inbox_add(t["id"], who, True, "上一轮卡住被停了，接着干：先看工作树里做到哪，别再卡在同一步。" + (f"上级的说明：{why}" if why else ""), upper=True)
+    tasks.update(t["id"], status="approved"); return ""
+
+def ctl_verify(t, cmd, why, who, told):
+    if not why: return "要在下一行写 理由：…"
+    if not t.get("verify"): return "这个任务没有验证命令"
+    if t["status"] not in tasks.ACTIVE + ("pending", "failed", "lost"): return f"已经{tasks.LABEL.get(t['status'])}"
+    if not cmd or tasks.gate.NOOP_RE.match(cmd): return "换成的命令什么都不验"
+    g = tasks.guard_check(cmd, t)
+    if g: return f"命令被护栏拦下：{g}"
+    tasks.update(t["id"], verify=cmd, verify_was=t.get("verify_was") or t["verify"], verify_why=f"{who}：{why}")
+    if tasks.load(t["id"]).get("gate"): tasks.update(t["id"], _touch=False, ctl={"act": "重跑", "why": f"换了验证命令（{why}）", "who": who, "ts": time.time()})
+    return ""
+
+def cancel_task(t):
+    tasks.update(t["id"], status="cancelled")
+    if t["status"] == "running": tasks.stop(t)
+    try: tasks.dl.close_ended(tasks._me())   # 取消了马上关，不等下一拍
+    except Exception: log.exception("requests of task #%s not closed", t["id"])
+
+def ctl_cancel(t, why, _, who, told):
+    if not why: return "要写原因"
+    if t["status"] not in tasks.ACTIVE + ("pending",): return f"已经{tasks.LABEL.get(t['status'])}"
+    cancel_task(t)
+    if told: task_say(t, f"{tasks.ref(t)} 取消了：{t['title']}\n原因：{why}（{who}定的）", f"t{t['id']}cancel")
+    return ""
+
+def ctl_deps(t, arg, _, who, told):
+    if t["status"] not in ("approved", "pending"): return f"已经{tasks.LABEL.get(t['status'])}，依赖改不了"
+    if not t.get("plan"): return "不是方案里的任务"
+    ds = [] if arg in ("无", "没有") else [x.strip() for x in re.split(r"[、,，]", arg) if x.strip()]
+    if not ds and arg not in ("无", "没有"): return "写新的依赖，没有就写 无"
+    p = team.plan_of(t.get("project"), t["plan"]) or {}
+    bad = [x for x in ds if x not in p.get("items", []) and not tasks.resolve(x)[0]]
+    if bad: return f"{'、'.join(bad)} 不在任务单里"
+    pool = [dict(x, deps=ds) if x["id"] == t["id"] else x for x in tasks.all_tasks()]
+    todo, seen = [y for _, y in team.dep_tasks(tasks._me(), dict(t, deps=ds), pool) if y], set()
+    while todo:
+        y = todo.pop()
+        if y["id"] == t["id"]: return "改完会绕成一圈互相等"
+        if y["id"] in seen: continue
+        seen.add(y["id"]); todo += [z for _, z in team.dep_tasks(tasks._me(), y, pool) if z]
+    tasks.update(t["id"], deps=ds, wait_why="", blocked_seen=[]); return ""
+
+def ctl_bad(t, bad):
+    """项目经理的话没人看：没办成的标记再叫它一次，每个任务最多 3 次。"""
+    k = t.get("ctl_bad") or 0
+    if not bad or k >= 3: return
+    tasks.update(t["id"], _touch=False, ctl_bad=k + 1); tasks.event(t["id"], "nudge", "你上一条回复里的标记没办成：\n" + "\n".join(bad))
+
 def origin_key(t):
     o = t["origin"]
     if o.get("key"): return o["key"]
@@ -2109,11 +2263,21 @@ def origin_key(t):
 def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一节处理：能自己收尾的先办，再对派活人汇报 ---"):
     """briefed：这个会话已经见过任务书（它自己派的，或回报过一次），不再重复贴，省得每次回报都多读一两千字。"""
     r, o = t["requester"], t["origin"]
-    state = {"done": "完成", "question": "有提问，等回复", "failed": "失败", "lost": "中断（后台进程没了）"}[e["kind"]]
+    state = {"done": "完成", "question": "有提问，等回复", "failed": "失败", "lost": "中断（后台进程没了）",
+             "overdue": "超时，还在跑，等你处置", "overdue2": "超时，还在跑，项目经理没处置，等你处置", "blocked": "排队，上游没成", "nudge": "要你处理"}[e["kind"]]
+    if e["kind"] in OVERDUE:
+        tail = ("--- 先查再定：看输出、看进程在不在动、跟上次比慢在哪，别凭感觉。然后单独一行写一个标记：\n"
+                f"[处置] {tasks.ref(t)} 继续等 30（还在正常跑，给多少分钟）\n[处置] {tasks.ref(t)} 重跑（卡死、环境问题，停掉重来）\n[处置] {tasks.ref(t)} 按失败收 理由\n"
+                f"命令本身不对就写 [改验证] {tasks.ref(t)} 新命令，下一行 理由：…；整个任务不该做了写 [取消任务] {tasks.ref(t)} 原因。\n不写标记它就一直跑，没人管会升级给主控 ---")
+    elif e["kind"] == "blocked":
+        tail = f"--- 定一个：让上游接着干（[任务指令]）、重新派上游、改依赖（[改依赖] {tasks.ref(t)} 标题或无）、或 [取消任务] {tasks.ref(t)} 原因。要主人定就 [投递 主控 问题] ---"
+    elif e["kind"] == "nudge": tail = "--- 能定的现在定（[任务指令] 回答它）；真要等主人就 [投递 主控 问题] 说清等什么；已经在等主人的写 [处理掉] 等主人 ---"
+    down = team.waiting_on(tasks._me(), t, tasks.all_tasks()) if e["kind"] in ("failed", "lost") else []
     brief = t["brief"] if len(t["brief"]) <= 1500 else t["brief"][:1500] + "……（后面省略）"
     brief_part = ("--- 任务书：这个会话前面已经有了，这里不再贴 ---\n" if briefed else f"--- 任务书（节选）---\n{brief}\n")
     base = (t.get("base") or "").split("/", 1)[-1]
     return (f"[任务回报]\n任务 {tasks.ref(t)}：{t['title']}\n状态：{state}\n"
+            + (f"等着它的：{'、'.join(tasks.ref(x) + ' ' + x['title'] for x in down[:6])}\n" if down else "") +
             f"派活人：{r['name']}（{'是' if r.get('owner') else '不是'}{OWNER_NAME}本人）；"
             f"会话：{'私聊' if o['chat_type'] == 'p2p' else '群聊'}\n"
             f"仓库 {t['repo']}，工作树 {t['worktree']}，分支 {t['branch']}"
@@ -2173,7 +2337,7 @@ def task_relay(ev):
             text = task_event_text(t, e)   # 主控没跑成：原话照发，保证至少送到一次
         else:
             text = relay_text(t, e, result, rev, f"t{n}e{idx}x0")
-            if not text and not extra and e["kind"] != "question": text = task_event_text(t, e)
+            if not text and not extra and e["kind"] not in ("question", "blocked", "nudge") + OVERDUE: text = task_event_text(t, e)
         relay_post(t, idx, text)
     finally:
         relaying.discard((n, idx))
@@ -2219,7 +2383,7 @@ def pm_relay(ev):
             redo = lambda note: run_claude(key, s, note, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"], quiet=True, layer=pm, hop=t.get("hop") or 0)
             result = with_retry(dict(relay_ev(t), idem=f"pm{n}e{idx}", pm=pm, no_handover=True), key, result, redo, pm, follow=False)
             absorbed = ABSORB_RE.search(result)
-        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}")
+        text = relay_followups(t, ABSORB_RE.sub("", result), f"{pm} 的项目经理（替{t['requester']['name']}）", idem=f"pm{n}e{idx}", pm=pm)
         if STRICT: pass
         elif TASKS_ON and tasks.parse_directive(text)[1]:
             if tasks.load(n).get("auto_follow", 0) >= RELAY_MAX:
@@ -2233,13 +2397,14 @@ def pm_relay(ev):
         answered_q = len(tasks.inbox_items(n)) > inbox0
         if t.get("plan") and not t.get("closing") and e["kind"] == "done" and not absorbed and not mine:
             tasks.decide("项目经理处理掉", task=ref, why="方案里的小任务做完，看板上有，不逐个报")
+        elif e["kind"] in OVERDUE or (e["kind"] == "nudge" and answered_q): pass   # 没处置的到点升级给主控，不替它报完成
         elif absorbed:
             tasks.decide("项目经理处理掉", task=ref, why=absorbed.group(1).strip() or "没写理由")
         elif not mine and not (e["kind"] == "question" and answered_q):
             concl = next((l.strip() for l in e["text"].splitlines() if l.strip()), "")[:160]
             link = (MR_RE.search(e["text"]) or [None])[0]
-            kind = "问题" if e["kind"] == "question" else "完成"
-            body = (f"{ref} 有提问：{e['text']}" if kind == "问题" else f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "")) + f"\n全文 /task {ref}"
+            kind = "问题" if e["kind"] in ("question", "blocked", "nudge") else "完成"
+            body = (f"{ref} {RELAY_HEAD[e['kind']]}：{e['text']}" if kind == "问题" else f"{ref} {RELAY_HEAD[e['kind']]}：{concl}" + (f"\n{link}" if link else "")) + f"\n全文 /task {ref}"
             if kind == "问题": body += f"\n回答写 [任务指令] {ref} 你的回答"
             tasks.decide("替项目经理投递", task=ref, category=kind, why="项目经理这一轮既没上交主控也没写 [处理掉] 理由（7.4 防沉默）")
             try: tasks.dl.submit(tk, tasks.dl.pm_sender(pm, key, owner), "主控", kind, body, t.get("hop") or 0, None, {"about": n, "auto": True}, trusted=True)
@@ -2280,11 +2445,14 @@ def relay_post(t, idx, text):
     if not ok: log.error("task #%s relay %s dropped after 20 tries", n, idx)
     tasks.update(n, posted=idx + 1, last_post=time.time(), post_fail=0, relay_pending=None)
 
-def relay_followups(t, text, who=None, hop=None, idem=None, cli=False):
+def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
     """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。
     idem：这一轮的幂等键，同一轮重跑（529、服务重启）再出一次同一条指令不转两次。cli 见 turn_directives。"""
     owner = bool(t["requester"].get("owner")) and not cli
     pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or owner] if not cli else [t]
+    text, bad = apply_ctl(text, [] if cli else pool, who or f"主控（替{t['requester']['name']}）", idem or "", pm, told=bool(who))
+    if bad and pm: ctl_bad(t, bad)
+    elif bad: text += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     count = {}
     def apply(s, body):
         x, cands = tasks.resolve(s, pool)
@@ -2295,6 +2463,10 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False):
             tasks.decide("指令去重", task=n, why=f"{key} 已经转过，这一轮是重送"); return ""
         if cli and (tasks.BUDGET_RE.search(body) or "放开验收" in body): return "（命令行投递叫起来的这一轮不改预算、不放开验收，没转。）"
         why = tasks.steer_block(x, body, RELAY_MAX)
+        if why and "已经自动追加" in why and not x.get("cap_told") == tid * 1000 + len(tasks.events(tid)):   # 没人能再自动推它了：马上告诉派活人，不闷在运行记录里
+            tasks.update(tid, _touch=False, cap_told=tid * 1000 + len(tasks.events(tid)))
+            try: task_say(x, f"{n} 自动追加到上限 {RELAY_MAX} 次，停在这里等你定：{x['title']}\n上级想让它做：{short(body, 200)}\n同意就回 {BT}{n} 继续{BT}，或直接说怎么做。", f"t{tid}cap{len(tasks.events(tid))}")
+            except Exception: log.exception("cap notice failed")
         if why: return f"（{why}）"
         raise_budget = bool(tasks.BUDGET_RE.search(body))
         tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", owner, body, upper=True, idem=key)
@@ -2642,17 +2814,76 @@ def feishu_loop(stopping):
         log.warning("lark-cli exited rc=%s", rc)
         stopping.wait(10)
 
+# ---------- 飞书任务：主人把任务指派给机器人 ----------
+FT, ftask_proc = None, None
+
+def ftask_notify(text):
+    r = lark(["im", "+messages-send", "--as", "bot", "--user-id", OWNER_OPEN_ID, "--text", no_at_all(text)])
+    try: d = json.loads(r.stdout)["data"]; return d.get("message_id"), d.get("chat_id")
+    except Exception: return None, None
+
+def ftask_submit(guid, mid, chat, text):
+    ev = {"channel": "feishu", "message_id": mid, "chat_id": chat, "chat_type": "p2p", "sender_id": OWNER_OPEN_ID, "sender_type": "user", "sender_name": OWNER_NAME,
+          "content": text, "create_time": str(int(time.time() * 1000)), "ftask": guid, "no_route": True}
+    enqueue(session_key(ev), ev)
+
+def ftask_result(t):
+    e = [x["text"] for x in tasks.events(t["id"]) if x["kind"] in ("done", "failed", "lost")]
+    return short(tasks.gate.SECRET_RE.sub(r"\1***", e[-1]), 600) if e else ""
+
+def ftask_unplanned(t):
+    p = team.plan_of(t.get("project"), t["plan"]) if t.get("plan") else None
+    return bool(p) and any(not any(x.get("plan") == t["plan"] and x["title"] == i for x in tasks.all_tasks()) for i in p["items"])
+
+def ftask_text(t):
+    """同步出去的飞书任务的标题和说明：方案用方案的任务单，单个任务用任务书开头。"""
+    if t.get("plan"): return f"{t.get('project')} · {t['plan']}", (team.plan_of(t.get("project"), t["plan"]) or {}).get("text", "")
+    return f"{tasks.ref(t)} {t['title']}", short(t.get("brief") or "", 800)
+
+def ftask_tick():
+    if FT: FT.tick(tasks.all_tasks(), lambda t: tasks.gate_text(t) or tasks.LABEL.get(t["status"], t["status"]), tasks.ref, ftask_result, ftask_unplanned,
+                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"])
+
+def ftask_loop(stopping):
+    """单独一个线程写飞书：网络慢不拖住任务调度。"""
+    while not stopping.wait(5):
+        try: ftask_tick()
+        except Exception: log.exception("feishu task sync failed")
+
+def feishu_task_loop(stopping):
+    """注册成任务智能体，收任务事件。权限没开通就每 10 分钟再试，开通了不用重启。"""
+    global FT, ftask_proc
+    ft, last = _mod("feishu_tasks").FeishuTasks(lark, OWNER_OPEN_ID, os.path.join(STATE, "feishu_tasks.json"), save, log, ftask_notify, ftask_submit), ""
+    threading.Thread(target=ftask_loop, args=(stopping,), daemon=True).start()
+    while not stopping.is_set():
+        try: ft.register()
+        except Exception as e:
+            why = re.sub(r"\d{6,}\w*", "", str(e))
+            if why != last: log.warning("feishu tasks not ready: %s", str(e)[:300]); last = why
+            stopping.wait(600); continue
+        FT = ft
+        p = ftask_proc = subprocess.Popen(["lark-cli", "event", "consume", "task.task.update_user_access_v2", "--as", "bot"],
+                                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        threading.Thread(target=lambda p=p: [log.info("[lark-task] %s", l.rstrip()) for l in p.stderr], daemon=True).start()
+        for line in p.stdout:
+            if not line.strip(): continue
+            try: ft.on_event(json.loads(line))
+            except Exception: log.exception("bad task event: %s", line[:300])
+        log.warning("feishu task events exited rc=%s", p.wait())
+        stopping.wait(120)
+
 def main():
     """每个渠道一个线程，各自断线重连；一个渠道挂了不影响另一个，也不打断正在跑的 Claude。"""
     stopping = threading.Event()
     def stop(*_):
         stopping.set(); STOPPING.set()
-        for p in (feishu_proc, wecom_proc):   # SIGTERM，让子进程正常收尾；不要 kill -9
+        for p in (feishu_proc, wecom_proc, ftask_proc):   # SIGTERM，让子进程正常收尾；不要 kill -9
             if p and p.poll() is None: p.terminate()
     signal.signal(signal.SIGTERM, stop); signal.signal(signal.SIGINT, stop)
     loops = []
     if FEISHU_ON: loops.append(feishu_loop)
     if WECOM["enabled"]: loops.append(wecom_loop)
+    if FEISHU_ON and TASKS_ON and (CFG.get("feishu_tasks") or {}).get("enabled"): loops.append(feishu_task_loop)
     if not loops: sys.exit("config.json 里没有启用任何渠道")
     for f in loops: threading.Thread(target=f, args=(stopping,), daemon=True).start()
     if FEISHU_ON and AMB["enabled"]:

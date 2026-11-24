@@ -338,7 +338,7 @@ class AmbientTest(unittest.TestCase):
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT)
         (inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py', 'team.py', 'updates.py', 'decide.py', 'agents.py'):
+        for f in ('bridge.py', 'tasks.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py', 'team.py', 'updates.py', 'decide.py', 'agents.py', 'gate.py', 'feishu_tasks.py'):
             (inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         spec = importlib.util.spec_from_file_location('fcb_bridge_test', inst / 'bridge.py')
         b = importlib.util.module_from_spec(spec)
@@ -581,7 +581,7 @@ class TaskTest(unittest.TestCase):
         cfg['channels']['wecom'].update(enabled=True, owner_userid='boss')
         cfg['ambient']['enabled'] = False
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
-        for f in ('bridge.py', 'tasks.py', 'upgrade.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py', 'team.py', 'updates.py', 'decide.py', 'agents.py'):
+        for f in ('bridge.py', 'tasks.py', 'upgrade.py', 'delivery.py', 'fsio.py', 'outbox.py', 'resources.py', 'devices.py', 'scheduler.py', 'actions.py', 'team.py', 'updates.py', 'decide.py', 'agents.py', 'gate.py', 'feishu_tasks.py'):
             (cls.inst / f).write_text((TEMPLATES / f).read_text(encoding='utf-8'), encoding='utf-8')
         shutil.copytree(TEMPLATES / 'roles', cls.inst / 'roles')
         gh = cls.inst / 'hooks' / 'git'; gh.mkdir(parents=True)
@@ -1594,8 +1594,8 @@ class TaskTest(unittest.TestCase):
                 if x['status'] in ('running', 'approved'): self.t.update(x['id'], _force=True, status='done')
             n = self.new_task(launched=time.time() - 3 * 3600, last_tool_at=time.time() - 2 * 3600)
             self.b.task_tick()
-            self.assertEqual(self.t.load(n)['status'], 'failed'); self.assertEqual(stopped, [n])
-            self.assertIn('判定卡住', self.t.events(n)[-1]['text'])
+            self.assertEqual(self.t.load(n)['status'], 'running'); self.assertEqual(stopped, [])   # 先叫上级，不直接停
+            self.assertEqual(self.t.events(n)[-1]['kind'], 'overdue')
         finally:
             self.t.alive, self.t.stop = alive, stop; self.b.RELAY_ON = True
 

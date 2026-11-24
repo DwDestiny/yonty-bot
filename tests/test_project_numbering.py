@@ -36,7 +36,7 @@ MATE = 'ou_' + '2' * 32
 BARE_REF = re.compile(r'(?<![\w\-#])#\d')
 
 # 升级前 config.example.json 里已有的键，用来找出这次新增的别名字段
-BASE_TOP = {'name', 'owner_name', 'owner_open_id', 'bot_open_id', 'channels', 'cross_im_read', 'tasks', 'persona', 'style',
+BASE_TOP = {'name', 'owner_name', 'owner_open_id', 'bot_open_id', 'channels', 'cross_im_read', 'tasks', 'feishu_tasks', 'persona', 'style',
             'workdir', 'add_dirs', 'permission_mode', 'identity', 'context', 'ambient', 'private', 'deny_extra',
             'chat_max_turns', 'credential_paths', 'prime', 'disable_mcp', 'p2p_idle_hours', 'group_idle_hours',
             'max_parallel', 'claude_timeout_min'}

@@ -15,7 +15,7 @@ def conf(cfg): return dict(DEFAULTS, **(cfg.get("team") or {}))
 
 # ---------- 回复里的标记 ----------
 # 一个块到下一个标记行为止。[派活] 另用 tasks.DISPATCH_END：任务书里可以举 [任务指令] 的例子。
-END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令)(?:\s[^\]]*)?\]")
+END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令|处置|改验证|取消任务|改依赖)(?:\s[^\]]*)?\]")
 SILENT = re.compile(r"^\s*\[不回\][\s。.!！~～]*$")
 FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})")
 
@@ -39,7 +39,7 @@ def visible(text):
     for l in (text or "").split("\n"):
         if FENCE.match(l) and not skip: fence = not fence
         if fence: keep.append(l); continue
-        if SILENT.match(l) or re.match(r"^\s*\[(?:看板|处理掉|不是我的|停|继续)\]", l) or re.match(r"^\s*\[/(?:派活|方案|任务指令)\]\s*$", l): skip = False; continue
+        if SILENT.match(l) or re.match(r"^\s*\[(?:看板|处理掉|不是我的|停|继续|处置|改验证|取消任务|改依赖)\]", l) or re.match(r"^\s*\[/(?:派活|方案|任务指令)\]\s*$", l): skip = False; continue
         if re.match(r"^\s*\[(?:交接|方案|转交|投递[^\]]*)\]", l): skip = True; continue
         if skip and END.match(l): skip = False
         if not skip: keep.append(l)
@@ -149,6 +149,23 @@ def merge_list(tk, t):
     ids = {y["id"] for y in out} | {t["id"]}
     return out + [y for y in plan_tasks(t, pool).values() if y["id"] not in ids and y["status"] == "done" and overlap(t.get("files") or [], y.get("files") or [])]
 
+def blockers(tk, t, pool):
+    """挡着这个任务、自己又不会再动的上游：[(认重用的键, 任务, 说明)]。失败、中断的过 3 分钟还没人管才算，取消作废的马上算。"""
+    out, now = [], time.time()
+    for x, y in dep_tasks(tk, t, pool):
+        if not y:   # 按标题找不到还算数的：最近一个是取消、作废的
+            dead = [z for z in pool if z.get("plan") == t.get("plan") and z.get("project") == t.get("project") and z["title"] == x and z["status"] in DEAD]
+            y = dead[-1] if dead else None
+        if not y: continue
+        if y["status"] in DEAD or (y["status"] in ("failed", "lost") and now - (y.get("updated") or 0) > 180):
+            out.append((f"{y['id']}:{y['status']}:{y.get('turn') or 0}", y, f"{tk.ref(y)} {tk.LABEL.get(y['status'])}：{y['title']}"))
+    return out
+
+def waiting_on(tk, y, pool):
+    """等着 y 的排队任务。"""
+    return [t for t in pool if t["status"] == "approved" and t.get("plan") and t["id"] != y["id"] and t.get("project") == y.get("project")
+            and (any(d and d["id"] == y["id"] for _, d in dep_tasks(tk, t, pool)) or (t.get("plan") == y.get("plan") and y["title"] in (t.get("deps") or []) and y["status"] in DEAD))]
+
 def waits(tk, t, c):
     """这个任务现在为什么先别开；空串就是可以开。"""
     if held(t.get("project")): return "项目停工"
@@ -184,7 +201,7 @@ def board(tk, project=None, limit=1800):
                 for n, x in ((st.get("plans") or {}).get(p) or {}).items() if now - x["at"] < 7 * 86400}
         act = [t for t in ts if t["status"] in tk.ACTIVE + ("pending",)]
         for t in act + sorted((t for t in ts if t not in act), key=lambda t: -(t.get("updated") or 0))[:4]:
-            why = t.get("wait_why") if t["status"] == "approved" else ""
+            why = t.get("wait_why") if t["status"] == "approved" else tk.gate_text(t)
             out.append(f"· {tk.ref(t)} {tk.LABEL.get(t['status'], t['status'])} {t['title'][:30]}" + (f"（{why}）" if why else ""))
         for n, items in rest.items():
             if items: out.append(f"· 方案“{n}”还没派：{'、'.join(items)[:120]}")

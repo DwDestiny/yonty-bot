@@ -147,6 +147,9 @@
     "probe_timeout_s": 60,
     "probe_mem_mb": 1024
   },
+  "feishu_tasks": {
+    "enabled": false
+  },
   "routing": {
     "sticky_min": 30,
     "fast_path": {
