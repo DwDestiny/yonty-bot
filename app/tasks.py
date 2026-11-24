@@ -98,6 +98,8 @@ def hook_env(owner, private, chat_id, channel="feishu", task_id=None):
         env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=GIT_HOOKS)
     if task_id is not None:
         env["FCB_TASK_ID"] = str(task_id)
+    else:
+        env["TZ"] = CFG.get("timezone") or "Asia/Shanghai"   # 主控、项目经理说的时间是人的时间；任务不设，免得改了项目测试的时区
     env["MCP_CONNECTION_NONBLOCKING"] = "0"   # 等 MCP 连上再发第一个请求，工具列表才稳定（见上面 MCP 一节）
     return env
 
@@ -358,7 +360,7 @@ def events(tid, start=0): return _read(tid, "events.jsonl")[start:]
 
 BUDGET_RE = re.compile(r"预算\s*(?:加到|调到|改成|改为|提到|放到|到)\s*(\d+(?:\.\d+)?)")
 
-def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False, idem=None):
+def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False, idem=None, keep_budget=False):
     """收件箱加一条。kind：指令（主人、主控、本项目的项目经理发的）或留言（别的任务投来的、命令行投来的，当材料）。返回编号 n（iN）。
     upper：bridge 核过的上级（主控、项目经理替派活人转的）。只有指令会动预算和验收：主人或 upper 写“预算加到 N”、“放开验收”才算；
     留言一律不动预算、不放开验收、不叫醒停在检查点的任务。权限只由调用方显式给，不按 who 的文字认。"""
@@ -367,7 +369,7 @@ def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False, idem=
     m = BUDGET_RE.search(text) if kind == "指令" else None
     if m and (owner or upper):   # 主人或上级写“预算加到 N”：把检查点挪过去（同事不能改）
         update(tid, budget=float(m.group(1)), budget_why=f"{who}调到 {m.group(1)}", checkpoint=False)
-    elif kind != "指令": pass
+    elif kind != "指令" or keep_budget: pass
     elif t.get("checkpoint") and not upper:   # 人亲自让停在检查点的任务接着干：就是同意加预算
         nb = round(max(cost * 1.5, cost + 5))
         update(tid, budget=nb, budget_why=f"{who}让接着干，自动加到 {nb}", checkpoint=False)
@@ -995,16 +997,26 @@ def mem_current(t):
     if num(kv.get("MemoryPeak")) > (t.get("mem_peak") or 0): update(t["id"], _touch=False, mem_peak=num(kv.get("MemoryPeak")))
     return num(kv.get("MemoryCurrent"))
 
+QUIET = {}   # (任务号, 轮) -> [(时间, CPU 纳秒)]
+def quiet(t, now=None):
+    """等 CI 之类的：最近 10 分钟几乎没用 CPU。给它留的内存余量减半，别把别的任务一直挡在外面。"""
+    now, c = now or time.time(), cpu_ns(t)
+    if c is None: return False
+    xs = QUIET.setdefault((t["id"], t.get("turn")), [])
+    if not xs or now - xs[-1][0] >= 30: xs.append((now, c))
+    while len(xs) > 1 and now - xs[1][0] >= 600: xs.pop(0)
+    return now - xs[0][0] >= 600 and c - xs[0][1] < 30e9
+
 def admit(cands):
     """这一拍哪些排队的任务能开（方案第 5 节）：按内存余量、压力和单元总数，不按固定并发数。放行都记决策日志，等待只在理由变了时记。"""
     rc, snap, hist = res.conf(T), res.snapshot(ROOT), all_tasks()
     running = [x for x in hist if x["status"] == "running" and x.get("exec") != "cloud"]
-    cur = {x["id"]: mem_current(x) for x in running}
+    cur, idle = {x["id"]: mem_current(x) for x in running}, {x["id"] for x in running if quiet(x)}
     admitted, out = [], []
     frozen = [ref(x) for x in running if x.get("frozen")]
     for t in cands:
         if t.get("exec") == "cloud": out.append(t); continue
-        ok, why, est = res.admit(t, snap, running, admitted, rc, hist, lambda r: cur.get(r["id"], 0))
+        ok, why, est = res.admit(t, snap, running, admitted, rc, hist, lambda r: cur.get(r["id"], 0), idle)
         if frozen: ok, why = False, f"等内存：{'、'.join(frozen)} 因为内存紧冻着，解冻前不开新单元"
         if ok:
             admitted.append(est); out.append(t)
