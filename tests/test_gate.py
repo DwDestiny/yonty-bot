@@ -409,6 +409,44 @@ class LoopTest(Base):
         a = self.plan('实测'); w = self.plan('发版', ['实测'], status='waiting'); self.finish(a); self.seen(a)
         self.pm(f"[任务指令] {self.t.ref(a)} 再测", a, 'r1'); self.assertEqual(self.kinds(w), ['nudge'])
 
+    def test_replay_beta_night_through_tick(self):
+        """从 task_tick 到 pm_relay 走一遍：项目经理每一轮的话按脚本给。"""
+        b, t, n = self.b, self.t, {}
+        said = []; b.task_say = lambda x, text, key: said.append(text) or 'om'
+        t.admit = lambda xs: xs; t.alive = lambda x: True
+        launched = []; t.launch = lambda i: (launched.append(t.load(i)['title']), t.update(i, status='running', turn=(t.load(i).get('turn') or 0) + 1, launched=time.time()))
+        replies = []; b.run_claude = lambda *a, **k: replies.pop(0) if replies else '[处理掉] 没事'
+        b.enqueue = lambda key, ev: b.pm_relay(ev) if ev.get('pm') else None
+        a, x, c = self.plan('打包'), self.plan('实测', ['打包'], status='approved'), self.plan('发版', ['打包', '实测'], status='approved')
+        for y in (a, x, c): n[y['title']] = t.ref(y)
+        def end(y, text): t.update(y['id'], status='done', finished=time.time() - 6); t.event(y['id'], 'done', text)
+        tick = lambda k=3: [b.task_tick() for _ in range(k)]
+        end(a, '没打成'); replies.append(f"[处置] {n['打包']} 没达成 没有新包\n[处理掉] 查日志"); tick()
+        self.assertEqual((launched, t.load(a['id'])['status']), ([], 'failed'))
+        self.assertNotIn('完成', [l for l in b.team.board(t).splitlines() if n['打包'] in l][0])
+        replies.append('[处理掉] x'); self.pm(f"[任务指令] {n['打包']} 再打一次", a, 'again'); tick()
+        self.assertEqual(launched, ['打包'])
+        end(a, '打成了'); replies[:] = ['[处理掉] 核过了']; tick(); self.assertEqual(launched, ['打包', '实测'])
+        end(x, '没测成'); replies[:] = [f"[任务指令] {n['实测']} 接着测"]; tick(); self.assertEqual(launched, ['打包', '实测', '实测'])   # 发版没开工
+        end(x, '测过了'); replies[:] = ['[处理掉] 看过证据']; tick(); self.assertEqual(launched[-1], '发版')
+        t.update(c['id'], status='waiting'); t.event(c['id'], 'question', '前置没满足'); replies[:] = ['[处理掉] 等 PR 合并，有意不回']; tick()
+        self.assertTrue(t.load(c['id'])['hold']); b.wait_watch(t.load(c['id']), time.time() + 9000)
+        self.assertFalse([s for s in said if '没定下来' in s])
+
+    def test_just_finished_is_not_accepted_before_its_report(self):
+        a = self.plan('打包'); self.t.update(a['id'], status='done', finished=time.time()); self.assertFalse(self.t.accepted(self.t.load(a['id'])))
+
+    def test_controller_note_is_sent_back_when_it_can_hand_over(self):
+        me = {'type': 'ctrl', 'key': 'p2p:x'}
+        self.assertEqual(self.b.use_handover(me, '项目经理 p'), '')
+        self.b.FOLLOW_NOW['p2p:x'] = 'p'; self.addCleanup(self.b.FOLLOW_NOW.clear)
+        self.assertIn('[转交] p', self.b.use_handover(me, '项目经理 p')); self.assertEqual(self.b.use_handover(me, '项目经理 q'), ''); self.assertEqual(self.b.use_handover(me, '主人'), '')
+
+    def test_manager_to_own_task_not_stopped_by_hops(self):
+        dl = self.t.dl; t = self.plan('实测'); s = dl.pm_sender(t['project'], f"proj:{t['project']}:p2p:oc_p", True)
+        out = dl.submit(self.t, s, self.t.ref(t), '留言', '补测三项', 5, None, None, trusted=True)
+        self.assertIn('收件箱', out); self.assertEqual(self.t.inbox_items(t['id'])[-1]['kind'], '指令')
+
     def test_handback_result_blocked(self):
         self.assertEqual(self.t.handback_verdict('停下交回。\n\n**结果：BLOCKED**'), 'failed')
         self.assertIsNone(self.t.handback_verdict('结果：2 条通过'))

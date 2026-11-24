@@ -314,6 +314,13 @@ def peer_pid(conn):
         except OSError: return None
     return None
 
+FOLLOW_NOW = {}   # 会话键 -> 项目：主控正在跑、能用 [转交] 让项目经理接着派的那一轮
+def use_handover(me, to):
+    """主控这一轮能 [转交]，却用命令行给同一个项目经理留言：留言轮派不了活、不能给任务下指令，流程会断在那里。不收，让它改写。"""
+    p = FOLLOW_NOW.get(me.get("key")) if me.get("type") == "ctrl" else None
+    if not p or not to.strip().startswith("项目经理") or (to.split()[1:] and to.split()[1] != p): return ""
+    return f"没送。命令行留言叫起来的那一轮，{p} 的项目经理派不了活、也不能给任务下指令。把这段话写进你的回复：单独一行 [转交] {p}，下一行起写内容。"
+
 def ident_serve(conn):
     try:
         conn.settimeout(10)
@@ -328,9 +335,12 @@ def ident_serve(conn):
         elif req.get("op") == "send":
             if not me: out = {"err": "认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。"}
             else:
-                try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
+                stop = use_handover(me, str(req.get("to") or ""))
+                if stop: out = {"err": stop}
+                else:
+                  try: out = {"ok": tasks.dl.submit(tasks._me(), me, str(req.get("to") or ""), str(req.get("kind") or ""),
                                                   str(req.get("text") or ""), None, req.get("reply"), {"via": "cli"})}
-                except ValueError as e: out = {"err": str(e)}
+                  except ValueError as e: out = {"err": str(e)}
         else: out = {"err": "不认识的请求"}
         conn.sendall((json.dumps(out, ensure_ascii=False) + "\n").encode())
     except Exception: log.exception("ident request failed")
@@ -1850,8 +1860,10 @@ def _delivery_turn(ev):
            if rec.get("src_im") and not pm else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）") + tip
     if fol:
         prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务；也可以用 [任务指令] 让这些任务补做，不加预算、不改验收。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
-    with sem:
-        result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
+    if go_on: FOLLOW_NOW[key] = fr["project"]
+    try:
+        with sem: result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
+    finally: FOLLOW_NOW.pop(key, None)
     if result is None: return False   # 这一轮没成：调用方退回重送
     idem = f"dl{rec['id']}-{int(rec['ts'])}"
     if go_on: result = follow_marks(go_on, fr["project"], key, hop, result, idem)
@@ -2456,9 +2468,9 @@ def ctl_hold(t, why, _, who, told):
     if t["status"] not in ("waiting", "approved", "pending"): return f"已经{tasks.LABEL.get(t['status'])}，挂不了"
     hold_task(t, why, who); return ""
 
-HOLD_S = 4 * 3600
+HOLD_H = (1, 4, 12)   # 没写等哪个任务的（等合并、部署），1 小时先提醒一次；写了的有结果会叫，4 小时才提醒
 def hold_watch(t, now):
-    """挂起的任务：等的任务都有结果了叫醒项目经理一次；挂了 4、8 小时各提醒一次，12 小时告诉派活人。"""
+    """挂起的任务：等的任务都有结果了叫醒项目经理一次；挂久了提醒两次，12 小时告诉派活人。"""
     n, h = t["id"], t["hold"]
     if t.get("held") or team.held(t.get("project")) or len(tasks.events(n)) > (t.get("posted") or 0): return
     ys = [tasks.load(i) for i in h.get("on") or []]
@@ -2466,7 +2478,7 @@ def hold_watch(t, now):
         tasks.update(n, _touch=False, hold=dict(h, woke=True))
         tasks.event(n, "nudge", "挂起时等的都有结果了：" + "、".join(f"{tasks.ref(y)} {tasks.LABEL.get(y['status'])}" for y in ys if y) + f"。挂起的理由：{h['why']}"); return
     k = h.get("told") or 0
-    if k >= 3 or now - h["ts"] < HOLD_S * (k + 1): return
+    if k >= 3 or now - h["ts"] < 3600 * (HOLD_H if not ys else (4, 8, 12))[k]: return
     tasks.update(n, _touch=False, hold=dict(h, told=k + 1))
     hrs = int((now - h["ts"]) // 3600)
     if k < 2: tasks.event(n, "nudge", f"已经挂起 {hrs} 小时，等的是：{h['why']}")
