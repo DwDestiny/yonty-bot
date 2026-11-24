@@ -372,7 +372,7 @@ def event(tid, kind, text="", **kv):
 
 def accepted(t):
     """做完，而且上级收过：所有回报都处理完了，没叫它接着干，也没改判。依赖放行只认这个，不认任务自己说的完成。"""
-    return bool(t) and t["status"] == "done" and (t.get("posted") or 0) >= len(events(t["id"]))
+    return bool(t) and t["status"] == "done" and time.time() - (t.get("finished") or 0) > 5 and (t.get("posted") or 0) >= len(events(t["id"]))   # 先写状态后写回报，隔 5 秒再认
 
 def set_hold(tid, why, who, on=()):
     """挂起：有意不回、不开工，等 why。on 是要等的任务号，都有结果了 bridge 叫醒上级。续挂不重新计时。"""
