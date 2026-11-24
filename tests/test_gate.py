@@ -233,6 +233,16 @@ class MarksTest(Base):
         self.b.plan_sync(now + 60)
         self.assertIn('进展：改完了', said[1]); self.assertIn('（P 1/', said[1]); self.assertEqual(self.e.streams, [])
 
+    def test_no_duplicate_when_in_feishu_task(self):
+        said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
+        self.b.FT = types.SimpleNamespace(covers=lambda: True); self.addCleanup(setattr, self.b, 'FT', None)
+        self.t.alive = lambda t: True
+        t = self.run_task(title='甲', plan='P', thing='主线', last_tool_at=time.time()); u = self.run_task(title='乙', last_tool_at=time.time() - 60)
+        for x in (t, u): self.t.event(x['id'], 'start', ''); self.t.event(x['id'], 'progress', '改完了')
+        self.b.task_tick(); self.assertEqual(said, [])
+        self.b.FT.covers = lambda: False                                       # 同步坏了照旧发
+        self.t.event(u['id'], 'progress', '又改完了'); self.b.task_tick(); self.assertTrue(any('又改完了' in x for x in said), said)
+
     def test_coworker_cannot_loosen_gate(self):
         m = self.run_task(status='approved', verify='npm test', requester={'channel': 'feishu', 'id': A.MATE, 'name': '同事', 'owner': False})
         out = self.b.relay_followups(m, f"[改验证] {self.t.ref(m)} npm run a\n理由：x")
@@ -277,7 +287,7 @@ class FakeLark:
         elif m == 'GET' and p == '/sections': out = {'items': [{'name': 'b', 'guid': 'S-old'}]}
         elif m == 'GET': out = {'items': self.comments}
         elif m == 'POST' and p == '/sections': out = {'section': {'guid': 'S-' + d['name']}}
-        elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}'}}
+        elif m == 'POST' and p == '/tasks': self.n += 1; out = {'task': {'guid': f'g{self.n}', 'url': f'https://applink/{self.n}'}}
         return types.SimpleNamespace(returncode=0, stdout=json.dumps({'data': out}), stderr='')
 
 
@@ -323,6 +333,20 @@ class FeishuTaskTest(unittest.TestCase):
         self.assertEqual(len(self.lines), 2)                                              # 两个方案各一行，只发一次
         self.assertIn('https://applink/x', json.dumps(self.lines[0][1]))
         self.assertEqual([d['section_guid'] for d in self.sent('add_tasklist')], ['S-a', 'S-old'])   # 一个项目一个分组，已有同名的用已有的
+
+    def test_history_once_grouped_in_one_message(self):
+        self.lark.task['url'] = 'https://applink/x'
+        ts = [{'id': i, 'status': 'done' if i != 2 else 'cancelled', 'turn': 1, 'title': f't{i}', 'project': 'a', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1} for i in range(1, 8)]
+        for _ in range(5): self.tick(ts)
+        made = [d for m, p, d in self.lark.calls if (m, p) == ('POST', '/tasks')]
+        self.assertEqual(len(made), 7); self.assertTrue(all(d['completed_at'] != '0' and len(d['members']) == 1 for d in made))
+        self.assertEqual(len(self.lines), 1); self.assertEqual(len(self.lines[0][1]['zh_cn']['content']), 7); self.assertIn('t2（已取消）', json.dumps(self.lines, ensure_ascii=False))
+        self.assertEqual(self.sent('append'), [])
+
+    def test_own_result_not_commented(self):
+        t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}
+        self.tick([t]); self.tick([dict(t, status='done')])
+        self.assertEqual(self.sent('/comments'), []); self.assertIn('结论', json.dumps(self.sent('append'), ensure_ascii=False))
 
     def test_no_section_permission_does_not_block(self):
         real = self.f.api
