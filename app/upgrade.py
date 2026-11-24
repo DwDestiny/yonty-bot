@@ -9,7 +9,7 @@ Pos:    实例目录的 upgrade.py，由 scaffold.py 从 app/upgrade.py 复制
 步骤：源码仓库干净、在 main → 只做快进 → 跑测试 → 备份实例（不等任务：代码按版本放，只换一个链接；发布说明写了要等的、3.1 之前升上来的才等） → 先让服务回一句再重启 → 重新生成（守则只合并模板改动）
       → 重启服务 → 新服务写出 state/started.json 且版本对上就算好，否则用备份回滚。
 """
-import json, os, subprocess, sys, tarfile, time, uuid
+import fcntl, json, os, subprocess, sys, tarfile, time, uuid
 
 INST = os.path.dirname(os.path.abspath(__file__))
 STATE = os.path.join(INST, "state")
@@ -97,8 +97,14 @@ def main():
             return put(status="failed", detail="本地 main 和远端分叉了，只做快进，不合并")
         git(src, "merge", "-q", "--ff-only", "origin/main")
     with open(os.path.join(src, "VERSION")) as f: ver = f.read().strip()
+    put(stage="等别的全量测试跑完", to=ver, commit=new[:10])
+    hf, end = os.fdopen(os.open(os.path.join(STATE, "heavy.lock"), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600), "r+"), time.time() + 2700
+    while time.time() < end:   # 全机同时只有一份重测试，跟任务的验证闸门取同一把锁；等 45 分钟还没有就不等了
+        try: fcntl.flock(hf, fcntl.LOCK_EX | fcntl.LOCK_NB); break
+        except OSError: time.sleep(5)
     put(stage="跑测试", to=ver, commit=new[:10])
     r = sh(sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q", cwd=src, timeout=1800)
+    hf.close()
     if r.returncode:
         if old != new: git(src, "reset", "-q", "--hard", old)
         return put(status="failed", detail="测试没过，源码退回原来的版本：\n" + tail(r))

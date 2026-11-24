@@ -251,7 +251,8 @@ class BoardTest(Base):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
         t = self.by('甲'); self.t.update(t['id'], status='done'); self.t.event(t['id'], 'done', '结论：PASS')
         n = len(self.e.sent); self.layers([], ['看过了']); self.e.tick(); self.b.delivery_tick(); self.e.drain()
-        self.assertFalse([x for x in self.e.sent[n:] if x[0] == 'reply']); self.assertEqual(self.t.load(t['id'])['posted'], len(self.t.events(t['id'])))
+        self.assertEqual([x[2] for x in self.e.sent[n:] if x[0] == 'reply'], [f"{self.t.ref(t)} 完成：甲（整改 1/1）"])   # 只有服务自己同步的那一行，没走模型
+        self.assertEqual(self.t.load(t['id'])['posted'], len(self.t.events(t['id'])))
 
     def test_pm_dispatch_from_report(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
