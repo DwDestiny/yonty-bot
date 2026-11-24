@@ -4,6 +4,7 @@ Input:  app/gate.py、app/feishu_tasks.py；test_accept_flow 的临时实例（�
 Output: unittest 结果
 Pos:    app/gate.py、tasks.run_verify、bridge.apply_ctl / stuck_step / wait_watch / blocked_watch、feishu_tasks 的行为测试
 """
+from unittest import mock
 import importlib.util
 import json
 import os
@@ -265,6 +266,32 @@ class MarksTest(Base):
         row = list(store.values())[0]; self.assertEqual((row['状态'], row['花费（美元当量）']), (['完成'], 2.5)); self.assertTrue(row['完成日'])
         b.BOARD = B(lark, 'x', 'y', b.log); b.BOARD.cache = {}; tick()                     # 重启后认得原来的行
         self.assertEqual(len(store), 1)
+
+    def test_retro_facts_and_report(self):
+        R = self.b.retro
+        t = {'id': 7, 'num': 7, 'project': 'p', 'status': 'done', 'role': '开发', 'model': 'sonnet', 'effort': 'high', 'cost': 2, 'turn': 4}
+        ev = [{'kind': 'start', 'ts': 1}, {'kind': 'question', 'ts': 2}, {'kind': 'done', 'ts': 10}, {'kind': 'done', 'ts': 20}, {'kind': 'done', 'ts': 30}, {'kind': 'done', 'ts': 40}]
+        ib = [dict(n=1, ts=5, text='开工前', kind='指令', who='a'), dict(n=2, ts=12, text='改\n原因: 做错', kind='指令', who='a'), dict(n=3, ts=13, text='再改', kind='指令', who='a'),
+              dict(n=4, ts=25, text='合并', kind='指令', who='a'), dict(n=5, ts=32, text='复工', kind='指令', who='服务'), dict(n=6, ts=33, text='留言', kind='留言', who='a')]
+        f = R.facts(t, ev, ib, '/nope', {'7:3': '任务书漏', '7:4': '下一步'})
+        self.assertEqual((f['redo'], f['next'], f['questions'], f['causes'], f['clean'], f['run_min']), (1, 1, 1, {'做错': 1, '任务书漏': 1}, False, None))
+        self.assertEqual([k for k, _, _ in R.rework_items([(t, ev, ib, '')], {'7:4': '下一步'})], ['7:3'])
+        self.assertEqual(R.parse_labels('标 7:3 做错\n标 9:9 做错\n标 7:4 乱写', ['7:3', '7:4']), {'7:3': '做错'})
+        xs = R.pick([(t, ev, ib, '/nope')], {'7:4': '下一步'}, 1, now=100); out = R.report(xs, 1)
+        self.assertIn('返工 1 轮（另有 1 轮', out); self.assertIn('开发·sonnet·high：1 个', out); self.assertIn('样本少', out)
+        self.assertEqual(R.pick([(dict(t, schedule='s'), ev, ib, '')], {}, 1, now=100), [])
+
+    def test_retro_weekly_once_and_enough(self):
+        b = self.b; ran = []; sun = 1795953600 + 12 * 3600   # 周日 20:00 以后（北京时间）
+        with mock.patch.object(b, 'retro_go', lambda *a: ran.append(a) or True), mock.patch.object(b.retro, 'pick', lambda *a: [1] * 5):
+            b.retro_tick(sun); self.assertEqual(ran, [])                       # 默认关
+            b.CFG['retro'] = {'enabled': True, 'weekday': b.datetime.fromtimestamp(sun, b.CST).weekday(), 'hour': 0}
+            b.retro_tick(sun); b.retro_tick(sun); self.assertEqual(len(ran), 1)
+
+    def test_retro_command_owner_private_only(self):
+        ev = lambda **k: dict({'channel': 'feishu', 'sender_id': self.b.OWNER_OPEN_ID, 'chat_type': 'p2p', 'chat_id': 'oc_p', 'message_id': 'm', 'content': '/retro 3', 'text': '/retro 3', 'message_type': 'text'}, **k)
+        self.assertIn('最近 3 天', self.b.service_command(ev())); self.assertIn('私聊', self.b.service_command(ev(chat_type='group')))
+        self.assertIn('只有', self.b.service_command(ev(sender_id='ou_x')))
 
     def test_feishu_fields_from_events(self):
         t = self.run_task(title='甲', cost=1.25); i = t['id']

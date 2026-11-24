@@ -16,6 +16,7 @@ Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launc
 import contextlib, hashlib, json, os, random, re, shlex, shutil, subprocess, sys, threading, time, uuid, queue, logging, signal, socket, struct, secrets
 import importlib.util
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 # 长任务层（同目录 tasks.py），同时提供聊天和任务共用的 Claude 参数、钩子环境。按文件路径加载，不走 sys.path 缓存
 _spec = importlib.util.spec_from_file_location("fcb_tasks_" + uuid.uuid4().hex[:8],
                                                os.path.join(os.path.dirname(os.path.abspath(__file__)), "tasks.py"))
@@ -1014,7 +1015,7 @@ def help_text(ev, owner):
           ("/task clean 短名#N", "删工作树", owner and TASKS_ON), ("/why 短名#N", "为什么排队、改投", owner and TASKS_ON), ("/team", "角色和各项目的事", owner and TASKS_ON))
     group("聊天", ("/new", "开新会话", p2p), (f"{c} on", f"这个群开旁听，{c} off 关（在群里 @我 发）", owner and AMB["enabled"]),
           ("/bind 短名", "群绑定到项目，/unbind 解绑", owner and TASKS_ON and not p2p))
-    group("机器人", ("/upgrade", "升级（只在私聊）", owner), ("/updates", "新版本和自动更新", owner and p2p), ("/decide", "省令牌实验的数据", owner and p2p and bool((CFG.get("decide") or {}).get("enabled"))))
+    group("机器人", ("/upgrade", "升级（只在私聊）", owner), ("/updates", "新版本和自动更新", owner and p2p), ("/retro", "返工、花费、耗时的复盘数据，/retro 复盘 让模型分析", owner and p2p), ("/decide", "省令牌实验的数据", owner and p2p and bool((CFG.get("decide") or {}).get("enabled"))))
     return "\n".join(["命令马上回，不花额度。"] + h)
 
 def service_command(ev):
@@ -1022,10 +1023,16 @@ def service_command(ev):
     text, owner = plain(ev), is_owner(ev)
     private = ev.get("chat_type") == "p2p"
     if text == "/help": return help_text(ev, owner)
-    if re.match(r"^/(updates|decide)(\s|$)", text):
+    if re.match(r"^/(updates|decide|retro)(\s|$)", text):
         if not owner: return f"这条只有{OWNER_NAME}能用。"
         if ev.get("chat_type") != "p2p": return "请在私聊里发。"
         if text.startswith("/decide"): return dm.report("ambient", dm.conf(CFG.get("decide"), "ambient")) + "\n" + dm.report_task({t["id"]: t for t in tasks.all_tasks()}, dm.conf(CFG.get("decide"), "task"))
+        if text.startswith("/retro"):
+            m = re.match(r"^/retro(?:\s+(复盘))?(?:\s+(\d+))?\s*$", text)
+            if not m: return "用法：/retro [天数] 看数据；/retro 复盘 [天数] 让模型分析一次"
+            days = max(1, min(365, int(m.group(2) or retro.conf(CFG)["days"])))
+            if m.group(1): return "在分析，几分钟后发你。" if retro_go(days, f"retro-{ev.get('message_id')}") else "正在分析，别重复发。"
+            return retro.report(retro.pick(retro_rows(), load(RETRO_LABELS, {}), days), days)
         return updates.command(text, META, owner_say, lambda: upgrade_request(ev))
     if text == "/status" or text.startswith("/status "):
         if not owner: return f"/status 只有{OWNER_NAME}能看。"
@@ -1588,7 +1595,7 @@ def _mod(name):
     m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m); return m
 
 devices, sch, acts, team = _mod("devices"), _mod("scheduler"), _mod("actions"), _mod("team")
-updates, dm = _mod("updates"), _mod("decide")
+updates, dm, retro = _mod("updates"), _mod("decide"), _mod("retro")
 TEAM = team.conf(CFG)
 STRICT = TASKS_ON and TEAM["strict"]   # 3.0：主控是唯一跟主人说话的，项目里的活经项目经理按方案拆小并行
 ROUTING = dict({"sticky_min": 30, "fast_path": {"max_chars": 20}}, **CFG.get("routing", {}))
@@ -2215,7 +2222,7 @@ def v2_tick():
     except OSError: pass
     for name, fn in (("service acts", service_unfinished), ("freeze", freeze_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
-                     ("schedules", schedules_tick), ("stall", stall_tick)):
+                     ("schedules", schedules_tick), ("stall", stall_tick), ("retro", retro_tick)):
         try: fn()
         except Exception: log.exception("%s tick failed", name)
 
@@ -2239,6 +2246,66 @@ def stall_tick():
         if stall_seen.setdefault(p, (sig, now))[0] != sig or now - stall_seen[p][1] < 120: continue   # 连着看到两分钟才算，错开刚收尾那一下
         if owner_post("feishu", f"{p}：方案“{name}”还有 {len(left)} 条没派（{'、'.join(left[:6])}），已经 {int(idle / 60)} 分钟没有任务在跑。要接着就回“继续 {p}”。", f"stall{int(pl.get('at') or 0)}-{len(left)}")[1] is not False:
             told[p] = sig; save(STALL_FILE, told); tasks.decide("停滞提醒", to=p, why=sig[:200])
+
+RETRO_LABELS, RETRO_LAST, RETRO_BUSY = os.path.join(STATE, "retro_labels.json"), os.path.join(STATE, "retro.json"), threading.Lock()
+
+def retro_rows():
+    return [(t, tasks.events(t["id"]), tasks.inbox_items(t["id"]), os.path.join(tasks.tdir(t["id"]), "stream.log")) for t in tasks.all_tasks()]
+
+def retro_ask(prompt, model):
+    """复盘的一次模型调用：不带工具、不带主人权限、不续会话。"""
+    r = subprocess.run(base_cmd() + ["--session-id", str(uuid.uuid4()), "--tools", "", "--strict-mcp-config", "--model", model], input=prompt, capture_output=True, text=True,
+                       timeout=900, cwd=WORKDIR, env=hook_env(False, False, ""))
+    d = json.loads(r.stdout)
+    if r.returncode or d.get("is_error"): raise RuntimeError((r.stdout + r.stderr)[-300:])
+    log.info("retro %s cost=$%.3f", model, d.get("total_cost_usd") or 0)
+    return (d.get("result") or "").strip()
+
+def retro_label(rows):
+    """没标原因的返工让便宜模型标一次，存下来不重复标。"""
+    labels = load(RETRO_LABELS, {})
+    items = retro.rework_items(rows, labels)
+    for k in range(0, len(items), 30):
+        part = items[k:k + 30]
+        got = retro.parse_labels(retro_ask(retro.label_prompt(part, {t["id"]: tasks.ref(t) for _, t, _ in part}), "sonnet"), [x[0] for x in part])
+        labels.update(got); save(RETRO_LABELS, labels)
+    return labels
+
+def retro_run(days):
+    rows = retro_rows()
+    try: labels = retro_label(rows)
+    except Exception: log.exception("retro label failed"); labels = load(RETRO_LABELS, {})
+    now = time.time()
+    xs, prev = retro.pick(rows, labels, days, now), retro.pick([r for r in rows], labels, days, now - days * 86400)
+    prev = [x for x in prev if x[1]["end"] <= now - days * 86400]
+    head = retro.report(xs, days)
+    if not xs: return head
+    ids = {t["id"] for t, _ in xs}
+    ex = [f"{tasks.ref(t)}（{t.get('role')}·{t.get('model')}·{t.get('effort')}）{t['title']}｜原因 {retro.cause_of(t['id'], i, labels) or '没标'}｜{short(i.get('text') or '', 300)}"
+          for t, evs, ib, _ in rows if t["id"] in ids for r in retro.rounds(t, evs, ib) for i in r if retro.cause_of(t["id"], i, labels) not in retro.NOT_REWORK][:40]
+    try: say = retro_ask(retro.review_prompt(head, retro.report(prev, days), ex), "opus")
+    except Exception: log.exception("retro review failed"); say = "（分析没跑成，只有数据。）"
+    return f"每周复盘\n{say}\n\n同意哪条就回我，没同意的不改。\n\n{head}"
+
+def retro_go(days, key):
+    if not RETRO_BUSY.acquire(blocking=False): return False
+    def go():
+        try: owner_post("feishu", tasks.gate.SECRET_RE.sub(r"\1***", retro_run(days)), key)
+        except Exception: log.exception("retro failed")
+        finally: RETRO_BUSY.release()
+    threading.Thread(target=go, daemon=True).start()
+    return True
+
+def retro_tick(now=None):
+    """每周到点复盘一次；任务太少不跑。先记再跑，重启不重发。"""
+    c = retro.conf(CFG)
+    if not c["enabled"]: return
+    d = datetime.fromtimestamp(now or time.time(), ZoneInfo(CFG.get("timezone") or "Asia/Shanghai"))
+    if d.weekday() != c["weekday"] or d.hour < c["hour"]: return
+    day = d.strftime("%Y-%m-%d")
+    if load(RETRO_LAST, {}).get("last") == day: return
+    save(RETRO_LAST, {"last": day})
+    if len(retro.pick(retro_rows(), load(RETRO_LABELS, {}), c["days"])) >= c["min_tasks"]: retro_go(c["days"], f"retro{day}")
 
 SCH_BUSY = threading.Lock()
 
@@ -2521,7 +2588,7 @@ def task_relay(ev):
     finally:
         relaying.discard((n, idx))
 
-PM_RELAY_TAIL = ("--- 你是这个项目的项目经理，这条回报先到你这里。能自己收尾的先办（[任务指令] 回答提问或让它接着干、"
+PM_RELAY_TAIL = ("--- 你是这个项目的项目经理，这条回报先到你这里。能自己收尾的先办（[任务指令] 回答提问或让它接着干；做完了又叫它接着干的，正文加一行“原因: X”，X 从 " + "、".join(retro.CAUSES) + " 里选，复盘用；"
                  "补建合并请求、修补动作）。然后二选一：要让主控知道，单独一行 [投递 主控 完成]（提问你定不了就 [投递 主控 问题]），"
                  "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把下一阶段的 [方案] 登记好，主控办完转回来时只能派登记过的；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
                  "其余文字只进运行记录，不发给任何人 ---")
@@ -3065,9 +3132,9 @@ def ftask_meta(ts):
 BOARD = None
 def board_rows():
     """仪表盘每个任务一行；已结束又没变的用缓存，不反复读事件。"""
-    out = {}
+    out, BOARD.labels = {}, load(RETRO_LABELS, {})
     for t in tasks.all_tasks():
-        key = (t["status"], t.get("updated"), t.get("cost"), t.get("held"))
+        key = (len([k for k in BOARD.labels if k.startswith(f"{t['id']}:")]), t["status"], t.get("updated"), t.get("cost"), t.get("held"))
         live = t["status"] not in ("done", "failed", "lost", "cancelled", "rejected", "expired")
         hit = BOARD.cache.get(t["id"])
         if hit and hit[0] == key and not live: out[t["id"]] = hit[1]; continue
@@ -3079,6 +3146,10 @@ def board_rows():
                "模型": t.get("model") or "默认", "角色": t.get("role") or "（无）", "方案": t.get("plan") or "", "开始": stamp(s), "结束": stamp(e),
                "完成日": datetime.fromtimestamp(e, CST).strftime("%m-%d") if e and st == "完成" else "",
                "花费（美元当量）": round(t.get("cost") or 0, 2), "用时（分钟）": int((e - s) / 60) if e and s else None, "合并请求": " ".join(mrs[:5])}
+        if ((CFG.get("feishu_tasks") or {}).get("board") or {}).get("retro"):
+            f = retro.facts(t, tasks.events(t["id"]), tasks.inbox_items(t["id"]), os.path.join(tasks.tdir(t["id"]), "stream.log"), BOARD.labels)
+            row.update({"思考": t.get("effort") or "默认", "轮数": f["rounds"], "返工轮数": f["redo"], "验证没过": f["verify_fails"], "提问次数": f["questions"], "执行分钟": f["run_min"],
+                        "返工原因": "、".join(f["causes"]), "一次过": ("是" if f["clean"] else "否") if st in ("完成", "没做成") else ""})
         BOARD.cache[t["id"]] = (key, row); out[t["id"]] = row
     return out
 

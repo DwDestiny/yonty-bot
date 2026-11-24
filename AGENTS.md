@@ -1,6 +1,6 @@
 # Yonty Bot · Agent Guide（L1）
 
-> 3.11.0 · 2026-11-24 · 维护：Yonty Bot contributors
+> 3.12.0 · 2026-11-24 · 维护：Yonty Bot contributors
 
 ## 目的
 
@@ -12,7 +12,7 @@
 | --- | --- | --- |
 | `AGENTS.md` / `CLAUDE.md` / `README.md` / `README.en.md` | L1：目的、目录地图、规则；接手入口；对外介绍（中文、英文） | 是 |
 | `VERSION` / `LICENSE` | 版本号（唯一来源）；MIT | 是 |
-| `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`delivery.py`（投递）、`scheduler.py`（定时任务）、`resources.py`（按资源放行）、`devices.py`（设备租约）、`actions.py`（动作）、`fsio.py`（写文件不跟软链接）、`outbox.py`（沙箱的发件箱）、`team.py`（方案、看板、停工、派活闸门）、`updates.py`（查更新、装更新）、`decide.py`（决策点和影子记录）、`agents.py`（智能体适配层）、`gate.py`（验证闸门怎么跑）、`feishu_tasks.py`（飞书任务同步）、`hooks/`（含 `device_guard.py`、`irreversible_gate.py`、`scope_guard.py`）、`roles/`（含 `项目经理.md`）、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
+| `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`delivery.py`（投递）、`scheduler.py`（定时任务）、`resources.py`（按资源放行）、`devices.py`（设备租约）、`actions.py`（动作）、`fsio.py`（写文件不跟软链接）、`outbox.py`（沙箱的发件箱）、`team.py`（方案、看板、停工、派活闸门）、`updates.py`（查更新、装更新）、`decide.py`（决策点和影子记录）、`agents.py`（智能体适配层）、`gate.py`（验证闸门怎么跑）、`feishu_tasks.py`（飞书任务同步）、`retro.py`（复盘数据）、`hooks/`（含 `device_guard.py`、`irreversible_gate.py`、`scope_guard.py`）、`roles/`（含 `项目经理.md`）、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
 | `UPGRADE.json` | 发布说明：低于哪版升级要等任务跑完、哪些版本有人工步骤 | 是 |
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID；`device-wrapper.sh` 装在设备上的命令入口，拒绝运行 claude | 是 |
 | `docs/` | 架构、搭建指南、配置、任务、定时任务（`schedules.md`）、缓存、边界、企微；2.0 方案（`plan-2.0.md`，已实现）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
