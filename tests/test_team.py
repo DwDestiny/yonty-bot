@@ -343,6 +343,7 @@ class FollowPlanTest(Base):
             with self.subTest(text + why):
                 self.setUp(); t, errs = self.follow(text, **kv)
                 self.assertTrue(errs and why in errs[0], errs); self.assertEqual(t['status'], 'done')
+        self.setUp(); self.follow(''); self.t.update(self.jid, status='approved'); self.t.update(self.jid, status='running'); t, errs = self.follow('[任务指令] N 再测', status='waiting'); self.assertIn('等答复', errs[0])
         self.setUp(); self.follow(''); self.b.team.set_held('proj', True); t, errs = self.follow('[任务指令] N 再测'); self.assertIn('停工', errs[0])
 
     def test_follow_steer_idempotent(self):

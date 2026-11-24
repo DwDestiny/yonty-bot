@@ -1927,7 +1927,7 @@ def follow_cmds(ev, text, errs, made, idem):
         if not x: errs.append(f"{s}：" + (ambiguous(s, cands) if len(cands) > 1 else f"不是{OWNER_NAME}在这个私聊里派的方案任务，不能追加")); return ""
         n, key = tasks.ref(x), f"{idem}:{x['id']}:{hashlib.sha1(body.encode()).hexdigest()[:12]}"
         if tasks.inbox_seen(x["id"], key): return ""
-        why = (f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
+        why = (f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "在等答复，这一轮不能替人答" if x["status"] == "waiting" else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
                else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
         if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
         tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
