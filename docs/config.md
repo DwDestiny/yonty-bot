@@ -21,6 +21,7 @@
 | `tasks.outbox_batch_s` | `3` | 发件箱每个任务一拍最多办多少秒，没办完的下一拍接着 |
 | `tasks.outbox_wait_s` | `60` | 沙箱里的命令等服务回执多少秒，等不到不算办成 |
 | `tasks.sandbox_read` / `tasks.sandbox_write` | `[]` | 定时运行的沙箱里额外只读放回、可写挂载的目录（家目录里的 MCP 服务器、构建缓存之类）。见 boundary.md |
+| `tasks.agents.zcode` | 没有 | 试点用的 ZCode：`cmd`（启动器命令，要自己处理 `--box 文件 --model --reasoning -- CLI参数`）、`read`（沙箱里只读放回的目录）、`write`（可写的构建缓存）、`env`、`model`、`effort`、`repos`（哪些仓库参加）、`trial`（先试几个，默认 10）、`min_pass`（一次通过率低于它就停，默认 0.7）、`max_min`（一轮最多几分钟）、`max_requests`（默认 200）。见 [tasks.md](tasks.md) |
 | `tasks.models` | `["haiku", "sonnet", "opus"]` | 派活能用的模型别名（有验证命令的开发活由服务定）；`[派活]` 里写了名单外的就走全局默认。思考档固定为 low/medium/high/xhigh/max |
 | `tasks.relay` | `true` | 任务的完成、提问、失败先交给派活的那个会话（主控）处理，再由主控对人汇报；`false` 就原话直发 |
 | `tasks.codeup_token` | `~/.config/codeup/token` | `tasks.py mr` 给 Codeup 建合并请求用的个人令牌文件 |

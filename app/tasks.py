@@ -51,7 +51,8 @@ def _mod(name):
 
 def _me(): return types.SimpleNamespace(**globals())   # 交给 delivery、scheduler、actions 的本模块
 
-fsio, outbox, res, dl = _mod("fsio"), _mod("outbox"), _mod("resources"), _mod("delivery")
+fsio, outbox, res, dl, agents = _mod("fsio"), _mod("outbox"), _mod("resources"), _mod("delivery"), _mod("agents")
+def agent_of(t): return agents.get(_me(), t)
 DECISIONS = os.path.join(ROOT, "state", "decisions.jsonl")
 
 def decide(kind, **kv):
@@ -177,6 +178,62 @@ def escalate(tid, why, out, text):
     decide("换模型接手", task=ref(t), why=why)
     event(tid, "progress", f"{why}，换 opus 接手。")
     return first_prompt(t, t.get("base", ""), False) + (t.get("accept_notice") or "")
+
+def hand_over(tid, why, out, text, ask=True):
+    """换智能体：前一个写压缩摘要（写不了就用 git 记录补），分支从它的沙箱里拉回来重开工作树，Claude 开新会话接手。返回新会话的首条提示。"""
+    t = load(tid)
+    note, started = "", t.get("session_started")
+    if ask and started:
+        box = sandbox(t)
+        if box: note = agents.summary(_me(), t, box, dict(run_env(t), **agent_of(t).env(_me(), t)))
+    err = agent_unbox(t)
+    if err: raise RuntimeError(f"换人没成：{err}。{why}")
+    if not note:
+        base = t.get("base") or "HEAD"
+        note = "（它没能写摘要，下面是服务按 git 记录补的）\n" + cut(git(t["worktree"], "log", "--oneline", f"{base}..HEAD").stdout + git(t["worktree"], "diff", "--stat", f"{base}...HEAD").stdout, 2500) \
+               + "待办清单：" + "；".join(f"{x.get('content')}（{x.get('status')}）" for x in t.get("todos") or []) + f"\n它最后写的：\n{text[-1500:]}"
+    got = [x for x in inbox_items(tid) if x.get("kind", "指令") == "指令"]
+    back, old = t.get("agent_back") or {"model": "sonnet", "effort": "high"}, agent_of(t).label
+    takeover = (f"\n[换人接手] 这个任务先由 {old}（{t.get('model')}）做，{why}，现在换你开新会话接手。它没提交的改动已经存成一个“wip”提交，"
+                f"提交历史要干净就自己整理。先看 git log、git diff 再动手，方向不对就改掉重来。你不在它的沙箱里，推送和合并请求照任务说明自己做。\n"
+                + (f"之前收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
+                + f"验证命令：{t.get('verify')}\n" + (f"最近一次输出末尾：\n{out[-1500:]}\n" if out else "") + f"它的交接摘要：\n{note}\n")
+    kw = {} if (t.get("budget_why") or "").startswith("主控估") else dict(zip(("budget", "budget_why"), budget_basis(t.get("role"), back["model"])))
+    t = update(tid, agent="claude", agent_out="switched", agent_why=why, auto_model=True, scope="", clone=False, verify_round=0, session_id=str(uuid.uuid4()),
+               session_started=False, forked_from="", cost_base=-(t.get("cost") or 0), takeover=takeover, **back, **kw)
+    decide("换智能体接手", task=ref(t), why=why)
+    event(tid, "progress", f"{why}，换 {back['model']} 接手。")
+    return first_prompt(t, t.get("base", ""), False)
+
+def agent_unbox(t):
+    """沙箱里的 clone 换成主仓库的正常工作树。在 clone 上跑 git 只在沙箱里跑。成功返回空。"""
+    wt, repo = t["worktree"], t["repo"]
+    if t.get("session_started"):
+        box = sandbox(t)
+        if not box: return box_why(t)
+        subprocess.run(box + ["bash", "-c", "git add -A && git diff --cached --quiet || git commit -qm 'wip：换人前的存档' --no-verify"], cwd=wt,
+                       env=dict(run_env(t), **agent_of(t).env(_me(), t)), capture_output=True, text=True)
+        why = clone_fetch(t)
+        if why: return why
+    shutil.rmtree(wt, ignore_errors=True)
+    git(repo, "worktree", "prune")
+    if git(repo, "rev-parse", "--verify", "--quiet", "refs/heads/" + t["branch"]).returncode:
+        git(repo, "branch", t["branch"], t.get("base_sha") or t.get("base") or "HEAD")
+    r = git(repo, "worktree", "add", "--quiet", wt, t["branch"])
+    return r.stderr.strip()[-200:] if r.returncode else ""
+
+def agent_publish(t, text):
+    """沙箱里的智能体没有远端凭据：验证过了由服务推分支、建草稿合并请求。返回附在总结后面的一句话。"""
+    repo, b = t["repo"], t["branch"]
+    if not git(repo, "remote").stdout.strip(): return f"分支 {b} 已拉回主仓库（没有远端）。"
+    if not b.startswith("bot/"): return f"分支 {b} 不是 bot/ 开头，没推。"
+    r = git(repo, "push", "--quiet", "-u", "origin", f"{b}:{b}")
+    if r.returncode: return f"分支没推上去：{r.stderr.strip()[-200:]}"
+    if part(t): return f"服务已推送分支 {b}。"
+    try:
+        tg = t.get("target") or (t["base"].split("/", 1)[1] if (t.get("base") or "").startswith("origin/") else "")
+        return "服务已推送分支并建草稿合并请求：" + create_mr(["--title", t["title"], "--body", text[:4000], "--repo", repo, "--branch", b] + (["--target", tg] if tg else [])).strip()
+    except (SystemExit, Exception) as e: return f"服务已推送分支 {b}，合并请求没建成：{str(e)[:200]}"
 
 def create(**fields):
     r = roles().get(fields.get("role") or "")
@@ -586,7 +643,7 @@ def sibling_save(t, ctx, notes, total=0):
         done = [x for x in (s.get("tasks") or []) if x != t["id"]][-19:] + [t["id"]]
         s.update(project=proj, thing=t.get("thing") or MAIN_THING, tasks=done,
                  goal=s.get("goal") or t.get("title", ""), updated=time.time())
-        if roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
+        if agent_of(t).fork and roles().get(t.get("role") or "", {}).get("resume", True):   # 会话头按模型分（缓存按模型分），换模型的活不挤掉原来的头
             heads = s.get("heads") or {}
             heads[t.get("model") or ""] = {"head": t["session_id"], "ctx": ctx, "last_used": time.time(), "total": total, "task": t["id"]}
             s.update(heads=heads, head=t["session_id"], ctx=ctx, model=t.get("model") or "", last_used=time.time())
@@ -701,6 +758,7 @@ def sibling_fork(t):
     """新任务能接着哪个会话分叉：同一件事，模型一样（缓存按模型分），上次用过不到 N 分钟（缓存还热），
     上下文没超上限。分叉出的是新会话，原会话不动。不满足就新开会话，读这件事的档案。不管派活人是谁、从哪个聊天来。"""
     if not roles().get(t.get("role") or "", {}).get("resume", True): return ""
+    if not agent_of(t).fork: return ""
     h = sibling_head(t)
     if not h.get("head"): return ""
     if time.time() - h.get("last_used", 0) > T["sibling_warm_min"] * 60: return ""
@@ -770,7 +828,7 @@ def compact_task(tid):
     """压缩等人回话的任务会话。调用方先把 compacting 记成当前时间，launch 看到它会等压缩做完再开工。"""
     t = load(tid)
     try:
-        if t["status"] not in ("waiting", "failed") or not t.get("session_started"): return
+        if t["status"] not in ("waiting", "failed") or not t.get("session_started") or not agent_of(t).compact: return
         cmd = session_cmd(t) + ["--output-format", "json", "--resume", t["session_id"]]
         o = t["origin"]
         box = sandbox(t)   # 定时运行的会话压缩也在沙箱里：Claude 一启动就会在工作树里跑 git、读项目设置
@@ -876,14 +934,14 @@ def _directive(block):
     lst = lambda v: [x.strip() for x in re.split(r"[,，、;；]+", v) if x.strip() and x.strip() not in ("无", "没有", "-")]
     return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "closing": field("收口") == "是", "review_ok": "主人同意" in field("再审"),
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
-                  "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
+                  "agent": agents.ALIAS.get(field("智能体").lower(), ""), "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
                   "verify": verify, "verify_said": bool(field("验证")), "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
     """给人看的模型说明，没指定就是默认。"""
-    s = " · ".join(x for x in (t.get("role"), t.get("model"), t.get("effort") and "思考 " + t["effort"]) if x) or "默认模型"
+    s = " · ".join(x for x in (t.get("role"), agent_of(t).label if (t.get("agent") or "claude") != "claude" else "", t.get("model"), t.get("effort") and "思考 " + t["effort"]) if x) or "默认模型"
     return s + ("，云端执行" if t.get("exec") == "cloud" else "")
 
 # ---------- 后台运行 ----------
@@ -1102,10 +1160,10 @@ def _inst_files():
     ps = [os.path.join(ROOT, n) for n in sorted(os.listdir(ROOT)) if n.endswith(".py")] + [os.path.join(ROOT, n) for n in INST_KEEP] + [RULES]
     return [p for p in ps if os.path.exists(p)]
 
-def box_files(t):
+def box_files(t, no_claude=False):
     """沙箱里可写的本任务文件：发件箱；~/.claude.json 的副本（Claude 会写它，写进副本，不碰真的）。锁文件也先建好，箱里要盖掉。"""
     d = tdir(t["id"])
-    fs = {n: os.path.join(d, n) for n in ("outbox.jsonl", "claude.json", ".lock", ".outbox.lock")}
+    fs = {n: os.path.join(d, n) for n in ("outbox.jsonl", "claude.json", ".lock", ".outbox.lock") if not (no_claude and n == "claude.json")}
     for n, f in fs.items():
         if n == "claude.json":
             try:
@@ -1138,12 +1196,13 @@ def _sandbox(t):
     reads = _scope_reads(sc)
     wt, repo = _rp(t["worktree"]), _rp(t["repo"])
     path = [_rp(d) for d in os.environ.get("PATH", "").split(os.pathsep) if d]
-    cls = [os.path.dirname(os.path.realpath(os.path.join(d, "claude"))) for d in path if os.path.exists(os.path.join(d, "claude"))]
-    ro = [repo, cdir, _rp("~/.gitconfig"), _rp("~/.config/git")] + reads + path + cls + [os.path.realpath(sys.prefix)] + \
+    ag = agent_of(t)
+    cls = [] if ag.boxed else [os.path.dirname(os.path.realpath(os.path.join(d, "claude"))) for d in path if os.path.exists(os.path.join(d, "claude"))]
+    ro = [repo, *(ag.reads() if ag.boxed else [cdir]), _rp("~/.gitconfig"), _rp("~/.config/git")] + reads + path + cls + [os.path.realpath(sys.prefix)] + \
          [_rp(x) for x in T.get("sandbox_read") or []]   # 实例配置里额外只读放回的（装在家目录里的 MCP 服务器、工具链）
     ro = [p for p in dict.fromkeys(ro) if os.path.exists(p) and _under(p, hidden)]
-    covered = [os.path.join(cdir, d) for d in CLAUDE_STATE]   # 反正整个盖掉，不用看里面
-    keep, cover = _fit(ro + [wt], [repo, wt, cdir, *reads, *cls, os.path.realpath(sys.prefix)], reads, (cdir,), covered)
+    covered = [] if ag.boxed else [os.path.join(cdir, d) for d in CLAUDE_STATE]   # 反正整个盖掉，不用看里面
+    keep, cover = _fit(ro + [wt], [repo, wt, *([] if ag.boxed else [cdir]), *reads, *cls, os.path.realpath(sys.prefix)], reads, () if ag.boxed else (cdir,), covered)
     ro = [p for p in keep if p in ro]
     a = _box_base(bw, hidden) + sum((["--ro-bind", p, p] for p in ro), [])
     # 实例目录盖掉，按白名单放回：代码、钩子、角色、动作定义、守则、配置；别的（inbox 里的附件、logs、旁听名单、_tmp……）都看不到
@@ -1151,13 +1210,14 @@ def _sandbox(t):
     a += ["--tmpfs", ROOT] + sum((["--ro-bind", p, p] for p in _inst_files() + inside), [])
     a += ["--bind", wt, wt]   # 工作树是独立的 clone：只写它自己的 .git，主仓库的 .git 随仓库整个只读
     st = os.path.join(ROOT, "state")
-    fs = box_files(t)
+    fs = box_files(t, ag.boxed)
     a += ["--tmpfs", st] + sum((["--ro-bind", p, p] for p in (tdir(t["id"]), os.path.dirname(t["scope"])) if os.path.isdir(p)), [])
-    a += ["--bind", fs["outbox.jsonl"], fs["outbox.jsonl"], "--bind", fs["claude.json"], os.path.join(home, ".claude.json")]
+    a += ["--bind", fs["outbox.jsonl"], fs["outbox.jsonl"]] + ([] if ag.boxed else ["--bind", fs["claude.json"], os.path.join(home, ".claude.json")])
     a += sum((["--ro-bind", "/dev/null", fs[n]] for n in (".lock", ".outbox.lock")), [])   # 只读文件也能加锁：看得见就能占着锁卡住服务
     for w in T.get("sandbox_write") or []:   # 实例配置里额外给定时运行写的目录（构建缓存之类）
         w = _rp(w); os.makedirs(w, exist_ok=True); a += ["--bind", w, w]
     a += sum((["--tmpfs", p] for p in covered if os.path.isdir(p)), []) + cover
+    if ag.boxed: return a + ag.binds(_me(), t) + ["--remount-ro", st, "--remount-ro", ROOT]   # 别家的智能体看不到 Claude 的登录态和会话
     own = transcript_dir(wt); os.makedirs(own, exist_ok=True)
     prior = [transcript_dir(x["worktree"]) for x in all_tasks()
              if x["id"] != t["id"] and x.get("schedule") == t.get("schedule") and x.get("worktree")]
@@ -1190,6 +1250,7 @@ def _scope(t):
 
 def _to_ok(t, to):
     """定时运行只能投给范围里的“发给”（和只进记录的）。"""
+    if not t.get("schedule"): return   # 沙箱里的普通任务：投给谁照普通任务的规矩
     allow = _scope(t).get("to") or "主控"
     s = {"project": t.get("project")}
     if not dl.parse_target(to, s) or (to or "").strip() == "记录" or dl.parse_target(to, s) == dl.parse_target(allow, s): return
@@ -1450,7 +1511,7 @@ def make_worktree(t):
         if tg and git(repo, "rev-parse", "--verify", "--quiet", "origin/" + tg).returncode == 0: base = "origin/" + tg
         elif r.returncode == 0: base = r.stdout.strip()
         elif git(repo, "rev-parse", "--verify", "--quiet", "origin/main").returncode == 0: base = "origin/main"
-    if t.get("schedule"):
+    if t.get("schedule") or agent_of(t).boxed:
         sha = git(repo, "rev-parse", "--verify", "--quiet", base + "^{commit}").stdout.strip()
         r = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", repo, wt], capture_output=True, text=True)
         if r.returncode == 0: r = git(wt, "checkout", "-q", "-b", t["branch"], sha)
@@ -1628,6 +1689,7 @@ def part(t):
     return bool(t.get("plan")) and not t.get("closing")
 
 def mr_note(t, base):
+    if agent_of(t).boxed: return "。你在沙箱里，没有远端凭据：不用推送、不用建合并请求，验证过了服务替你做。没提交的改动不算数"
     if part(t): return "，不建合并请求（收口任务统一建）"
     return f"，再建草稿合并请求：在工作树里跑 `{mr_cmd(t, base)}`（GitHub、Codeup 都走它，凭据它自己读；不要直接读令牌或调平台接口）"
 
@@ -1657,8 +1719,20 @@ def run_env(t):
     """任务这一轮的环境：钩子按它判断。定时任务的一次运行按同事权限跑，范围文件交给钩子和沙箱（方案 6.6）。"""
     o = t["origin"]
     env = hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), t["id"])
+    if agent_of(t).boxed: env.update(agent_of(t).env(_me(), t))
     if t.get("schedule"): env.update(FCB_OWNER="0", FCB_SCHEDULE=t["schedule"], FCB_SCOPE=t.get("scope") or "")
     return env
+
+def agent_events(p, st, raw):
+    """读智能体的输出，翻成 Claude 的事件。适配层判出不对（st.trouble）就停掉进程，这一轮不算数。"""
+    stopped = False
+    for line in p.stdout:
+        if not (st.quiet and '"model.streaming"' in line): raw.write(line)   # 逐字的流不进日志
+        try: obj = json.loads(line)
+        except Exception: continue
+        for o in st.feed(obj):
+            if not (st.trouble and o.get("type") == "result"): yield o
+        if st.trouble and not stopped: p.terminate(); stopped = True   # 接着读完管道，不然对面写不完退不出去
 
 def run(tid):
     """后台单元的入口：跑一轮或几轮 Claude，把进展、提问、结果写成事件。"""
@@ -1672,6 +1746,9 @@ def run(tid):
             update(tid, status="waiting"); event(tid, "question", checkpoint_text(t, t.get("cost")))
             return
         fork = ""
+        if agent_of(t).boxed and not t.get("scope"):   # 沙箱按范围文件搭：这里是空范围，只看得到仓库和工作树
+            sp = os.path.join(tdir(tid), "scope.json"); fsio.write(sp, json.dumps({"read": [], "actions": [], "devices": []}))
+            t = update(tid, scope=sp)
         if not t.get("session_started"):
             base = make_worktree(t)
             update(tid, base=base)
@@ -1691,27 +1768,27 @@ def run(tid):
         late = 0
         while True:
             t = load(tid)
-            cmd = session_cmd(t) + ["--output-format", "stream-json", "--verbose"]
+            ag = agent_of(t)
             budget = t.get("budget") or T["budget_default"]
-            # 这一轮到检查点为止（CLI 按单次调用算）；停下后会话还在，加了预算接着跑
-            cmd += ["--max-budget-usd", f"{max(0.5, budget - (t.get('cost') or 0)):.2f}"]
-            if resume: cmd += ["--resume", t["session_id"]]
-            elif fork: cmd += ["--resume", fork, "--fork-session", "--session-id", t["session_id"]]
-            else: cmd += ["--session-id", t["session_id"]]
-            env = dict(run_env(t), **advisor_env(t))
+            env = dict(run_env(t), **ag.env(_me(), t))
             box = sandbox(t)
+            if box is None and ag.boxed:
+                prompt, resume = hand_over(tid, f"沙箱没搭成（{box_why(t)}）", "", "", False), False
+                continue
             if box is None: raise RuntimeError(f"定时任务要在沙箱里跑，可沙箱没搭成：{box_why(t)}。按失败交回，不降级成只写在提示里")
+            cmd, stdin = ag.command(_me(), t, prompt, resume, fork, box)
+            st, timer = ag.stream(_me(), t), None
             final, tools_n, last_u = None, t.get("tools", 0), {}
             with fsio.opened(os.path.join(tdir(tid), "stream.log")) as raw:
-                p = subprocess.Popen(box + cmd, cwd=t["worktree"], env=env, text=True,
+                p = subprocess.Popen(cmd, cwd=t["worktree"], env=env, text=True,
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=raw)
-                p.stdin.write(prompt); p.stdin.close()
-                for line in p.stdout:
-                    raw.write(line)
-                    try: obj = json.loads(line)
-                    except Exception: continue
+                p.stdin.write(stdin); p.stdin.close()
+                if ag.conf.get("max_min"):
+                    def _late(p=p, st=st, m=ag.conf["max_min"]): st.trouble = f"一轮超过 {m} 分钟"; p.terminate()
+                    timer = threading.Timer(float(ag.conf["max_min"]) * 60, _late); timer.daemon = True; timer.start()
+                for obj in agent_events(p, st, raw):
                     if obj.get("type") == "system" and obj.get("subtype") == "init" and not load(tid).get("session_started"):
-                        update(tid, session_started=True)   # CLI 已经建好会话才算开了；没起来的下一轮还按新会话开
+                        update(tid, session_started=True, **({"session_id": obj["session_id"]} if ag.boxed else {}))   # CLI 已经建好会话才算开了；没起来的下一轮还按新会话开
                     if obj.get("type") == "assistant":
                         if obj.get("parent_tool_use_id") is None and (obj.get("message") or {}).get("usage"):
                             last_u = obj["message"]["usage"]   # 最后一次调用的输入 = 现在的上下文大小（result 里的 usage 是整轮累计）
@@ -1731,17 +1808,24 @@ def run(tid):
                     elif obj.get("type") == "result":
                         final = obj
                 p.wait(); p.stdout.close()
-            if t.get("schedule"):
+                if timer: timer.cancel()
+            if t.get("scope"):
                 end = time.time() + 20   # 收尾：没办完的 bridge 接着办
                 while time.time() < end and outbox_drain(tid, budget=2): pass
                 why = clone_fetch(load(tid))
                 if why: decide("定时运行的分支没拉回主仓库", task=tid, branch=t["branch"], why=why)
             if final is None:
                 if (load(tid) or {}).get("status") != "running": return   # 被取消或判卡死停掉的，状态和事件已经写过
+                if ag.boxed and "killed by the OOM killer" not in unit_journal(load(tid) or {}):
+                    prompt, resume = hand_over(tid, f"{ag.label} 没跑完（{st.trouble or '多半是模型拥堵，重试用完了'}）", "", "", False), False
+                    continue
                 oom = "killed by the OOM killer" in unit_journal(load(tid) or {})
                 raise RuntimeError(f"Claude 异常退出（rc={p.returncode}）" + (
                     f"：任务单元内存到了上限（{(load(tid) or {}).get('mem_max', '')}），Claude 自己被系统杀了。多半是任务里跑的测试或构建失控，"
                     "接着干之前先查是哪条命令吃满了内存" if oom else f"，详情看 state/tasks/{tid}/stream.log"))
+            if final.get("agent_usage"):
+                au = (load(tid) or {}).get("agent_usage") or {}
+                update(tid, _touch=False, agent_usage={k: (au.get(k) or 0) + v for k, v in final["agent_usage"].items()})
             raw_total = final.get("total_cost_usd") or 0
             if load(tid).get("status") != "running":   # 跑的时候被取消或判卡死：结果和事件已经写过，只补记花费
                 total, prev = max(0.0, raw_total - (load(tid).get("cost_base") or 0)), load(tid).get("cost") or 0
@@ -1788,9 +1872,10 @@ def run(tid):
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
             verdict = handback_verdict(text, "Edit" in (roles().get(load(tid).get("role") or "", {}).get("deny") or []))
             cur = load(tid)
-            can_up = cur.get("auto_model") and not cur.get("escalated")
-            if verdict == "failed" and can_up and cur.get("verify_round"):   # 便宜模型认输：换贵的再来一次
-                prompt, resume = escalate(tid, "验证没过、它修不了", cur.get("verify_out", ""), text), False
+            can_up, up = cur.get("auto_model") and not cur.get("escalated"), escalate
+            if ag.boxed: can_up, up = True, hand_over   # 便宜的智能体只给一次机会，不过就换 Claude
+            if verdict == "failed" and can_up and (cur.get("verify_round") or ag.boxed):   # 便宜模型认输：换贵的再来一次
+                prompt, resume = up(tid, "验证没过、它修不了" if cur.get("verify_round") else "它按失败交回", cur.get("verify_out", ""), text), False
                 continue
             if verdict == "failed":   # 写了按失败交回：结束，交回主控，不占着这件事
                 update(tid, status="failed", verify_round=0); event(tid, "failed", text + note)
@@ -1816,8 +1901,8 @@ def run(tid):
                     rnd = t.get("verify_round", 0)
                     if not ok:
                         t = update(tid, verify_fails=t.get("verify_fails", 0) + 1, verify_out=out[-1500:])
-                        if can_up and rnd >= 1:
-                            prompt, resume = escalate(tid, f"验证 {rnd + 1} 次没过", out, text), False
+                        if can_up and (rnd >= 1 or ag.boxed):
+                            prompt, resume = up(tid, f"验证 {rnd + 1} 次没过", out, text), False
                             continue
                     if not ok and rnd < T["verify_retries"]:
                         update(tid, verify_round=rnd + 1)
@@ -1836,6 +1921,10 @@ def run(tid):
                     text = f"结论：PASS（服务复跑验证命令通过：{t['verify']}）" + accept_note(t) + f"\n\n{text}"
                 else:
                     text = "结论：没定验证命令，服务没复核" + accept_note(t) + "\n\n" + text
+                if ag.boxed:
+                    why = clone_fetch(load(tid))
+                    text += "\n\n" + (f"分支没拉回主仓库：{why}" if why else agent_publish(load(tid), text))
+                    if not load(tid).get("agent_out"): update(tid, agent_out="pass")
                 update(tid, status="done", finished=time.time(), verify_round=0); event(tid, "done", text + note)
             return
     except Exception as e:
@@ -2115,6 +2204,8 @@ def diag_text(s=""):
     else:
         act = [t for t in all_tasks() if t["status"] in ACTIVE]
         out.append("在跑的任务：" + ("、".join(f"{ref(t)}（{LABEL.get(t['status'])}）" for t in act) or "没有"))
+    pilot = agents.report(_me())
+    if pilot and not s: out.append(pilot)
     try:
         lines = open(os.path.join(ROOT, "logs", "bridge.log"), encoding="utf-8", errors="replace").read().splitlines()[-3000:]
         bad = [l[:200] for l in lines if " ERROR " in l or " WARNING " in l][-8:]
