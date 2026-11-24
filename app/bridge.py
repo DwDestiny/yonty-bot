@@ -1432,7 +1432,7 @@ def task_tick():
             task_say(t, f"{tasks.ref(t)} 等了 {tasks.T['approval_hours']} 小时没人批，作废了。", f"t{n}x")
         elif st == "running" and now - (t.get("launched") or now) > 20 and not tasks.alive(t):
             if tasks.load(n)["status"] == "running":   # 进程没了，也没写结果
-                tasks.update(n, status="lost"); tasks.event(n, "lost", tasks.lost_text(t))
+                tasks.charge_killed(n); tasks.update(n, status="lost"); tasks.event(n, "lost", tasks.lost_text(t))
         elif st == "running" and t.get("exec") == "cloud" and t.get("cloud"):
             if now - cloud_polled.get(n, 0) > CLOUD_POLL_S:   # 查分支头，不花 token
                 cloud_polled[n] = now

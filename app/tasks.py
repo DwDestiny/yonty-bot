@@ -866,7 +866,7 @@ def _directive(block):
     bm2 = re.match(r"\s*(\d+(?:\.\d+)?)\s*[（(,，:：]?\s*(.*?)[）)]?\s*$", bv)
     budget = float(bm2.group(1)) if bm2 and float(bm2.group(1)) > 0 else 0
     lst = lambda v: [x.strip() for x in re.split(r"[,，、;；]+", v) if x.strip() and x.strip() not in ("无", "没有", "-")]
-    return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "closing": field("收口") == "是",
+    return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "closing": field("收口") == "是", "review_ok": "主人同意" in field("再审"),
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
@@ -1389,6 +1389,37 @@ def stop(t):
     elif t.get("pid"):
         try: os.killpg(t["pid"], signal.SIGTERM); os.killpg(t["pid"], signal.SIGCONT)   # 冻着的进程组收到 SIGCONT 才处理 SIGTERM
         except OSError: pass
+    charge_killed(t["id"])
+
+# 每百万 token 的标价（输入、输出、缓存读、写 1 小时、写 5 分钟），2026-11-24 用 CLI 自报的 modelUsage 反推核对（5 分钟写按标价）。只用来估没跑完那一轮
+KILL_PRICE = {"opus": (4, 20, .2, 8, 5), "sonnet": (2, 10, .1, 4, 2.5), "haiku": (.1, .5, .01, .2, .125), "fable": (8, 40, .8, 16, 10)}
+
+def charge_killed(tid):
+    """被停掉的那一轮没有 result，CLI 不报花费：按 stream.log 里最后一个 result 之后的用量估一笔，免得取消的任务白花不记账。
+    顾问的花费和没写完的输出不在里面，是下限。之后续接时 CLI 报的累计跟 cost 取大，不会重复算；累计里没含这一轮时会少记，不会多记。"""
+    try:
+        t = load(tid) or {}
+        msgs, seen = {}, t.get("killed_ids") or []
+        with open(os.path.join(tdir(tid), "stream.log"), encoding="utf-8", errors="replace") as f:
+            for l in f:
+                try: o = json.loads(l)
+                except ValueError: continue
+                if o.get("type") == "result": msgs = {}
+                m = o.get("message") if o.get("type") == "assistant" else None
+                if m and m.get("id") and m.get("usage"): msgs[m["id"]] = m
+        usd, ids = 0.0, []
+        for i, m in msgs.items():
+            p = next((v for k, v in KILL_PRICE.items() if k in (m.get("model") or "")), None)
+            if not p or i in seen: continue
+            u, ids = m["usage"], ids + [i]
+            w5 = (u.get("cache_creation") or {}).get("ephemeral_5m_input_tokens") or 0
+            w1 = max(0, (u.get("cache_creation_input_tokens") or 0) - w5)
+            usd += ((u.get("input_tokens") or 0) * p[0] + (u.get("output_tokens") or 0) * p[1] + (u.get("cache_read_input_tokens") or 0) * p[2] + w1 * p[3] + w5 * p[4]) / 1e6
+        if not usd: return
+        spend_add(tid, usd)
+        update(tid, _touch=False, cost=round((t.get("cost") or 0) + usd, 3), killed_ids=(seen + ids)[-400:])
+    except FileNotFoundError: pass
+    except Exception as e: decide("没跑完的一轮没记账", task=tid, why=f"{type(e).__name__}: {e}")
 
 def bjtime(fmt="%m-%d %H:%M", ts=None):
     """按实例的 timezone（默认北京时间）格式化时间；服务器时区是 UTC 也不影响按天算的限额、给人看的时间。"""
@@ -1703,8 +1734,11 @@ def run(tid):
                 raise RuntimeError(f"Claude 异常退出（rc={p.returncode}）" + (
                     f"：任务单元内存到了上限（{(load(tid) or {}).get('mem_max', '')}），Claude 自己被系统杀了。多半是任务里跑的测试或构建失控，"
                     "接着干之前先查是哪条命令吃满了内存" if oom else f"，详情看 state/tasks/{tid}/stream.log"))
-            if load(tid).get("status") != "running": return   # 跑的时候被取消或判卡死：结果和事件已经写过
             raw_total = final.get("total_cost_usd") or 0
+            if load(tid).get("status") != "running":   # 跑的时候被取消或判卡死：结果和事件已经写过，只补记花费
+                total, prev = max(0.0, raw_total - (load(tid).get("cost_base") or 0)), load(tid).get("cost") or 0
+                if total > prev: spend_add(tid, total - prev); update(tid, _touch=False, cost=round(total, 3))
+                return
             text = final.get("result") or ""
             text = "\n".join(l for l in text.splitlines() if not re.match(r"\s*\[进展\]", l)).strip()
             text, notes = split_handoff(text)
