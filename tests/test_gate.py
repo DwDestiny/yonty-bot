@@ -364,6 +364,8 @@ class FeishuTaskTest(unittest.TestCase):
         for _ in range(3): tick([t, h])
         full = [d['task'] for d in self.sent('/tasks/g') if 'description' in (d.get('task') or {})]
         live, hist = [x for x in full if 'completed_at' not in x], [x for x in full if 'completed_at' in x]
+        zero = [i for i, (m, p, d) in enumerate(self.lark.calls) if ((d or {}).get('task') or {}).get('completed_at') == '0']
+        self.assertEqual(len(zero), 1); self.assertEqual(self.lark.calls[zero[0] + 1][2]['task'], hist[0])   # 已完成的先置零再写
         self.assertEqual((len(live), len(hist)), (1, 1))                                   # 没变不重写
         self.assertEqual((live[0]['start']['timestamp'], hist[0]['due']['timestamp'], hist[0]['completed_at']), ('1000000', '2000000', '2000000'))
         self.assertEqual([c.get('number_value') or c['text_value'] for c in live[0]['custom_fields']], ['1.50', 'sonnet'])

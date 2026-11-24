@@ -199,13 +199,18 @@ class FeishuTasks:
         self.lists["_history_done"] = True; self.save(self.lists_path, self.lists)
 
     def refill(self, tasks):
-        """以前补进来、字段还不全的历史任务，一次补 5 条。"""
+        """已经勾掉、字段还不全的任务，一次补 5 条；哪条补不了就记一行、跳过，不挡后面的。"""
         n = 0
         for g, r in list(self.st.items()):
-            if not r.get("hist") or r.get("filled") or not self.meta: continue
+            if not r.get("own") or not r.get("closed") or r.get("user_closed") or r.get("filled") or not self.meta: continue
             if n >= 5: return
             n += 1; ts = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
-            self.own_lists(); self.fill(g, r, ts, True); r["filled"] = "1"; self._save()
+            self.own_lists()
+            try: self.fill(g, r, ts, True, True)
+            except Exception as e:
+                r["fill_fail"] = (r.get("fill_fail") or 0) + 1; self.log.warning("feishu task %s not filled: %s", g, str(e)[:200])
+                if r["fill_fail"] < 3: self._save(); continue
+            r["filled"] = "1"; self._save()
 
     def custom(self, lst, values):
         """清单上的自定义字段（没有就建），返回写任务要的格式。values：{名字: 值}，数字建成数字字段，别的是文本。"""
@@ -223,8 +228,8 @@ class FeishuTasks:
             out.append({"guid": self.lists[k], **({"number_value": f"{v:.2f}"} if isinstance(v, (int, float)) else {"text_value": str(v)[:1000]})})
         return out
 
-    def fill(self, guid, rec, ts, final):
-        """把能给的字段都写上：说明、开始时间、自定义字段；final 再加结束时间（截止和完成时间）。时间戳是绝对时间，飞书按看的人的时区显示。"""
+    def fill(self, guid, rec, ts, final, done=False):
+        """把能给的字段都写上：说明、开始时间、自定义字段；final 再加结束时间（截止和完成时间）；done：飞书里已经勾完成的，要先置零才能改完成时间。时间戳是绝对时间，飞书按看的人的时区显示。"""
         if not self.meta or not ts: return
         m = self.meta(ts)
         task = {"description": m["desc"][:2900]}
@@ -235,6 +240,9 @@ class FeishuTasks:
         if rec.get("lists"):
             try: task["custom_fields"] = self.custom(rec["lists"][0], m["custom"])
             except Exception as e: self.log.warning("feishu custom fields not ready: %s", str(e)[:200])
+        if done and final:
+            if rec.get("hist"): self.api("PATCH", f"/tasks/{guid}", {"task": {"completed_at": "0"}, "update_fields": ["completed_at"]})
+            else: task.pop("completed_at")   # 主人关注着的不来回勾，免得提醒
         self.api("PATCH", f"/tasks/{guid}", {"task": task, "update_fields": list(task)})
 
     def covers(self, now=None):
