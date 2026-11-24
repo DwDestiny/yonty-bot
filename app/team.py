@@ -73,6 +73,23 @@ def set_held(project, on):
 # ---------- 方案 ----------
 ITEM = re.compile(r"^\s*[-*]\s+(.+)$")
 
+def vouch_plan(project, name):
+    """主人私聊里交代的活、带主人身份的那一轮登记的方案：记下任务单，接着派只认这里面的标题。"""
+    p = plan_of(project, name)
+    if p: _change(lambda st: st.setdefault("vouched", {}).setdefault(project, {}).__setitem__(name, list(p["items"])))
+
+def vouched(project, name): return ((load().get("vouched") or {}).get(project) or {}).get(name) or []
+
+LIVE_RELEASE = re.compile(r"stable|正式|生产|production|prod\b|上线", re.I)
+
+def follow_gate(project, d):
+    """项目经理接着派（主控办完事转回来的，主人没亲口说话）：只派登记时带主人身份的方案里列明的任务。返回不放行的原因，空串放行。"""
+    if d["title"] not in vouched(project, d["plan"]): return f"“{d['title']}”不在主人交代过的方案任务单里，要主人点头"
+    if LIVE_RELEASE.search(d["title"]): return f"“{d['title']}”是正式发布，要主人点头"
+    if d.get("budget"): return f"“{d['title']}”写了预算：接着派不能自己定预算，去掉“预算:”按默认，要加预算找主人"
+    if d.get("review_ok") or d.get("forced"): return f"“{d['title']}”写了“主人同意”“主人指定”：这一轮主人没说过话"
+    return ""
+
 def plan_of(project, name): return ((load().get("plans") or {}).get(project) or {}).get(name)
 
 def save_plan(project, name, body):

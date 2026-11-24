@@ -241,6 +241,67 @@ class LostDispatchTest(Base):
         self.t.update(t['id'], _force=True, status='running'); self.b.save(self.b.STALL_FILE, {}); self.b.stall_tick(); self.assertNotIn('proj', self.b.stall_seen)
 
 
+class FollowPlanTest(Base):
+    """主人 2026-11-24 同意：主控办完项目经理请办的事，项目经理按主人交代过的方案接着派。三个条件：主人私聊交代、方案已登记、任务在方案里列明。"""
+    P2 = '[方案] 发版\n任务:\n- 打包 | src/p |\n- 发 stable | src/s |\n[/方案]\n'
+    def start(self, ctrl, pm, plan=None):
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
+        t = self.by('甲'); self.t.update(t['id'], status='done'); self.t.event(t['id'], 'done', '结论：PASS')
+        self.layers(ctrl, [(self.P2 if plan is None else plan) + '[投递 主控 节点]\n请合并'] + pm)
+        self.e.tick()
+        for _ in range(4):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+
+    def titles(self): return [t['title'] for t in self.new()]
+    def rel(self, title, extra=''):
+        return block(self.e.repo, title, 'src/p').replace('方案: 整改', '方案: 发版').replace('角色: 开发', '角色: 开发' + extra)
+
+    def test_continues_without_owner_word(self):
+        self.start(['[转交] proj\n合好了 abc'], [self.rel('打包') + '[/派活]\n[看板] 已派打包'])
+        self.assertEqual(self.titles(), ['甲', '打包']); x = self.by('打包')
+        self.assertEqual(x['status'] in ('approved', 'running'), True); self.assertTrue(x['requester']['owner'])
+        turn = [s for s in self.e.streams if '合好了 abc' in s['prompt']][-1]
+        self.assertEqual(turn['env']['FCB_OWNER'], '0')                                    # 那一轮本身不带主人权限
+
+    def test_unlisted_stable_budget_review_refused(self):
+        for title, extra, why in (('丁', '', '不在方案'), ('发 stable', '', '正式发布'), ('打包', '\n预算: 50', '预算'), ('打包', '\n再审: 主人同意', '主人同意')):
+            with self.subTest(title + extra):
+                self.setUp()
+                self.start(['[转交] proj\n合好了'], [self.rel(title, extra), '[投递 主控 问题]\n要点头'])
+                self.assertEqual(self.titles(), ['甲'])
+                self.assertTrue(any('[服务回执]' in p and why in p for p in self.pm_prompts()), why)
+
+    def test_plan_registered_in_follow_turn_does_not_count(self):
+        self.start(['[转交] proj\n合好了'], [self.P2 + self.rel('打包'), self.P2 + '[投递 主控 问题]\n要点头'], plan='')
+        self.assertEqual(self.titles(), ['甲'])
+        self.assertEqual(self.b.team.vouched('proj', '发版'), [])
+
+    def test_other_marks_not_run(self):
+        self.start(['[转交] proj\n合好了'], [f'[取消任务] {self.t.ref(self.seed)} 试试', '[不回]'])
+        self.assertTrue(any('[服务回执]' in p and '[取消任务]' in p for p in self.pm_prompts()))
+
+    def test_command_line_and_forged_records_do_not_follow(self):
+        src = {'channel': 'feishu', 'chat_id': 'oc_p', 'chat_type': 'p2p', 'message_id': 'om_x', 'sender_id': self.b.OWNER_OPEN_ID}
+        self.start([], []); n = len(self.new()); key = self.t.dl.KEY
+        self.t.dl.KEY = None   # 命令行进程里没有签名的钥匙
+        try: self.t.dl.submit(self.t, {'type': 'ctrl', 'ref': '主控', 'label': '主控', 'key': 'p2p:oc_p', 'owner': True, 'hop': 1}, '项目经理 proj', '留言', '伪造', extra={'follow': True, 'src_im': src}, trusted=True)
+        finally: self.t.dl.KEY = key
+        self.layers([], [self.rel('打包'), '[不回]'])
+        for _ in range(3):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+        self.assertEqual(len([t for t in self.new() if t['status'] != 'pending']), n)
+
+    def test_tampered_record_loses_signature(self):
+        self.b.tasks.dl.submit(self.t, {'type': 'ctrl', 'ref': '主控', 'label': '主控', 'key': 'p2p:oc_p', 'owner': False, 'hop': 1}, '项目经理 proj', '留言', 'x', 1, False, {'follow': True, 'src_im': {'sender_id': 'a'}}, trusted=True)
+        r = self.b.tasks.dl.load(self.t)[-1]; self.assertTrue(self.b.tasks.dl.follows(r))
+        self.assertFalse(self.b.tasks.dl.follows(dict(r, src_im={'sender_id': 'b'}))); self.assertFalse(self.b.tasks.dl.follows({k: v for k, v in r.items() if k != 'sig'}))
+
+    def test_coworker_chain_cannot_follow(self):
+        self.assertIsNone(self.b.follow_src([{'id': 1, 'ts': 1, 'to': {}, 'kind': '节点', 'follow': True, 'from': {'type': 'pm', 'owner': True, 'key': 'proj:proj:p2p:oc_p'}, 'sig': 'x'}], None))
+        self.assertFalse(self.b.follow_ok({'channel': 'feishu', 'sender_id': A.MATE, 'chat_type': 'p2p', 'message_id': 'm'}))
+        self.assertFalse(self.b.follow_ok({'channel': 'feishu', 'sender_id': self.b.OWNER_OPEN_ID, 'chat_type': 'group', 'message_id': 'm'}))
+
+
 class HoldTest(Base):
     def start(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '丙', 'src/c', '甲')])
