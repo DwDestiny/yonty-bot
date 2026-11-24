@@ -313,11 +313,30 @@ class FeishuTaskTest(unittest.TestCase):
         self.f.on_event(e); self.f.on_event(e)
         self.assertEqual(len(self.sub), 2); self.assertIn('改成表格', self.sub[1][3]); self.assertNotIn('删库', self.sub[1][3])
 
+    def test_agents_own_list_is_not_someone_elses(self):
+        self.lark.task['tasklists'] = [{'tasklist_guid': 'L'}]
+        self.f.on_event(self.ev); self.assertEqual(self.sub, [])
+        self.f.st['g0'] = {'at': time.time(), 'own': True}                 # 服务自己建的任务也挂着 L
+        self.f.on_event(dict(self.ev, event={'task_guid': 'G3', 'event_types': ['task_create']})); self.assertEqual(len(self.sub), 1)
+
+    def test_steps_limited_still_marks_doing(self):
+        self.f.on_event(self.ev)
+        real = self.f.api
+        def api(m, p, d=None, **k):
+            if 'append' in p: raise RuntimeError('99991400')
+            return real(m, p, d, **k)
+        self.f.api = api
+        t = {'id': 7, 'status': 'running', 'turn': 1, 'title': 'x', 'origin': {'message_id': 'om1'}, 'updated': 1}
+        self.tick([t]); self.assertEqual(self.sent('/tasks/G')[0]['task']['agent_task_status'], 2)
+        self.f.api = real; self.f.st['G'].pop('retry'); self.tick([t]); self.assertEqual(len(self.sent('append')), 1)   # 补写
+
     def test_status_written_by_service(self):
         self.f.on_event(self.ev)
         t = {'id': 7, 'status': 'running', 'turn': 1, 'title': 'x', 'origin': {'message_id': 'om1'}, 'updated': time.time() - 999, 'prog': ['改完了']}
         self.tick([t]); self.tick([t])
-        self.assertEqual([d['task_steps'][0]['content'] for d in self.sent('append_task_steps')], ['p#7 running：x', 'p#7 改完了'])
+        got = self.sent('append_task_steps')
+        self.assertEqual([[s['content'] for s in d['task_steps']] for d in got], [['p#7 running：x', 'p#7 改完了']])   # 一次写一批
+        self.assertGreater(got[0]['task_steps'][0]['timestamp'], 10 ** 12)                                             # 毫秒
         self.tick([dict(t, status='done')])
         self.assertEqual([d['task']['agent_task_status'] for d in self.sent('/tasks/G')], [2, 4])
         self.assertEqual(len(self.sent('/comments')), 1)
