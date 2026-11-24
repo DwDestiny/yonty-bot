@@ -30,7 +30,7 @@ def conf(cfg): return dict(DEFAULTS, **(cfg.get("delivery") or {}))
 
 def _mac(rec):
     body = json.dumps([rec["id"], rec["ts"], rec["from"], rec["to"], rec["kind"], rec.get("text"), rec.get("full"),
-                       rec.get("hop"), rec.get("need"), rec.get("about"), rec.get("im")],
+                       rec.get("hop"), rec.get("need"), rec.get("about"), rec.get("im"), rec.get("follow"), rec.get("src_im")],
                       ensure_ascii=False, sort_keys=True)
     return hmac.new(KEY, body.encode(), hashlib.sha256).hexdigest()
 
@@ -39,6 +39,10 @@ def signed(rec):
     """这条记录是本进程（bridge）写的，没被改过，也不是送完又改回来的。"""
     return bool(KEY and rec.get("sig") and rec["sig"] not in USED and hmac.compare_digest(str(rec["sig"]), _mac(rec)))
 
+
+def follows(rec):
+    """接着派的一环：bridge 自己写的（签名对得上），而且是主人身份成立的那一轮，或者从那一轮传下来的。"""
+    return signed(rec) and bool(rec["from"].get("owner") or rec.get("follow"))
 
 def vouched_owner(rec):
     """这条投递送的时候能不能带主人身份：发送方是主人，而且是 bridge 自己写的（签名对得上）。
@@ -177,8 +181,9 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
     if tg["to"] == "项目经理" and not tg.get("project"):
         reroute("主控", "没有项目")
     nh, now = hop + 1, time.time()   # 服务给每次投递的跳数自动加一：人发的消息触发的那一轮是 0
-    if nh > c["max_hops"] and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
-        why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {c['max_hops']} 跳（delivery.max_hops）"
+    lim_h = c["max_hops"] * (2 if trusted and (extra or {}).get("follow") else 1)   # 主控和项目经理按方案接着派：一来一回就两跳，放宽一倍
+    if nh > lim_h and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
+        why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {lim_h} 跳（delivery.max_hops）"
         if sender["type"] == "ctrl" and tg["to"] == "项目经理" and (sender.get("key") or "").startswith("p2p:"):   # 没人会看运行记录，流程就断在这里：改发主人私聊
             text = f"主控给 {tg.get('project')} 项目经理的留言没送到（转了 {nh} 次，到上限），流程停在这里：{text}\n要接着就回“继续 {tg.get('project')}”。"
             reroute("主人", why + "，改发主人私聊，别再说已经交给项目经理")
