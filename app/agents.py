@@ -179,7 +179,7 @@ def pick(tk, d, pm, owner, ex):
             else "要有验证命令" if not d.get("verify") else "不配独立验收" if d.get("accept") else "主人指定了模型" if d.get("forced")
             else "收口的活不接" if d.get("closing") else "这个仓库不在试点里" if tk._real(d.get("repo")) not in repos else "本机没装好" if not z.ready() else "")
     if hard: return {}, hard
-    if not pm.get("auto_model"): return {}, "要用更强的模型"
+    if not pm.get("auto_model") or pm.get("model") == "opus": return {}, "要用更强的模型"
     if sum(t.get("agent_out") == "infra" for t in tk.all_tasks() if t.get("agent_first") == "zcode") >= 5: return {}, "没跑成的满 5 个，先查原因"
     n, end, ok = stats(tk); trial, floor = int(z.conf.get("trial", 10)), float(z.conf.get("min_pass", 0.7))
     if end >= trial and ok / end < floor: return {}, f"试点停了：{end} 个里一次过 {ok} 个，不到 {floor:.0%}"

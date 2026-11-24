@@ -146,13 +146,27 @@ def update(tid, _force=False, _touch=True, **kv):
         fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
         return t
 
+# 三档：1 sonnet medium（sonnet 不用更高的思考档，不如直接换 opus medium）；2 opus medium，大多数难活；3 opus xhigh，前两档解决不了的疑难（max 只在主人点名时用）
+TIERS = ({"model": "sonnet", "effort": "medium"}, {"model": "opus", "effort": "medium"}, {"model": "opus", "effort": "xhigh"})
+def next_tier(t):
+    """验证没过、认输之后换到哪一档；到顶了返回 None。"""
+    if t.get("model") != "opus": return TIERS[1]
+    return None if t.get("effort") in ("xhigh", "max") else TIERS[2]
+
+def cap_tier(model, effort):
+    """会话写的模型和思考档收进三档：sonnet 写了 high 以上改成 opus medium；opus 写 high 改成 medium。xhigh、max 是疑难档，照写的。"""
+    if model == "sonnet" and effort in ("high", "xhigh", "max"): return "opus", "medium"
+    if model == "opus" and effort == "high": return "opus", "medium"
+    return model, effort
+
 AUTO_ROLES = ("", "开发")   # 这些角色的模型由服务定：有验证命令、在本机跑的先用 sonnet，验证过不了再换 opus
 def pick_model(role, verify, ex, model="", effort="", forced=False):
     """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
     除非主人的话派的、写明“主人指定”。没有验证命令或云端跑的没有自动换人的机会，照原来的：写了听写的，没写用角色模板。"""
     if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
+        if not forced: model, effort = cap_tier(model, effort)
         return {"model": model, "effort": effort, "auto_model": False}
-    return {"model": "sonnet", "effort": "high", "auto_model": True}
+    return dict(TIERS[0], auto_model=True)
 
 def sibling_drop(t, model):
     """验证没过、换了人的会话不再拿来分叉。"""
@@ -166,19 +180,19 @@ def sibling_drop(t, model):
         fsio.write_json(p, s, 1)
 
 def escalate(tid, why, out, text):
-    """sonnet 返工后还是没过：换 opus 开新会话，在同一个工作树、同一个分支上接着做。返回新会话的首条提示。"""
+    """返工后还是没过：换高一档（sonnet → opus medium → opus xhigh）开新会话，在同一个工作树、同一个分支上接着做。返回新会话的首条提示。"""
     t = load(tid)
     sibling_drop(t, t.get("model"))
     got = [x for x in inbox_items(tid) if x.get("kind", "指令") == "指令"]
-    note = (f"\n[换人接手] 这个任务先由 {t.get('model')} 做，{why}，现在换你。分支上已有的提交和没提交的改动都在工作树里，先看 git log、git diff 再动手，"
+    note = (f"\n[换人接手] 这个任务先由 {t.get('model')}（思考 {t.get('effort')}）做，{why}，现在换你。分支上已有的提交和没提交的改动都在工作树里，先看 git log、git diff 再动手，"
             f"方向不对就改掉重来。\n" + (f"之前的负责人收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
             + f"验证命令：{t.get('verify')}\n最近一次输出末尾：\n{out[-1500:]}\n之前的负责人最后写的：\n{text[-1500:]}\n")
-    cost = t.get("cost") or 0
-    kw = {} if (t.get("budget_why") or "").startswith("主控估") else {"budget": round(max(t.get("budget") or 0, cost + budget_basis(t.get("role"), "opus")[0]), 1)}
-    t = update(tid, model="opus", effort="high", escalated=True, verify_round=0, session_id=str(uuid.uuid4()), session_started=False,
+    cost, up = t.get("cost") or 0, next_tier(t)
+    kw = {} if (t.get("budget_why") or "").startswith("主控估") else {"budget": round(max(t.get("budget") or 0, cost + budget_basis(t.get("role"), "opus")[0] * (2 if up["effort"] == "xhigh" else 1)), 1)}
+    t = update(tid, **up, escalated=True, tier_ups=(t.get("tier_ups") or 0) + 1, verify_round=0, session_id=str(uuid.uuid4()), session_started=False,
                forked_from="", cost_base=-cost, takeover=note, **kw)
     decide("换模型接手", task=ref(t), why=why)
-    event(tid, "progress", f"{why}，换 opus 接手。")
+    event(tid, "progress", f"{why}，换 {up['model']}（思考 {up['effort']}）接手。")
     return first_prompt(t, t.get("base", ""), False) + (t.get("accept_notice") or "")
 
 def hand_over(tid, why, out, text, ask=True):
@@ -195,7 +209,7 @@ def hand_over(tid, why, out, text, ask=True):
         note = "（它没能写摘要，下面是服务按 git 记录补的）\n" + cut(git(t["worktree"], "log", "--oneline", f"{base}..HEAD").stdout + git(t["worktree"], "diff", "--stat", f"{base}...HEAD").stdout, 2500) \
                + "待办清单：" + "；".join(f"{x.get('content')}（{x.get('status')}）" for x in t.get("todos") or []) + f"\n它最后写的：\n{text[-1500:]}"
     got = [x for x in inbox_items(tid) if x.get("kind", "指令") == "指令"]
-    back, old = t.get("agent_back") or {"model": "sonnet", "effort": "high"}, agent_of(t).label
+    back, old = t.get("agent_back") or TIERS[0], agent_of(t).label
     takeover = (f"\n[换人接手] 这个任务先由 {old}（{t.get('model')}）做，{why}，现在换你开新会话接手。它没提交的改动已经存成一个“wip”提交，"
                 f"提交历史要干净就自己整理。先看 git log、git diff 再动手，方向不对就改掉重来。你不在它的沙箱里，推送和合并请求照任务说明自己做。\n"
                 + (f"之前收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
@@ -1886,7 +1900,7 @@ def run(tid):
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
             verdict = handback_verdict(text, "Edit" in (roles().get(load(tid).get("role") or "", {}).get("deny") or []))
             cur = load(tid)
-            can_up, up = cur.get("auto_model") and not cur.get("escalated"), escalate
+            can_up, up = cur.get("auto_model") and bool(next_tier(cur)), escalate
             if ag.boxed: can_up, up = True, hand_over   # 便宜的智能体只给一次机会，不过就换 Claude
             if verdict == "failed" and can_up and (cur.get("verify_round") or ag.boxed):   # 便宜模型认输：换贵的再来一次
                 prompt, resume = up(tid, "验证没过、它修不了" if cur.get("verify_round") else "它按失败交回", cur.get("verify_out", ""), text), False

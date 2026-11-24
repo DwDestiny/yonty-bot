@@ -12,6 +12,7 @@ import test_accept_flow as A
 
 
 def block(repo, title, files='', deps='', closing=False, plan='整改', brief='做'):
+    if brief == '做': brief = '做\n已核实: 读过代码\n边界: 空、失败照旧\n验收: true\n交回: 输出'
     return (f"[派活]\n仓库: {repo}\n方案: {plan}\n标题: {title}\n" + (f"文件: {files}\n" if files else '') + (f"依赖: {deps}\n" if deps else '')
             + ("收口: 是\n" if closing else '') + f"角色: 开发\n验证: true\n任务书:\n{brief}\n[/派活]\n")
 
@@ -240,6 +241,24 @@ class LostDispatchTest(Base):
         self.b.stall_tick(); self.b.stall_tick()
         self.assertEqual(len(posts), 1); self.assertIn('乙', posts[0]); self.assertNotIn('甲', posts[0].split('没派')[1].split('）')[0])
         self.t.update(t['id'], _force=True, status='running'); self.b.save(self.b.STALL_FILE, {}); self.b.stall_tick(); self.assertNotIn('proj', self.b.stall_seen)
+
+
+class BriefTest(Base):
+    """2026-11-24 逐条看过的返工：约四成主要是任务书没核实、没列边界、没给验收办法。缺了就退回，不悄悄派出去。"""
+    def test_missing_parts_refused(self):
+        TM = self.b.team; d = {'title': '甲', 'plan': '整改', 'role': '开发', 'verify': 'true', 'files': ['src/a'], 'deps': []}
+        TM.save_plan('proj', '整改', '任务:\n- 甲 | src/a |\n')
+        g = lambda brief, **k: TM.gate(self.t, 'proj', dict(d, brief=brief, **k), TM.conf({}))
+        full = '做\n**已核实**: a.py:3 会崩\n边界：空表照旧\n验收:\n1. 空表不报错\n2. 用 demo 账号点一遍\n交回: 输出'
+        self.assertEqual(g(full), '')
+        for h in TM.BRIEF_HEADS: self.assertIn('“' + h + '”', g(full.replace(h, '别的')))
+        self.assertIn('缺“边界”', g(full.replace('空表照旧', ''))); self.assertIn('缺“交回”', g(full.replace('交回: 输出', '交回:')))
+        self.assertEqual(g('只看', role='评审'), ''); self.assertNotIn('缺“', g('合', closing=True))
+        self.assertEqual(TM.gate(self.t, 'proj', dict(d, brief='做'), TM.conf({'team': {'brief_check': False}})), '')
+
+    def test_receipt_asks_rewrite(self):
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a', brief='照着做'), PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工')
+        self.assertEqual([t['title'] for t in self.new()], ['甲']); self.assertTrue(any('[服务回执]' in p and '任务书缺' in p for p in self.pm_prompts()))
 
 
 class FollowPlanTest(Base):
