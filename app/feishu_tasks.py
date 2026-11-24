@@ -202,9 +202,11 @@ class FeishuTasks:
         """已经勾掉、字段还不全的任务，一次补 5 条；哪条补不了就记一行、跳过，不挡后面的。"""
         n = 0
         for g, r in list(self.st.items()):
-            if not r.get("own") or not r.get("closed") or r.get("user_closed") or r.get("filled") or not self.meta: continue
+            if not r.get("own") or not r.get("closed") or r.get("filled") or not self.meta: continue
+            ts = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
+            if any(t["status"] not in ENDED for t in ts): continue   # 主人提前勾掉、活还没完的，等完了再补
             if n >= 5: return
-            n += 1; ts = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
+            n += 1
             self.own_lists()
             try: self.fill(g, r, ts, True, True)
             except Exception as e:

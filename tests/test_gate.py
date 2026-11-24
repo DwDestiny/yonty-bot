@@ -369,6 +369,11 @@ class FeishuTaskTest(unittest.TestCase):
         self.assertEqual((len(live), len(hist)), (1, 1))                                   # 没变不重写
         self.assertEqual((live[0]['start']['timestamp'], hist[0]['due']['timestamp'], hist[0]['completed_at']), ('1000000', '2000000', '2000000'))
         self.assertEqual([c.get('number_value') or c['text_value'] for c in live[0]['custom_fields']], ['1.50', 'sonnet'])
+        self.f.st['g1'].update(closed=True, user_closed=True, filled=None); before = len(self.sent('/tasks/g1'))
+        tick([t, h]); self.assertEqual(len(self.sent('/tasks/g1')), before)                # 主人提前勾掉，活没完：先不写
+        tick([dict(t, status='done'), h]); got = self.sent('/tasks/g1')[before:]
+        self.assertEqual(len(got), 1); self.assertIn('due', got[0]['task']); self.assertNotIn('completed_at', got[0]['task'])   # 完了补字段，不动勾选
+        self.f.st['g1'].update(closed=False, user_closed=False, filled=None)
         tick([dict(t, status='done'), h]); self.assertTrue(self.f.st['g1']['closed'])
         self.assertEqual(sum('completed_at' in (d.get('task') or {}) for d in self.sent('/tasks/g1')), 1)
 
