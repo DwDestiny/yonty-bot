@@ -199,7 +199,8 @@ def hand_over(tid, why, out, text, ask=True):
                 + (f"之前收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
                 + f"验证命令：{t.get('verify')}\n" + (f"最近一次输出末尾：\n{out[-1500:]}\n" if out else "") + f"它的交接摘要：\n{note}\n")
     kw = {} if (t.get("budget_why") or "").startswith("主控估") else dict(zip(("budget", "budget_why"), budget_basis(t.get("role"), back["model"])))
-    t = update(tid, agent="claude", agent_out="switched", agent_why=why, auto_model=True, scope="", clone=False, verify_round=0, session_id=str(uuid.uuid4()),
+    t = update(tid, agent="claude", agent_out=t.get("agent_out") or ("switched" if ask or "（模型请求" in why or "（一轮" in why else "infra"), agent_why=why,   # 只记第一次的结果
+               auto_model=True, scope="", clone=False, verify_round=0, session_id=str(uuid.uuid4()),
                session_started=False, forked_from="", cost_base=-(t.get("cost") or 0), takeover=takeover, **back, **kw)
     decide("换智能体接手", task=ref(t), why=why)
     event(tid, "progress", f"{why}，换 {back['model']} 接手。")

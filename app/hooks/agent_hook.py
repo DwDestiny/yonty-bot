@@ -5,7 +5,12 @@ Input:  钩子 JSON（stdin，字段名跟 Claude Code 一样）；YB_HOOK_LOG�
 Output: PreToolUse：exit 0 放行（可带 updatedInput）、exit 2 拦下；PostToolUse / PostToolUseFailure：additionalContext
 Pos:    agents.py 写进智能体的钩子配置
 """
-import json, os, re, subprocess, sys
+import json, os, re, signal, subprocess, sys
+
+LIMIT = int(os.environ.get("YB_HOOK_LIMIT") or 40)   # 整串护栏的总时限，要小于 agents.py 里写的 timeoutMs：到那边超时就是放行
+
+
+def _late(*_): raise TimeoutError()
 
 
 def main():
@@ -42,6 +47,7 @@ def main():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGALRM, _late); signal.alarm(LIMIT)
     try: rc = main()
     except BaseException as e:
         sys.stderr.write(f"护栏没跑成（{type(e).__name__}），按拦下处理。"); rc = 2

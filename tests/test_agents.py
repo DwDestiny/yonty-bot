@@ -88,8 +88,15 @@ class AgentTest(unittest.TestCase):
         for mode, model, why in (('nohook', 'GLM-5.4', '护栏钩子'), ('ok', 'GLM-5.3', '实际用了 GLM-5.3'), ('crash', 'GLM-5.4', '没跑完')):
             os.environ['FCB_MODEL'] = model
             t = self.go(mode, thing=mode + model)
-            self.assertEqual((t['status'], t['agent_out']), ('done', 'switched'), (mode, self.t.events(t['id'])))
+            self.assertEqual((t['status'], t['agent_out']), ('done', 'infra'), (mode, self.t.events(t['id'])))
             self.assertIn(why, t['agent_why'])
+
+    def test_first_result_kept(self):
+        t = self.go(); n = t['id']
+        self.t.update(n, status='approved'); self.t.update(n, status='running', verify='test -f nope'); os.environ['FCB_MODE'] = 'bad'
+        self.t.T['verify_retries'] = 0
+        self.t.run(n)
+        self.assertEqual((self.t.load(n)['agent'], self.t.load(n)['agent_out']), ('claude', 'pass'), '追加指令才换的人不改第一次的成绩')
 
     def test_pick(self):
         base = {'role': '开发', 'verify': 'true', 'title': '加接口', 'brief': '后端', 'repo': str(self.e.repo)}
@@ -100,6 +107,8 @@ class AgentTest(unittest.TestCase):
             self.assertIsNone(f(**k), k)
         self.assertIsNone(f(owner=False)); self.assertIsNone(f(pm=dict(pm, auto_model=False))); self.assertIsNone(f(pm=dict(pm, jev={'risk': 0.8})))
         self.assertEqual(f(title='改登录', agent='zcode'), 'zcode', '点名了就不按关键词挡')
+        self.e.task(agent_first='zcode', status='cancelled'); self.e.task(agent_first='zcode', agent_out='infra', status='done')
+        self.assertEqual(f(), 'zcode', '取消的、没跑成的不占名额')
         for _ in range(2): self.e.task(agent_first='zcode', agent_out='switched', status='done')
         self.assertIsNone(f(), '一次通过率不够，停掉试点')
 
@@ -111,6 +120,10 @@ class AgentTest(unittest.TestCase):
         ev = lambda cmd, name='PreToolUse': json.dumps({'hook_event_name': name, 'tool_name': 'Bash', 'tool_input': {'command': cmd}, 'cwd': str(self.e.repo)})
         self.assertEqual(run(ev('ls')).returncode, 0, run(ev('ls')).stderr)
         self.assertEqual(run(ev(f'cat {self.e.work}/secret/x')).returncode, 2, '实例的护栏照样拦')
+        s = self.e.inst / 'claude-settings.json'; keep = s.read_text()
+        s.write_text(json.dumps({'hooks': {'PreToolUse': [{'matcher': '*', 'hooks': [{'type': 'command', 'command': 'sleep 1'}] * 5}]}}))
+        self.assertEqual(run(ev('ls'), YB_HOOK_LIMIT=2).returncode, 2, '每个都不慢，加起来超时也拦')
+        s.write_text(keep)
         self.assertEqual(run('坏的').returncode, 2)
         self.assertEqual(run(ev('ls'), YB_HOOK_LOG='/nonexistent/x').returncode, 2)
         s = self.e.inst / 'claude-settings.json'; s.write_text('{坏')

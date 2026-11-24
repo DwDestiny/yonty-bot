@@ -81,7 +81,7 @@ class ZCode:
     def env(self, tk, t):
         g = lambda k, d: tk.git(t["repo"], "config", k).stdout.strip() or d
         n, m = g("user.name", "yonty-bot"), g("user.email", "yonty-bot@localhost")
-        e = {"GIT_AUTHOR_NAME": n, "GIT_AUTHOR_EMAIL": m, "GIT_COMMITTER_NAME": n, "GIT_COMMITTER_EMAIL": m, "YB_HOOK_LOG": self.hook_log(tk, t)}
+        e = {"GIT_AUTHOR_NAME": n, "GIT_AUTHOR_EMAIL": m, "GIT_COMMITTER_NAME": n, "GIT_COMMITTER_EMAIL": m, "YB_HOOK_LOG": self.hook_log(tk, t), "YB_HOOK_LIMIT": "40"}
         return dict(e, **{k: os.path.expanduser(v) for k, v in (self.conf.get("env") or {}).items()})
 
     def command(self, tk, t, prompt, resume, fork, box):
@@ -155,17 +155,18 @@ FRONT = r"前端|界面|页面|样式|布局|交互稿|视觉|frontEnd/|\.(vue|t
 RISKY = r"权限|鉴权|登录|支付|付款|账单|订阅|密钥|凭据|加密|数据迁移|并发|生产环境|billing|payment|\bauth"
 
 def stats(tk, name="zcode"):
-    """试点成绩：开了几个、结束几个、一次过几个。"""
-    ts = [t for t in tk.all_tasks() if t.get("agent_first") == name]
+    """试点成绩：开了几个、结束几个、一次过几个。取消的、没跑成的（拥堵、沙箱、护栏没触发，跟质量无关）不算。"""
+    ts = [t for t in tk.all_tasks() if t.get("agent_first") == name and t.get("status") != "cancelled" and t.get("agent_out") != "infra"]
     end = [t for t in ts if t.get("agent_out") or t.get("status") == "failed"]
     return len(ts), len(end), sum(t.get("agent_out") == "pass" for t in end)
 
 def report(tk, name="zcode"):
     n, end, ok = stats(tk, name)
-    if not n: return ""
+    if not any(t.get("agent_first") == name for t in tk.all_tasks()): return ""
     us = [t["agent_usage"] for t in tk.all_tasks() if t.get("agent_first") == name and t.get("agent_usage")]
     g = lambda k: sum(u.get(k) or 0 for u in us)
-    return f"{AGENTS[name].label} 试点：派了 {n} 个，结束 {end} 个，一次过 {ok} 个；用量：输入 {g('input')}（缓存 {g('cached')}），输出 {g('output')}。"
+    bad = sum(t.get("agent_out") == "infra" for t in tk.all_tasks() if t.get("agent_first") == name)
+    return f"{AGENTS[name].label} 试点：派了 {n} 个，结束 {end} 个，一次过 {ok} 个，没跑成（不算成绩）{bad} 个；用量：输入 {g('input')}（缓存 {g('cached')}），输出 {g('output')}。"
 
 def pick(tk, d, pm, owner, ex):
     """派活时定智能体，返回要并进任务的字段和没选上的原因。主人派的、本机跑、有验证命令、没配独立验收的开发活才考虑；
@@ -179,6 +180,7 @@ def pick(tk, d, pm, owner, ex):
             else "收口的活不接" if d.get("closing") else "这个仓库不在试点里" if tk._real(d.get("repo")) not in repos else "本机没装好" if not z.ready() else "")
     if hard: return {}, hard
     if not pm.get("auto_model"): return {}, "要用更强的模型"
+    if sum(t.get("agent_out") == "infra" for t in tk.all_tasks() if t.get("agent_first") == "zcode") >= 5: return {}, "没跑成的满 5 个，先查原因"
     n, end, ok = stats(tk); trial, floor = int(z.conf.get("trial", 10)), float(z.conf.get("min_pass", 0.7))
     if end >= trial and ok / end < floor: return {}, f"试点停了：{end} 个里一次过 {ok} 个，不到 {floor:.0%}"
     if n >= trial and end < trial: return {}, "试点名额满了，等结果"
