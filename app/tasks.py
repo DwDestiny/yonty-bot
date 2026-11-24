@@ -508,10 +508,11 @@ def roles():
         if not f.endswith(".md"): continue
         with open(os.path.join(ROLES_DIR, f), encoding="utf-8") as fh: txt = fh.read()
         m = re.match(r"---\n(.*?)\n---\n?(.*)", txt, re.S)
-        meta = dict((k, v.strip()) for k, v in re.findall(r"^(\S+?)\s*[:：]\s*(.*)$", m.group(1), re.M)) if m else {}
+        meta = dict((k, v.strip()) for k, v in re.findall(r"^(\S+?)[ \t]*[:：][ \t]*(.*)$", m.group(1), re.M)) if m else {}
         name = meta.get("名称") or f[:-3]
         out[name] = {"name": name, "model": meta.get("模型", "").lower(), "effort": meta.get("思考", "").lower(),
                      "resume": meta.get("续接", "是") != "否", "when": meta.get("适合", ""),
+                     "no_advisor": [x for x in re.split(r"[\s,，]+", meta.get("不带顾问", "").lower()) if x],
                      "deny": [x for x in re.split(r"[\s,，]+", meta.get("禁用工具", "")) if x],
                      "body": (m.group(2) if m else txt).strip()}
     return out
@@ -737,6 +738,12 @@ def session_cmd(t):
     if deny: cmd += ["--disallowedTools"] + deny   # 角色的工具限制写在代码里，不靠守则
     return cmd
 
+def advisor_env(t):
+    """角色写了“不带顾问: 模型”时，这个模型跑的会话不带顾问工具。换了别的模型（如验证没过换 opus）就带上。
+    顾问是全局设置，CLI 只有这个环境变量能按会话关。续跑和压缩都要用同一套，工具变了缓存前缀就变。"""
+    off = roles().get(t.get("role") or "", {}).get("no_advisor") or []
+    return {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"} if off and (t.get("model") or "") in off else {}
+
 # ---------- 缓存过期前压缩：只给大会话、只在还会接着用时做 ----------
 # 缓存 1 小时过期。过期后续接，整段上下文按 2 倍价重写一遍；快过期时先压缩，之后续接只重写摘要。
 # 压缩本身要读一遍上下文、写一份摘要，摘要还会丢细节，所以只给上下文大（默认 12 万以上）、而且大概率还会接着用的会话做：
@@ -768,8 +775,9 @@ def compact_task(tid):
         o = t["origin"]
         box = sandbox(t)   # 定时运行的会话压缩也在沙箱里：Claude 一启动就会在工作树里跑 git、读项目设置
         if box is None: decide("没压缩", task=ref(t), why=f"沙箱没搭成：{box_why(t)}"); return
+        env = run_env(t) if t.get("schedule") else hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid)
         r = subprocess.run(box + cmd, input=COMPACT_KEEP, capture_output=True, text=True, timeout=900, cwd=t["worktree"],
-                           env=run_env(t) if t.get("schedule") else hook_env(t["requester"].get("owner"), False, o.get("chat_id", ""), o.get("channel", "feishu"), tid))
+                           env=dict(env, **advisor_env(t)))
         out = json.loads(r.stdout or "{}")
         # 压缩的钱记进总花费，但不算进任务花费：会话累计里多出来的部分加到底数上，检查点不受影响
         extra = max(0.0, (out.get("total_cost_usd") or 0) - (t.get("cost_base") or 0) - (t.get("cost") or 0))
@@ -1690,7 +1698,7 @@ def run(tid):
             if resume: cmd += ["--resume", t["session_id"]]
             elif fork: cmd += ["--resume", fork, "--fork-session", "--session-id", t["session_id"]]
             else: cmd += ["--session-id", t["session_id"]]
-            env = run_env(t)
+            env = dict(run_env(t), **advisor_env(t))
             box = sandbox(t)
             if box is None: raise RuntimeError(f"定时任务要在沙箱里跑，可沙箱没搭成：{box_why(t)}。按失败交回，不降级成只写在提示里")
             final, tools_n, last_u = None, t.get("tools", 0), {}
