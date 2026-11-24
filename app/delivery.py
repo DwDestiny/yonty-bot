@@ -184,7 +184,8 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
         reroute("主控", "没有项目")
     nh, now = hop + 1, time.time()   # 服务给每次投递的跳数自动加一：人发的消息触发的那一轮是 0
     lim_h = c["max_hops"] * (2 if trusted and (extra or {}).get("follow") else 1)   # 主控和项目经理按方案接着派：一来一回就两跳，放宽一倍
-    if nh > lim_h and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
+    own = trusted and sender["type"] == "pm" and tg["to"] == "任务" and (tk.resolve(tg["ref"])[0] or {}).get("project") == sender.get("project")   # 项目经理管自己的任务：每个任务有自动追加上限，不再数跳数和来回
+    if nh > lim_h and not own and tg["to"] in ("任务", "项目经理", "主控"):   # 只拦接着往智能体推的；给人、聊天、记录、档案的照送
         why = f"拦下：这是这条链的第 {nh} 跳，超过上限 {lim_h} 跳（delivery.max_hops）"
         if sender["type"] == "ctrl" and tg["to"] == "项目经理" and (sender.get("key") or "").startswith("p2p:"):   # 没人会看运行记录，流程就断在这里：改发主人私聊
             text = f"主控给 {tg.get('project')} 项目经理的留言没送到（转了 {nh} 次，到上限），流程停在这里：{text}\n要接着就回“继续 {tg.get('project')}”。"
@@ -193,7 +194,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
         elif tg["to"] != "主控": reroute("主控", why + "，停下交给主控")
         else: tk.decide("超跳", sender=sender["ref"], category=kind, why=why + "，本来就是给主控的，照送"); notes.append(why + "，照送主控")
     a, b = node(sender), node(tg, True)
-    if a and b and tg["to"] != "主控" and sender["type"] != "ctrl":
+    if a and b and not own and tg["to"] != "主控" and sender["type"] != "ctrl":
         n = len([r for r in load(tk) if now - r["ts"] < c["pingpong_min"] * 60 and {node(r["from"]), node(r["to"], True)} == {a, b}])
         if n >= c["pingpong_max"]:
             reroute("主控", f"拦下：{a} 和 {b} {c['pingpong_min']} 分钟内已经来回 {n} 次，停下交给主控")
@@ -203,7 +204,7 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
         if t2["status"] not in tk.ACTIVE:
             reroute("项目经理", f"{tk.ref(t2)} 已经结束，交给它那个项目的项目经理", to="项目经理", project=t2.get("project"))
     full = text
-    lim = c["owner_max_chars"] if tg["to"] in ("主人", "聊天", "主控") else c["other_max_chars"]
+    lim = c["owner_max_chars"] if tg["to"] in ("主人", "聊天") else c["other_max_chars"]
     if (extra or {}).get("im") or (extra or {}).get("voice"): lim = len(text)   # 人的答复不截，全文送到
     asker = tk.load(sender["task"]) if sender.get("task") else None
     dm = tg["to"] == "主人" and asker and not asker["requester"].get("owner")   # 同事派的任务找主人：发到主人私聊，主人别处看不到全文，不按 300 字截

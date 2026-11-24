@@ -22,7 +22,7 @@ def conf(cfg): return dict(DEFAULTS, **(cfg.get("team") or {}))
 
 # ---------- 回复里的标记 ----------
 # 一个块到下一个标记行为止。[派活] 另用 tasks.DISPATCH_END：任务书里可以举 [任务指令] 的例子。
-END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令|处置|改验证|取消任务|改依赖)(?:\s[^\]]*)?\]")
+END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令|处置|改验证|取消任务|改依赖|挂起)(?:\s[^\]]*)?\]")
 SILENT = re.compile(r"^\s*\[不回\][\s。.!！~～]*$")
 FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})")
 
@@ -46,7 +46,7 @@ def visible(text):
     for l in (text or "").split("\n"):
         if FENCE.match(l) and not skip: fence = not fence
         if fence: keep.append(l); continue
-        if SILENT.match(l) or re.match(r"^\s*\[(?:看板|处理掉|不是我的|停|继续|处置|改验证|取消任务|改依赖)\]", l) or re.match(r"^\s*\[/(?:派活|方案|任务指令)\]\s*$", l): skip = False; continue
+        if SILENT.match(l) or re.match(r"^\s*\[(?:看板|处理掉|不是我的|停|继续|处置|改验证|取消任务|改依赖|挂起)\]", l) or re.match(r"^\s*\[/(?:派活|方案|任务指令)\]\s*$", l): skip = False; continue
         if re.match(r"^\s*\[(?:交接|方案|转交|投递[^\]]*)\]", l): skip = True; continue
         if skip and END.match(l): skip = False
         if not skip: keep.append(l)
@@ -194,20 +194,26 @@ def waiting_on(tk, y, pool):
     return [t for t in pool if t["status"] == "approved" and t.get("plan") and t["id"] != y["id"] and t.get("project") == y.get("project")
             and (any(d and d["id"] == y["id"] for _, d in dep_tasks(tk, t, pool)) or (t.get("plan") == y.get("plan") and y["title"] in (t.get("deps") or []) and y["status"] in DEAD))]
 
+def opened_on(tk, y, pool):
+    """依赖 y、已经开工（在跑、停在提问）而且没挂起的任务。"""
+    return [t for t in pool if t["status"] in ("running", "waiting") and t.get("plan") and not t.get("hold") and t["id"] != y["id"]
+            and t.get("project") == y.get("project") and any(d and d["id"] == y["id"] for _, d in dep_tasks(tk, t, pool))]
+
 def waits(tk, t, c):
     """这个任务现在为什么先别开；空串就是可以开。"""
     if held(t.get("project")): return "项目停工"
+    if t.get("hold"): return f"挂起：{t['hold']['why'][:80]}"
     if not t.get("plan"): return ""
     pool = tk.all_tasks()
     for x, y in dep_tasks(tk, t, pool):
         if not y: return f"等依赖“{x}”派出来"
-        if y["status"] != "done": return f"等 {tk.ref(y)}"
+        if not tk.accepted(y): return f"等 {tk.ref(y)}" + ("（做完了，项目经理还没收）" if y["status"] == "done" else "")
     mine = [x for x in pool if x.get("project") == t.get("project") and x["id"] != t["id"] and x.get("plan")]
     for x in mine:
         if not overlap(t.get("files") or [], x.get("files") or []): continue
         # 排在前面、自己也能开的才让；它还在等依赖就不让，免得绕一圈互相等
         if x["status"] in ("running", "waiting") or (x["status"] == "approved" and x["id"] < t["id"]
-                                                     and all(y and y["status"] == "done" for _, y in dep_tasks(tk, x, pool))):
+                                                     and not x.get("hold") and all(tk.accepted(y) for _, y in dep_tasks(tk, x, pool))):
             return f"跟 {tk.ref(x)} 改同一块文件，等它"
     if sum(x["status"] == "running" for x in mine) >= c["max_parallel"]: return f"等名额：项目同时最多 {c['max_parallel']} 个"
     return ""
