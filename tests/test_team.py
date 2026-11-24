@@ -276,6 +276,45 @@ class FollowPlanTest(Base):
         self.assertEqual(self.titles(), ['甲'])
         self.assertEqual(self.b.team.vouched('proj', '发版'), [])
 
+    def test_tonight_replay(self):
+        """2026-11-24 那一晚：回报轮登记下一阶段、请主控合并；主控转回来，接着派；再请主控部署，再转回来，全程主人没说话。"""
+        pl = '[方案] 预发\n任务:\n- 打包 | src/p |\n- 实测 | src/q | 打包\n[/方案]\n'
+        rel = lambda x: self.rel(x).replace('方案: 发版', '方案: 预发').replace('src/p', 'src/p' if x == '打包' else 'src/q')
+        self.start(['[转交] proj：合好了', '[转交] proj 部署好了'], [rel('打包') + '[/派活]\n[投递 主控 节点]\n请部署', rel('实测')], plan=pl)
+        for _ in range(4):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+        self.assertEqual(self.titles(), ['甲', '打包', '实测'])
+
+    def test_dispatch_in_owner_turn_vouches_plan(self):
+        self.b.team.save_plan('proj', '旧方案', '任务:\n- 戊 | src/e |\n- 己 | src/f |\n'); self.assertEqual(self.b.team.vouched('proj', '旧方案'), [])
+        self.layers(['[转交] proj 继续'], [block(self.e.repo, '戊', 'src/e').replace('方案: 整改', '方案: 旧方案')]); self.say('继续')
+        self.assertEqual(self.b.team.vouched('proj', '旧方案'), ['戊', '己'])
+
+    def test_owner_chain_handover_keeps_owner_identity(self):
+        """项目经理对主人原话的答复由主控转述：那一轮的 [转交] 照旧走主人身份的路。"""
+        self.layers(['[转交] proj 做', '[转交] proj 接着'], ['有个问题要说', '收到'])
+        self.say('开工')
+        self.assertEqual([s['env']['FCB_OWNER'] for s in self.e.streams if s['env'].get('FCB_LAYER') == 'pm' and '[主控转交] 备注：接着' in s['prompt']], ['1'])
+
+    def test_stray_handover_is_returned(self):
+        t = self.e.task(owner=False, status='running'); self.layers(['[转交] proj 去办', 'CTRL-不转了'], [])
+        self.t.dl.submit(self.t, self.t.dl.task_sender(self.t, t), '主控', '问题', '怎么办')
+        for _ in range(2):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+        self.assertTrue(any('[服务回执]' in s['prompt'] and '不能 [转交]' in s['prompt'] for s in self.e.streams)); self.assertIn('CTRL-不转了', self.e.out())
+
+    def test_pm_cannot_pass_it_to_another_project(self):
+        self.b.tasks.dl.submit(self.t, self.t.dl.pm_sender('other', 'proj:other:p2p:oc_p', False), '项目经理 proj', '留言', '你派', 1, False,
+                               {'follow': True, 'src_im': {'channel': 'feishu', 'chat_id': 'oc_p', 'chat_type': 'p2p', 'message_id': 'm', 'sender_id': self.b.OWNER_OPEN_ID}}, trusted=True)
+        self.b.team.save_plan('proj', '发版', '任务:\n- 打包 | src/p |\n'); self.b.team.vouch_plan('proj', '发版')
+        self.layers([], [self.rel('打包'), '[不回]'])
+        for _ in range(2): self.b.delivery_tick(); self.e.drain()
+        self.assertEqual([x for x in self.new() if x['status'] != 'pending'], [])
+
+    def test_held_project_not_dispatched(self):
+        self.b.team.save_plan('proj', '发版', '任务:\n- 打包 | src/p |\n'); self.b.team.vouch_plan('proj', '发版'); self.b.team.set_held('proj', True)
+        self.assertIn('停工', self.b.team.follow_gate('proj', {'title': '打包', 'plan': '发版'}))
+
     def test_other_marks_not_run(self):
         self.start(['[转交] proj\n合好了'], [f'[取消任务] {self.t.ref(self.seed)} 试试', '[不回]'])
         self.assertTrue(any('[服务回执]' in p and '[取消任务]' in p for p in self.pm_prompts()))

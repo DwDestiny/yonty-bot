@@ -1319,6 +1319,7 @@ def dispatch_one(ev, d):
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
                              "message_id": ev["message_id"], "thread": in_topic(ev), "key": session_key(ev),
                              "thread_id": ev.get("thread_id"), "root_id": ev.get("root_id")}, target=d["target"])
+    if owner and ev.get("pm") and d["plan"] and ev["chat_type"] == "p2p" and not ev.get("follow"): team.vouch_plan(ev["pm"], d["plan"])   # 主人身份的一轮从这个方案派了活：整份任务单算交代过
     if t.get("jev"): dm.record("task", task=t["id"], model=t["model"], effort=t["effort"], **t["jev"])
     note_briefed(session_key(ev), t["id"])   # 任务书是这个会话自己写的，回报时不用再贴
     n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
@@ -1734,7 +1735,7 @@ def pm_marks(project, key, owner, text, hop=0, about=None, idem=None, src=None, 
     if STRICT: text = pm_notes(project, key, text)[0]
     text, marks = tasks.dl.parse_marks(text)
     for i, (to, kind, body, need) in enumerate(marks):
-        extra = {**({"voice": True} if STRICT and base_key(key).startswith("p2p:") else {}), **({"src_im": src} if src else {}), **({"about": about} if about else {}), **({"follow": True} if follow else {}), **({"idem": f"{idem}:{i}"} if idem else {})}
+        extra = {**({"voice": True} if STRICT and base_key(key).startswith("p2p:") else {}), **({"src_im": src} if src else {}), **({"about": about} if about else {}), **({"follow": True} if follow and to == "主控" else {}), **({"idem": f"{idem}:{i}"} if idem else {})}
         try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need, extra or None, trusted=True)
         except ValueError as e: log.warning("pm delivery rejected: %s", e)
     return text
@@ -1826,6 +1827,7 @@ def _delivery_turn(ev):
     o_priv, chat_id = o_owner and (bool(im) or bk.startswith("p2p:")), im["chat_id"] if im and o_owner else (t["origin"].get("chat_id", "") if t else (rec.get("src_im") or {}).get("chat_id") or bk.split(":", 1)[-1])
     hop = max(r.get("hop") or 0 for r in batch)
     go_on = None if pm else follow_src(batch, t)
+    fol = bool(pm and all(r.get("follow") and tasks.dl.follows(r) and r["from"].get("type") == "ctrl" and r["to"].get("project") == pm and follow_ok(r.get("src_im")) for r in batch))
     if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
     else: tip = ""
     prompt = (pm_intro(pm, key) if pm and not s["started"] else "") + "\n\n".join(
@@ -1835,14 +1837,15 @@ def _delivery_turn(ev):
            if fr.get("task") else f"\n（你的回复会发给{fr.get('label')}；还要问主人就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
            if im else f"\n（你的回复会发给{OWNER_NAME}，用你自己的话说清楚；要项目经理接着办就写 [转交] {fr.get('project')}；没有要说的只输出 [不回]）"
            if rec.get("src_im") and not pm else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）") + tip
-    if pm and any(r.get("follow") for r in batch) and all(tasks.dl.follows(r) for r in batch):
+    if fol:
         prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
     if result is None: return False   # 这一轮没成：调用方退回重送
     idem = f"dl{rec['id']}-{int(rec['ts'])}"
     if go_on: result = follow_marks(go_on, fr["project"], key, hop, result, idem)
-    fol = bool(pm and len(batch) == 1 and rec.get("follow") and tasks.dl.follows(rec) and follow_ok(rec.get("src_im")))
+    if STRICT and not pm and (t or not (rec.get("src_im") or im)):
+        result = stray_handover(result, lambda note: run_claude(key, s, note, o_owner, o_priv, chat_id, quiet=True, hop=hop))
     if STRICT and pm:   # 项目经理的投递轮：派活按闸门，别的话不直接发人
         src = t and relay_ev(t) or (im if im and session_key(im) == bk else None) or rec.get("src_im")   # 在别的聊天里答复的：里面的派活、指令不执行
         if fol:
@@ -1893,22 +1896,43 @@ def follow_ok(src):
     return bool(src and is_owner(src) and src.get("chat_type") == "p2p" and src.get("message_id"))
 
 def follow_src(batch, t):
-    """主控这一轮能不能让项目经理接着派：只一条投递、项目经理发来的、主人身份成立（或从那样的一轮传下来），来源是主人的私聊。返回来源消息。"""
-    r = batch[0]
-    if not STRICT or len(batch) != 1 or r["from"].get("type") != "pm" or not tasks.dl.follows(r): return None
-    src = relay_ev(t) if t else r.get("src_im")
-    return src if follow_ok(src) and session_key(src) == base_key(r["from"].get("key")) else None
+    """主控这一轮能不能让项目经理接着派：项目经理发来的、主人身份成立（或从那样的一轮传下来），来源是主人的私聊。返回来源消息。"""
+    out = None
+    if not STRICT: return None
+    for r in batch:   # 合成一轮的每一条都要成立
+        t1 = tasks.load(r["about"]) if r.get("about") else t
+        if r["from"].get("type") != "pm" or not tasks.dl.follows(r) or not (t1 or r.get("follow")): return None   # 主人原话那条链转述的：[转交] 照原来的路，带主人身份
+        src = relay_ev(t1) if t1 else r.get("src_im")
+        if not follow_ok(src) or session_key(src) != base_key(r["from"].get("key")): return None
+        out = src
+    return out
 
 def follow_marks(src, project, key, hop, result, idem):
     """主控写的 [转交] 本项目：服务签名转给项目经理接着派。项目经理那一轮不带主人权限，派活只认方案里列明的。别的项目的 [转交] 照原来的路。"""
     rest, hs = team.blocks(result, "转交")
-    if not hs or any(not a.split() or a.split()[0] != project for a, _ in hs): return result
     for i, (a, b) in enumerate(hs):
-        body = "\n".join(x for x in (a.split(None, 1)[1] if len(a.split()) > 1 else "", b) if x).strip() or "办完了，按方案接着派。"
+        mm = re.match(r"^(\S+?)(?:\s+|[:：]|$)(.*)$", a, re.S)
+        if not mm or mm.group(1) != project: rest += f"\n[转交] {a}\n{b}\n[/任务指令]"; continue   # 别的项目：留着，下面按没成退回
+        body = "\n".join(x for x in (mm.group(2), b) if x).strip() or "办完了，按方案接着派。"
         try: tasks.dl.submit(tasks._me(), {"type": "ctrl", "ref": "主控", "label": "主控", "key": key, "owner": False, "hop": hop}, f"项目经理 {project}", "留言", body, hop, False,
                              {"voice": True, "follow": True, "src_im": src, "idem": f"{idem}:go{i}"}, trusted=True)
         except ValueError as x: log.warning("follow rejected: %s", x); rest += f"\n（转交 {project} 没成：{x}。）"
     return rest.strip()
+
+def stray_handover(result, redo):
+    """主控这一轮的 [转交] 没人执行（不是项目经理发来的、同事的任务、转给别的项目）：退回重写一次，还写就换成一句话，不悄悄丢。"""
+    for i in range(2):
+        rest, hs = team.blocks(result, "转交")
+        if not hs: return result
+        names = "、".join(a or "（没写项目）" for a, _ in hs)
+        tasks.decide("回执退回", why=f"这一轮的 [转交] {names} 没人执行")
+        again = None
+        if not i:
+            try: again = redo(f"[服务回执] 你上一条回复没发出去：这一轮不能 [转交]（{names}）。重写整条回复，不写 [转交]，不要说已经转了；要项目经理接着办，请{OWNER_NAME}说一声“继续”。")
+            except Exception: log.exception("receipt redo failed")
+        if again is None: return f"{rest}\n\n（转交 {names} 没成，流程停在这里。要接着就说“继续”。）".strip()
+        result = again
+    return result
 
 def unrunnable(pm, key, hop, result, redo, idem, ev=None):
     """没有来源消息的投递轮（主控用 tasks.py send 叫起来的）没有派活的身份：里面的派活、指令不执行。
@@ -2481,7 +2505,7 @@ def task_relay(ev):
 
 PM_RELAY_TAIL = ("--- 你是这个项目的项目经理，这条回报先到你这里。能自己收尾的先办（[任务指令] 回答提问或让它接着干、"
                  "补建合并请求、修补动作）。然后二选一：要让主控知道，单独一行 [投递 主控 完成]（提问你定不了就 [投递 主控 问题]），"
-                 "下一行起写结论行和合并请求链接；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
+                 "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把下一阶段的 [方案] 登记好，主控办完转回来时只能派登记过的；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
                  "其余文字只进运行记录，不发给任何人 ---")
 ABSORB_RE = re.compile(r"^\s*\[处理掉\]\s*(.*)$", re.M)
 MR_RE = re.compile(r"https?://\S+?/(?:pull|merge_requests|change)s?/\d+")

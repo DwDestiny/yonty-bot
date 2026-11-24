@@ -84,6 +84,7 @@ LIVE_RELEASE = re.compile(r"stable|正式|生产|production|prod\b|上线", re.I
 
 def follow_gate(project, d):
     """项目经理接着派（主控办完事转回来的，主人没亲口说话）：只派登记时带主人身份的方案里列明的任务。返回不放行的原因，空串放行。"""
+    if held(project): return f"{project} 停工中，不派"
     if d["title"] not in vouched(project, d["plan"]): return f"“{d['title']}”不在主人交代过的方案任务单里，要主人点头"
     if LIVE_RELEASE.search(d["title"]): return f"“{d['title']}”是正式发布，要主人点头"
     if d.get("budget"): return f"“{d['title']}”写了预算：接着派不能自己定预算，去掉“预算:”按默认，要加预算找主人"
