@@ -790,10 +790,10 @@ class FoundationUnchangedTest(unittest.TestCase):
     def test_roles_defaults_unchanged_and_override_wins(self):
         """9 节、3 节：tasks.create 按角色补默认模型和思考档，[派活] 写了以它为准；新增的项目经理角色不影响别的角色。"""
         roles = self.e.t.roles()
-        self.assertEqual((roles['开发']['model'], roles['开发']['effort']), ('sonnet', 'high'))
+        self.assertEqual((roles['开发']['model'], roles['开发']['effort']), ('sonnet', 'medium'))
         x = self.e.t.create(title='a', repo=str(self.e.repo), brief='b', role='开发', status='approved',
                             requester={'id': OWNER, 'name': 'x', 'owner': True}, origin={'channel': 'feishu', 'chat_id': 'c', 'chat_type': 'p2p', 'message_id': 'm'})
-        self.assertEqual((x['model'], x['effort']), ('sonnet', 'high'))
+        self.assertEqual((x['model'], x['effort']), ('sonnet', 'medium'))
         y = self.e.t.create(title='b', repo=str(self.e.repo), brief='b', role='开发', model='haiku', effort='low', status='approved',
                             requester={'id': OWNER, 'name': 'x', 'owner': True}, origin={'channel': 'feishu', 'chat_id': 'c', 'chat_type': 'p2p', 'message_id': 'm'})
         self.assertEqual((y['model'], y['effort']), ('haiku', 'low'))

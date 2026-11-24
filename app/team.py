@@ -9,7 +9,14 @@ import importlib.util, json, os, re, threading, time
 ROOT = os.path.dirname(os.path.abspath(__file__))
 F = os.path.join(ROOT, "state", "team3.json")
 LK = threading.RLock()
-DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 12, "max_reviews": 2}
+DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 12, "max_reviews": 2, "brief_check": True}
+def brief_part(brief, h):
+    """任务书里“h:”这一段有没有内容：同一行，或者到下一个小标题之前。"""
+    heads = "|".join(BRIEF_HEADS)
+    m = re.search(r"^[ \t]*(?:[-*#]+[ \t]*)?(?:\*\*)?" + h + r"(?:\*\*)?[ \t]*[:：](.*?)(?=^[ \t]*(?:[-*#]+[ \t]*)?(?:\*\*)?(?:" + heads + r")(?:\*\*)?[ \t]*[:：]|\Z)", brief or "", re.M | re.S)
+    return m.group(1).strip(" *\n\t") if m else ""
+
+BRIEF_HEADS = {"已核实": "你自己确认过的事实和文件行", "边界": "失败、空、重复、并发、旧数据、别的入口要怎么处理", "验收": "能判断对错的条目，走查要写环境、账号、数据", "交回": "要哪些证据"}
 
 def conf(cfg): return dict(DEFAULTS, **(cfg.get("team") or {}))
 
@@ -129,6 +136,9 @@ def gate(tk, project, d, c):
     if d.get("role") == "评审" and not d.get("review_ok"):   # 一轮全面看、一轮复核必修就够；再多是花钱磨，要人定
         n = sum(t.get("role") == "评审" and t["status"] not in DEAD + ("failed", "lost") for t in mine)
         if n >= c["max_reviews"]: return f"方案“{d['plan']}”已经评审过 {n} 轮，不自动开下一轮：剩下的必修项自己核对修没修好就收，拿不准写 [投递 主控 问题] 请主人定；主人同意再审，派活里加一行“再审: 主人同意”"
+    if c["brief_check"] and d.get("role") in ("开发", "排查") and not d.get("closing"):   # 2026-11-24 逐条看过 28 次返工：约四成主要是任务书没核实、没列边界、没给验收办法
+        miss = [h for h in BRIEF_HEADS if not brief_part(d.get("brief"), h)]
+        if miss: return f"“{d['title']}”的任务书缺“{'、'.join(miss)}”：各写一行开头，内容写实。{'；'.join(h + '＝' + BRIEF_HEADS[h] for h in miss)}"
     if d.get("role") == "开发" and not d.get("verify") and not d.get("verify_said"): return f"“{d['title']}”没写“验证:”：写一条能判断做没做成的命令，实在没有写 无"
     fs = d.get("files") or []
     if not d.get("closing") and d.get("role") != "评审":

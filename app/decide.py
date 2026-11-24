@@ -120,9 +120,8 @@ def score(facts, cfg):
     return {k: float(r["answers"][k]["noul"]) for k in TASK_Q}
 
 def pick_task(s):
-    """按分数定模型和思考档。线来自 28 个历史开发任务的分数：“风险”最能分开；“跨模块”几乎都高，只和风险一起用。"""
-    if s["risk"] >= 0.9 and s["cross"] >= 0.9: return {"model": "opus", "effort": "high", "auto_model": False}
-    return {"model": "sonnet", "effort": "medium" if s["risk"] < 0.35 else "high", "auto_model": True}
+    """按分数定起步档：风险低的 sonnet medium，其余 opus medium。疑难档（xhigh）不按分数开，前两档解决不了才升。"""
+    return {"model": "sonnet" if s["risk"] < 0.35 else "opus", "effort": "medium", "auto_model": True}
 
 def report_task(ts, cfg):
     """按起步的模型和思考档分组：做完几个、一次过几个、换 opus 几个、平均花多少。"""

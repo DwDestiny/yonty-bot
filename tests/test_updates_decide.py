@@ -184,7 +184,7 @@ class DecideTest(Base):
 
     def test_task_scores_pick_model(self):
         p = lambda r, c: (lambda x: (x['model'], x['effort'], x['auto_model']))(self.d.pick_task({'risk': r, 'cross': c, 'design': 0, 'mech': 0}))
-        self.assertEqual(p(.95, .95), ('opus', 'high', False)); self.assertEqual(p(.95, .5), ('sonnet', 'high', True)); self.assertEqual(p(.1, .95), ('sonnet', 'medium', True))
+        self.assertEqual(p(.95, .95), ('opus', 'medium', True)); self.assertEqual(p(.4, .5), ('opus', 'medium', True)); self.assertEqual(p(.1, .95), ('sonnet', 'medium', True))
         self.d._post = lambda u, b, k, t: {'answers': {q: {'noul': 0.95} for q in b['questions']}}
         self.d._key = lambda c: 'k'
         pm = {'model': 'sonnet', 'effort': 'high', 'auto_model': True}; d = {'title': 'x', 'brief': 'y'}; pts = self.b.CFG['decide']['points']
