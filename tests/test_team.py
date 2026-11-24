@@ -6,6 +6,7 @@ Pos:    tests/ 下的行为测试，内容全是虚构的
 """
 import json
 import importlib.util, os, sys, unittest
+from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_accept_flow as A
 
@@ -314,6 +315,54 @@ class FollowPlanTest(Base):
     def test_held_project_not_dispatched(self):
         self.b.team.save_plan('proj', '发版', '任务:\n- 打包 | src/p |\n'); self.b.team.vouch_plan('proj', '发版'); self.b.team.set_held('proj', True)
         self.assertIn('停工', self.b.team.follow_gate('proj', {'title': '打包', 'plan': '发版'}))
+
+    def test_follow_steer_reopens_plan_task(self):
+        self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
+        t = self.by('甲'); self.t.update(t['id'], status='done', cost=19.9, budget=20); self.t.event(t['id'], 'done', '结论：PASS'); n = self.t.ref(t)
+        self.layers(['[转交] proj\n让甲补测'], ['[投递 主控 节点]\n请安排补测\n[/投递]', f'[任务指令] {n} 补测 rewind'])
+        self.e.tick()
+        for _ in range(4):
+            st = self.t.dl.limits(self.t); st['merge'] = {}; self.t.dl.limits_save(self.t, st); self.b.delivery_tick(); self.e.drain()
+        t = self.by('甲'); self.assertIn(t['status'], ('approved', 'running')); self.assertEqual(t['budget'], 20)   # 不续预算
+        box = open(os.path.join(self.t.tdir(t['id']), 'inbox.jsonl')).read()
+        self.assertEqual(box.count('补测 rewind'), 1); self.assertIn('"owner": false', box)
+
+    def follow(self, text, **kv):
+        if '甲' not in self.titles():
+            self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.jid = self.by('甲')['id']
+        if self.t.load(self.jid)['status'] == 'approved': self.t.update(self.jid, status='running')
+        self.t.update(self.jid, **dict({'status': 'done'}, **kv)); t = self.t.load(self.jid)
+        errs, made = [], []
+        ev = {'pm': 'proj', 'channel': 'feishu', 'chat_id': 'oc_p', 'chat_type': 'p2p', 'hop': 2, 'follow': True}
+        self.b.follow_cmds(ev, text.replace('N', self.t.ref(t)), errs, made, 'k'); return self.t.load(self.jid), errs
+
+    def test_follow_steer_limits(self):
+        for text, kv, why in (('[任务指令] N 预算加到 50', {}, '预算'), ('[任务指令] N 放开验收测试', {}, '验收'), ('[任务指令] N 再测', {'checkpoint': True}, '检查点'),
+                              ('[任务指令] N 再测', {'title': '发 stable'}, '正式发布'), ('[任务指令] N 再测', {'plan': ''}, '方案任务'), ('[任务指令] N 再测', {'project': 'other'}, '方案任务'),
+                              ('[任务指令] N 再测', {'origin': {'channel': 'feishu', 'chat_id': 'oc_g', 'chat_type': 'group', 'message_id': 'm'}}, '方案任务')):
+            with self.subTest(text + why):
+                self.setUp(); t, errs = self.follow(text, **kv)
+                self.assertTrue(errs and why in errs[0], errs); self.assertEqual(t['status'], 'done')
+        self.setUp(); self.follow(''); self.b.team.set_held('proj', True); t, errs = self.follow('[任务指令] N 再测'); self.assertIn('停工', errs[0])
+
+    def test_follow_steer_idempotent(self):
+        self.follow('[任务指令] N 再测'); t, errs = self.follow('[任务指令] N 再测')
+        self.assertEqual(errs, []); self.assertEqual(open(os.path.join(self.t.tdir(t['id']), 'inbox.jsonl')).read().count('再测'), 1)
+
+    def test_sync_details(self):
+        self.assertEqual(self.t.dl.parse_marks('[投递 主控 问题]\n要点头\n\n[/投递]')[0], '')
+        self.assertEqual(self.t.dl.parse_marks('[投递 主控 问题]\n要点头\n[看板] x\n[/投递]')[0], '[看板] x')
+        self.assertEqual(self.t.hook_env(True, True, 'c')['TZ'], 'Asia/Shanghai')
+        self.follow(''); self.t.update(self.jid, status='approved', turn=0)
+        open(os.path.join(self.t.tdir(self.jid), 'events.jsonl'), 'w').close()
+        self.assertEqual(self.b.ftask_span(self.t.load(self.jid)), (0, 0)); self.assertIn('还没开工', self.b.ftask_meta([self.t.load(self.jid)])['desc'])
+
+    def test_quiet_task_reserves_half(self):
+        R = self.t.res; c = R.conf({}); G = R.GB; run = [{'id': 1, 'mem_est': 4 * G}]
+        t = {'id': 2, 'mem_est': 3 * G}; snap = {'total': 16 * G, 'avail': R.floor({'total': 16 * G}, c) + 6 * G, 'mem_some': 0}
+        self.assertFalse(R.admit(t, snap, run, [], c, [])[0]); self.assertTrue(R.admit(t, snap, run, [], c, [], lambda r: 0, {1})[0])
+        with mock.patch.object(self.t, 'cpu_ns', lambda t: 5):
+            self.assertFalse(self.t.quiet({'id': 9, 'turn': 1}, 1000)); self.assertFalse(self.t.quiet({'id': 9, 'turn': 1}, 1300)); self.assertTrue(self.t.quiet({'id': 9, 'turn': 1}, 1601))
 
     def test_other_marks_not_run(self):
         self.start(['[转交] proj\n合好了'], [f'[取消任务] {self.t.ref(self.seed)} 试试', '[不回]'])

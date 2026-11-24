@@ -1828,7 +1828,7 @@ def _delivery_turn(ev):
     hop = max(r.get("hop") or 0 for r in batch)
     go_on = None if pm else follow_src(batch, t)
     fol = bool(pm and all(r.get("follow") and tasks.dl.follows(r) and r["from"].get("type") == "ctrl" and r["to"].get("project") == pm and follow_ok(r.get("src_im")) for r in batch))
-    if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
+    if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活、给已有任务追加要求：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
     else: tip = ""
     prompt = (pm_intro(pm, key) if pm and not s["started"] else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
@@ -1838,7 +1838,7 @@ def _delivery_turn(ev):
            if im else f"\n（你的回复会发给{OWNER_NAME}，用你自己的话说清楚；要项目经理接着办就写 [转交] {fr.get('project')}；没有要说的只输出 [不回]）"
            if rec.get("src_im") and not pm else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）") + tip
     if fol:
-        prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
+        prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务；也可以用 [任务指令] 让这些任务补做，不加预算、不改验收。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
     with sem:
         result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
     if result is None: return False   # 这一轮没成：调用方退回重送
@@ -1919,6 +1919,24 @@ def follow_marks(src, project, key, hop, result, idem):
         except ValueError as x: log.warning("follow rejected: %s", x); rest += f"\n（转交 {project} 没成：{x}。）"
     return rest.strip()
 
+def follow_cmds(ev, text, errs, made, idem):
+    """接着派那一轮的 [任务指令]：只给本项目、主人在这个私聊里派的、方案里的任务；不加预算、不改验收、不碰正式发布。自动追加次数照算。"""
+    pool = [x for x in tasks.all_tasks() if x.get("project") == ev["pm"] and x.get("plan") and owner_dm_task(x) and x["origin"].get("channel") == ev.get("channel") and x["origin"].get("chat_id") == ev.get("chat_id")]
+    def apply(s, body):
+        x, cands = tasks.resolve(s, pool)
+        if not x: errs.append(f"{s}：" + (ambiguous(s, cands) if len(cands) > 1 else f"不是{OWNER_NAME}在这个私聊里派的方案任务，不能追加")); return ""
+        n, key = tasks.ref(x), f"{idem}:{x['id']}:{hashlib.sha1(body.encode()).hexdigest()[:12]}"
+        if tasks.inbox_seen(x["id"], key): return ""
+        why = (f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
+               else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
+        if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
+        tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
+        tasks.update(x["id"], hop=max(x.get("hop") or 0, (ev.get("hop") or 0) + 1), auto_follow=x.get("auto_follow", 0) + 1,
+                     **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
+        tasks.decide("接着派", task=n, why="追加指令：" + short(body, 200)); made.append(f"已给 {n} 追加要求")
+        return ""
+    return apply_taskcmds(text, apply).strip()
+
 def stray_handover(result, redo):
     """主控这一轮的 [转交] 没人执行（不是项目经理发来的、同事的任务、转给别的项目）：退回重写一次，还写就换成一句话，不悄悄丢。"""
     for i in range(2):
@@ -1939,11 +1957,11 @@ def unrunnable(pm, key, hop, result, redo, idem, ev=None):
     退回重写，最多两次，这期间 [投递]、[看板]、[方案] 都不落地，免得别人当成已经派了；还写，就不收这条，告诉主控。"""
     done = []
     for i in range(3):
-        bad = [x for x in pending_marks(result) if not (ev and x == "[派活]")]
+        bad = [x for x in pending_marks(result) if not (ev and x in ("[派活]", "[任务指令]"))]
         if not bad and not ev: return result
-        if not bad:   # 接着派：派活按白名单放行，没过的退回；已经派出去的不重复（幂等键按方案和标题）
+        if not bad:   # 接着派：派活、追加指令按白名单放行，没过的退回；已经派出去的不重复（幂等键按方案和标题）
             errs, made = [], []
-            left = task_directive(ev, result, errs, made)
+            left = follow_cmds(ev, task_directive(ev, result, errs, made), errs, made, idem)
             done += made
             if not errs: return "\n\n".join(x for x in [left] + done if x.strip())
             bad = errs
@@ -1951,7 +1969,7 @@ def unrunnable(pm, key, hop, result, redo, idem, ev=None):
         again = None
         if i < 2:
             try: again = redo(f"[服务回执] 你上一条回复没发出去。没成的：{'；'.join(bad)}。" + (f"已经办成的（不要再写）：{'；'.join(done)}。" if done else "")
-                              + f"\n这一轮只能派{OWNER_NAME}交代过的方案里列明的任务。重写整条回复：改好没成的 [派活]，改不了就去掉，写 [投递 主控 问题] 请{OWNER_NAME}点头，不要说已经派了。" if ev else
+                              + f"\n这一轮只能派{OWNER_NAME}交代过的方案里列明的任务、给{OWNER_NAME}派过的方案任务追加指令。重写整条回复：改好没成的，改不了就去掉，写 [投递 主控 问题] 请{OWNER_NAME}点头，不要说已经派了。" if ev else
                               f"[服务回执] 你上一条回复没生效，一条都没发出去，也没登记。\n{'、'.join(bad)} 在这一轮执行不了：这一轮是留言叫起来的，不带派活人的身份。\n"
                               f"重写整条回复，不写这些标记，也不要说已经派了。要接着派活，写 [投递 主控 问题]，说清要派哪几条，请主控告诉{OWNER_NAME}；{OWNER_NAME}说继续，主控会 [转交] 给你，那一轮再派。[方案]、[看板]、[交接] 照写。")
             except Exception: log.exception("receipt redo failed")
@@ -3017,6 +3035,7 @@ def cst(ts): return datetime.fromtimestamp(ts, CST).strftime("%m-%d %H:%M") if t
 def ftask_span(t):
     """任务真正的开始、结束时间：看事件；还没结束的结束时间是 0。"""
     evs = tasks.events(t["id"])
+    if not t.get("turn") and t["status"] in tasks.ACTIVE + ("pending",) and not any(e["kind"] == "start" for e in evs): return 0, 0   # 还没开工
     start = next((e["ts"] for e in evs if e["kind"] == "start" and e.get("ts")), 0) or t.get("started") or t.get("launched") or t.get("created") or 0
     if t["status"] in tasks.ACTIVE + ("pending",): return start, 0
     end = next((e["ts"] for e in reversed(evs) if e["kind"] in ("done", "failed", "lost") and e.get("ts")), 0) or t.get("finished") or t.get("updated") or 0
@@ -3034,7 +3053,7 @@ def ftask_meta(ts):
     t0, mins_ = ts[0], int(((end or time.time()) - start) / 60) if start else 0
     plan = team.plan_of(t0.get("project"), t0["plan"]) if t0.get("plan") else None
     lines = [f"项目：{t0.get('project')}" + (f"　方案：{t0['plan']}" if t0.get("plan") else ""), f"派活人：{t0['requester'].get('name')}",
-             f"时间（北京时间）：{cst(start)} 开始" + (f"，{cst(end)} 结束，共 {mins_} 分钟" if end else "，还在进行"),
+             f"时间（北京时间）：" + (f"{cst(start)} 开始" if start else "还没开工") + (f"，{cst(end)} 结束，共 {mins_} 分钟" if end else "，还在进行" if start else ""),
              f"模型：{'、'.join(models)}", f"花费：{cost:.2f} 美元当量", f"仓库：{os.path.basename(t0.get('repo') or '')}　目标分支：{t0.get('target') or (t0.get('base') or '').split('/', 1)[-1] or '默认'}"]
     if mrs: lines.append("合并请求：" + " ".join(mrs[:5]))
     lines += ["", "任务："] + [f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])}　{t['title']}　{cst(s)}" + (f"–{cst(e)}" if e else "") + (f"　{t['branch']}" if t.get("branch") else "") for t, (s, e) in zip(ts, spans)]

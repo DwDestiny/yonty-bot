@@ -140,11 +140,13 @@ def parse_marks(text):
             cur = [m.group(1), m.group(2), [], None]; out.append(cur); continue
         if cur is not None:
             if re.match(r"^\s*\[[^\]\s][^\]]*\]", l):
-                cur = None; keep.append(l); continue
+                cur = None
+                if l.strip() != "[/投递]": keep.append(l)
+                continue
             mm = re.match(r"^\s*等回复\s*[:：]\s*(否|是)\s*$", l)
             if mm: cur[3] = mm.group(1) == "是"; continue
             cur[2].append(l); continue
-        keep.append(l)
+        if l.strip() != "[/投递]": keep.append(l)
     return "\n".join(keep).strip(), [(a, b, "\n".join(c).strip(), d) for a, b, c, d in out if "\n".join(c).strip()]
 
 

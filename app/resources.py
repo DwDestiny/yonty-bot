@@ -88,7 +88,7 @@ def estimate(t, history, c):
     return d * GB, f"没有历史也没写估计，{'构建类' if build else '只读和写文档类'}按 {d}G"
 
 
-def admit(t, snap, running, admitted, c, history, current=lambda r: 0):
+def admit(t, snap, running, admitted, c, history, current=lambda r: 0, idle=()):
     """running：在跑的本机任务；admitted：这一拍已放行的估计。返回 (放不放, 理由, 估计)。"""
     est, basis = estimate(t, history, c)
     units = len(running) + len(admitted)
@@ -99,7 +99,7 @@ def admit(t, snap, running, admitted, c, history, current=lambda r: 0):
     if snap["mem_some"] > c["pressure_pct"]:
         return False, f"等内存：内存压力 {snap['mem_some']:.0f}% 超过 {c['pressure_pct']}%", est
     fl = floor(snap, c)
-    grow = sum(max(0, estimate(r, history, c)[0] - current(r)) for r in running)
+    grow = sum(max(0, estimate(r, history, c)[0] - current(r)) / (2 if r.get("id") in idle else 1) for r in running)
     if (t.get("release") or "").startswith("立即"):
         pred, how = snap["avail"] - sum(admitted), "放行写了立即，只守底线"
     else:
