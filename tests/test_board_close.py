@@ -146,9 +146,30 @@ class DropPlanTest(Base):
         self.assertTrue(self.gone()); self.assertFalse((self.b.team.plan_of('other', '改版') or {}).get('dropped'))
 
     def test_same_reply_register_and_drop_is_refused(self):
-        rest, errs = self.b.pm_notes('proj', 'k', '[方案] 改版\n任务:\n- 甲 | a |\n[/方案]\n[撤方案] 改版\n理由：x')
+        rest, errs = self.b.pm_notes('proj', 'k', '[方案] 改版\n版本: 1.0\n任务:\n- 甲 | a |\n[/方案]\n[撤方案] 改版\n理由：x')
         self.assertTrue(any('同一条' in e for e in errs), errs)
         self.drop(rest); self.assertFalse(self.gone()); self.assertTrue(self.b.team.plan_of('proj', '改版'))
+
+    def test_dropped_plan_frees_version_and_reregisters_as_new(self):
+        """跟版本闸门叠加：撤掉的不挡新方案、不占版本号和临时名额；同名重登按新方案查，不带回没派的旧任务和撤之前失败的。"""
+        reg = lambda name, body: self.b.pm_notes('proj', 'k', f'[方案] {name}\n{body}\n[/方案]')[1]
+        items = lambda: self.b.team.plan_of('proj', '甲版')['items']
+        self.assertEqual(reg('甲版', '版本: 1.0\n任务:\n- 甲 | a |\n- 乙 | b |'), [])
+        self.assertTrue(reg('乙版', '版本: 1.1\n任务:\n- 丙 | a |'), '没收口的挡住新版本')
+        self.task(title='甲', plan='甲版'); self.drop('[撤方案] 甲版\n理由：不做了'); self.assertTrue(self.gone('甲版'))
+        self.assertFalse(self.b.team.plan_open(self.t, 'proj', '甲版'))
+        self.assertEqual(reg('乙版', '版本: 1.0\n任务:\n- 丙 | a |'), [])
+        self.assertTrue(reg('甲版', '任务:\n- 丁 | a |'), '没写版本，按新方案拦')
+        self.assertTrue(reg('甲版', '版本: 1.0\n任务:\n- 丁 | a |'), '版本已被占')
+        self.assertTrue(reg('甲版', '去掉: 乙'), '撤掉的不能只写去掉'); self.assertTrue(self.gone('甲版'))
+        self.assertEqual(reg('甲版', '版本: 1.2\n另开: 急修\n任务:\n- 丁 | a |'), [])
+        self.assertFalse(self.gone('甲版')); self.assertEqual(items(), ['丁'])
+        self.assertNotIn('乙', self.b.team.plan_of('proj', '甲版')['text'])
+        self.assertEqual(reg('甲版', '任务:\n- 戊 | a |'), []); self.assertEqual(items(), ['丁', '戊'], '再补也不带回撤之前失败的')
+        self.assertEqual(reg('甲版', '去掉: 戊'), []); self.assertEqual(items(), ['丁'])
+        for n in range(3): self.assertEqual(reg(f'小{n}', '版本: 临时\n任务:\n- 小活 | a |'), [])
+        self.assertTrue(reg('小3', '版本: 临时\n任务:\n- 小活 | a |')); self.drop('[撤方案] 小0\n理由：x')
+        self.assertEqual(reg('小3', '版本: 临时\n任务:\n- 小活 | a |'), [])
 
     def test_vouch_is_dropped_too(self):
         self.plan(); self.b.team.vouch_plan('proj', '改版'); self.drop('[撤方案] 改版\n理由：x'); self.plan()

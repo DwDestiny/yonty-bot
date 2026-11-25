@@ -112,10 +112,10 @@ else:
 if RULES_WRITE and RULES_RO:
     (NOTES if INSTALLED and "--rules" not in sys.argv else ERRORS).append(RULES_RO + ("（守则现在是空的）" if RULES_BLANK else ""))
 
-# 环境：缺了机器人跑不起来，但可能后装，只提醒；企微的 npm 现在就要用，没有就停下
+# 环境：CLI 可能后装，只提醒；工作目录新装必须有，装好过的只提醒；企微的 npm 现在就要用，没有就停下
 WORKDIR = X(CFG.get("workdir", "~"))
 if os.path.realpath(WORKDIR) == os.path.realpath(INST): bad("workdir", "不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
-elif not os.path.isdir(WORKDIR): NOTES.append(f"{CFG_FILE} 的 workdir 指向的目录 {WORKDIR} 不存在：先建好，或改成存在的目录")
+elif not os.path.isdir(WORKDIR): soft(f"{CFG_FILE} 的 workdir 指向的目录 {WORKDIR} 不存在：先建好，或改成存在的目录")
 _again = "装好后重跑 scaffold，服务的 PATH 才会带上它"
 if not shutil.which("claude"): NOTES.append("没找到 claude（Claude Code）：装好并登录，" + _again)
 if FEISHU_ON and not shutil.which("lark-cli"): NOTES.append("没找到 lark-cli：装好并登录，" + _again)

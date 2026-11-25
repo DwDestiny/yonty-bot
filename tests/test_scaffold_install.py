@@ -160,6 +160,14 @@ class CheckTest(Base):
         last = self.ok().split('完成', 1)[1]
         self.assertIn('还差 2 样', last); self.assertIn('没找到 claude', last); self.assertIn('没找到 lark-cli', last)
 
+    def test_missing_workdir_stops_new_install(self):
+        """缺陷 7：新装时工作目录不存在（或是个文件）就退出，一个文件都不写。"""
+        shutil.rmtree(self.work)
+        for _ in range(2):
+            e = self.fails(); self.assertIn(str(self.work), e); self.assertIn('workdir', e); self.assertEqual([p.name for p in self.inst.iterdir()], ['config.json'])
+            self.work.touch()
+        self.work.unlink(); self.work.mkdir(); self.ok()
+
     def test_missing_workdir_on_installed_only_warns(self):
         self.ok(); shutil.rmtree(self.work); self.assertIn(str(self.work), self.ok().split('还差 1 样')[1])
 

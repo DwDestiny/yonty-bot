@@ -202,6 +202,7 @@ class ScaffoldProductsTest(unittest.TestCase):
         base = Path(cls.tmp.name)
         cls.home, cls.inst = base / 'home', base / 'home' / 'bots' / 'demo'
         cls.inst.mkdir(parents=True)
+        (base / 'work').mkdir()
         cfg = json.loads(read(APP / 'config.example.json'))
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT, workdir=str(base / 'work'))
         (cls.inst / 'config.json').write_text(json.dumps(cfg, ensure_ascii=False), encoding='utf-8')
