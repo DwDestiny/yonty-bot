@@ -1,6 +1,6 @@
 # GEB-L3
-# Input: tests/、docs/assets/source/<目录> 里的检查脚本。
-# Output: 全量测试（分文件计时、列出跳过的）和页面检查的结果。
+# Input: tests/、scripts/ci/（分法清单和脚本）、docs/assets/source/<目录> 里的检查脚本。
+# Output: 全量测试（两台机器分着跑，两边相加等于全量，一条不跳）和页面检查的结果。
 # Pos: 全仓唯一的 CI。只认本仓的 main、ci/** 推送和手动触发，别人 fork 的代码不上机；
 #   不带任何凭证，不用缓存，不传产物。说明见 docs/ci.md。
 name: ci
@@ -51,13 +51,8 @@ jobs:
           sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq bubblewrap ripgrep > /dev/null
 
-      - name: 试沙箱，打开 systemd 用户总线
+      - name: 打开 systemd 用户总线
         run: |
-          # 跟真实沙箱一样带 --proc 试一次。起不来就导出变量；现在还没有测试读它，要起沙箱的测试会红。
-          if ! bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent --new-session --unshare-pid true; then
-            echo "这台机器挂不了 /proc，要起沙箱的测试在这里起不来"
-            echo "YONTY_NO_PROC_SANDBOX=1" >> "$GITHUB_ENV"
-          fi
           sudo loginctl enable-linger "$(id -un)" || true
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
           echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
@@ -65,26 +60,10 @@ jobs:
           for _ in 1 2 3 4 5; do systemctl --user show -p Version && break; sleep 1; done || true
           python3 --version; git --version; node --version; bwrap --version; nproc
 
-      - name: 全量测试
+      - name: 全量测试（减去要起沙箱的）
         id: tests
         timeout-minutes: 45
-        run: |
-          out="$RUNNER_TEMP/test-out"; mkdir -p "$out"; bad=0
-          # 作业进程在系统服务里，不在用户会话里；有用户总线就放进用户级 scope 跑，跟平时登录后跑一样
-          scope=(); if systemctl --user show -p Version > /dev/null 2>&1; then scope=(systemd-run --user --scope -q --); fi
-          : > "$out/time.txt"; : > "$out/skip.txt"
-          for f in tests/test_*.py; do
-            n="$(basename "$f" .py)"; s=$SECONDS; rc=0
-            "${scope[@]}" timeout -k 10 900 python3 -m unittest discover -v -s tests -p "$n.py" > "$out/$n.log" 2>&1 || rc=$?
-            # 一条测试也没收到时也算失败
-            grep -qE '^Ran [1-9][0-9]* test' "$out/$n.log" || { [ "$rc" -ne 0 ] || rc=1; }
-            printf '%5ss  rc=%s  %s  %s\n' "$((SECONDS - s))" "$rc" "$n" "$(grep -E '^(Ran |OK|FAILED)' "$out/$n.log" | tr '\n' ' ')" | tee -a "$out/time.txt"
-            grep -E " \.\.\. skipped | skipped ['\"]" "$out/$n.log" | sed "s/^/$n: /" >> "$out/skip.txt" || true
-            if [ "$rc" -ne 0 ]; then bad=1; echo "::group::$n 的输出"; cat "$out/$n.log"; echo "::endgroup::"; fi
-          done
-          echo; echo "== 耗时（从慢到快）"; sort -rn "$out/time.txt"
-          echo; echo "== 跳过的测试"; if [ -s "$out/skip.txt" ]; then cat "$out/skip.txt"; else echo "没有跳过的"; fi
-          exit "$bad"
+        run: python3 scripts/ci/split_tests.py run main
 
       - name: 判断要不要跑页面检查
         id: pages
@@ -153,3 +132,47 @@ jobs:
           done
           [ "$found" = 1 ] || echo "没有带检查脚本的目录"
           exit "$bad"
+
+  # 专用机的内核不许普通用户在新命名空间里挂 /proc，沙箱起不来，所以要起沙箱的测试放 GitHub 自带的机器上。
+  sandbox:
+    name: sandbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 假的 claude 放在 PATH 最前
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          printf '#!/bin/sh\necho "fake claude: CI must not reach the real CLI" >&2\nexit 97\n' > "$RUNNER_TEMP/fakebin/claude"
+          chmod 755 "$RUNNER_TEMP/fakebin/claude"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+
+      - name: 核对假的 claude 生效
+        run: |
+          test "$(command -v claude)" = "$RUNNER_TEMP/fakebin/claude"
+          rc=0; claude --version || rc=$?
+          test "$rc" -eq 97
+
+      - name: 装系统包
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq bubblewrap ripgrep > /dev/null
+
+      - name: 放开非特权用户命名空间，试沙箱
+        run: |
+          # Ubuntu 24.04 默认用 AppArmor 拦普通用户建用户命名空间，不关这一项 bwrap 报 setting up uid map: Permission denied。
+          # 机器用完即删，只改这一项，不动挂载。
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python3 --version; git --version; bwrap --version; nproc
+          # 参数跟 app/tasks.py 的 _box_base 一样
+          bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent --new-session --unshare-pid \
+            --tmpfs "$HOME" --tmpfs /tmp --tmpfs /run/user sh -c 'test -r /proc/1/comm'
+
+      - name: 要起沙箱的测试
+        timeout-minutes: 15
+        run: python3 scripts/ci/split_tests.py run sandbox
