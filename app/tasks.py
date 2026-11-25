@@ -656,7 +656,7 @@ def quota_alerts(q=None, now=None):
         u, reset = w.get("utilization") or 0, w.get("resetsAt") or 0
         if k == "five_hour" and u >= a.get("five_hour", 0.85):
             out.append((k, u, reset, f"5 小时额度只剩 {max(0, round((1 - u) * 100))}%"))
-        elif k == "five_hour" and reset > now and u >= 0.25 and a.get("five_hour_pace", 1.5):   # 2026-11-25 主人定：才过 1 小时用了 40% 这种就该提醒。回放 11-21~25 十四个窗口，1.5 响 3 次
+        elif k == "five_hour" and reset > now and u >= 0.25 and a.get("five_hour_pace", 1.5) and now - (q.get("at") or now) <= 600:   # 快照过了 10 分钟就不提，免得服务重启、活都停了还拿旧数说事。   # 2026-11-25 主人定：才过 1 小时用了 40% 这种就该提醒。回放 11-21~25 十四个窗口，1.5 响 3 次
             sec = max(60, WINDOW_S[k] - (reset - min(q.get("at") or now, now)))   # 快照那一刻窗口开了多久
             if u / (sec / WINDOW_S[k]) >= a.get("five_hour_pace", 1.5) - 1e-9:
                 out.append(("five_hour_pace", u, reset, f"5 小时额度才过 {left_text(sec)}，已经用了 {u:.0%}，照这个速度再过 {left_text(sec * (1 - u) / u)}就用完"))
@@ -1853,7 +1853,7 @@ def first_prompt(t, base, forked=False):
 
 def part(t):
     """方案里的任务（不含收口、临时活）：只推分支，不建合并请求。"""
-    return bool(t.get("plan")) and not t.get("closing") and not t.get("adhoc")
+    return bool(t.get("plan")) and not t.get("closing") and (not t.get("adhoc") or t.get("role") == "评审")
 
 def mr_note(t, base):
     if agent_of(t).boxed: return "。你在沙箱里，没有远端凭据：不用推送、不用建合并请求，验证过了服务替你做。没提交的改动不算数"
@@ -1869,7 +1869,7 @@ def plan_note(t):
     elif t.get("role") == "评审":
         own = "你只评审合好的改动，不改文件，不建合并请求。"
     elif t.get("adhoc"):
-        own = f"这件小活就你一个人做完：只改这些文件：{'、'.join(t.get('files') or [])}，跑跟改动有关的检查，自己建这一个合并请求。没有收口和评审，任务书写的验收就是全部，不另加检查。"
+        own = f"这件小活就你一个人做完：只改这些文件：{'、'.join(t.get('files') or [])}，跑跟改动有关的检查，自己建这一个合并请求。不走收口；任务书写的验收就是全部，不另加检查。"
     else:
         own = (f"你只做“{t['title']}”这一个小任务，只改这些文件：{'、'.join(t.get('files') or [])}。别的任务同时在改别的文件；要动范围外的文件，先用 [提问] 找项目经理。"
                "只跑跟改动有关的检查，不跑全量测试；提交并推送分支，不建合并请求，收口任务统一建。任务书写的验收就是全部：不另加检查、评审和复核轮；别的地方有问题，写进交回。")

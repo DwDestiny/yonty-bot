@@ -198,7 +198,7 @@ def pick(tk, d, pm, owner, ex):
     if not want:
         where = " ".join([d.get("title", ""), d.get("verify", ""), d.get("brief", ""), *(d.get("files") or [])])
         if re.search(FRONT, where, re.I): return {}, "前端活"
-        if re.search(RISKY, where, re.I) or (pm.get("jev") or {}).get("risk", 0) >= 0.5: return {}, "风险高"
+        if re.search(RISKY, where, re.I) or (pm.get("jev") or {}).get("risk", 0) >= 0.35: return {}, "风险高"   # 3.17 起不按风险分用 opus 了，这条线接上原来那道
     return {"agent": "zcode", "agent_first": "zcode", "model": z.conf["model"], "effort": z.conf.get("effort", "high"),
             "agent_back": {"model": pm["model"], "effort": pm["effort"]}}, ""
 

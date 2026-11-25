@@ -38,8 +38,25 @@ class Version(TT.Base):
         self.assertIn('同一个项目一次只做一个版本', r); self.assertIn('[方案] 整改', r); self.assertEqual({t['title'] for t in self.new()}, {'甲', '收口'})
         # 照回执补进去：只写了新的一条，已经派出去的不丢；收口自动等它
         self.assertEqual(self.pm("[方案] 整改\n任务:\n- 丁 | src/d |\n[/方案]\n" + block(self.e.repo, '丁', 'src/d')), '')
-        p = self.b.team.plan_of('proj', '整改'); self.assertEqual((set(p['items']) >= {'甲', '丁', '收口'}, p['version']), (True, '1.0'))
-        self.assertIn('丁', {n for n, y in self.b.team.dep_tasks(self.t, self.by('收口')) if y})
+        p = self.b.team.plan_of('proj', '整改'); self.assertEqual((p['items'], p['version']), (['甲', '乙', '丙', '收口', '丁'], '1.0'))   # 没派的乙、丙也留着
+        self.assertIn('先定底座', p['text']); self.assertIn('[补充]', p['text'])   # 定性那段不丢，新任务也看得到补充
+        self.assertIn('先定底座', self.by('丁')['plan_text']); self.assertIn('丁', {n for n, y in self.b.team.dep_tasks(self.t, self.by('收口')) if y})
+
+    def test_resend_full_list_replaces_and_drop_removes(self):
+        self.pm(PLAN + block(self.e.repo, '甲', 'src/a'))
+        self.assertEqual(self.pm("[方案] 整改\n换了做法\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 丙 | src/c |\n- 收口 | | 甲\n- 丁 | src/d |\n[/方案]\n"), '')
+        p = self.b.team.plan_of('proj', '整改'); self.assertNotIn('先定底座', p['text']); self.assertEqual((p['items'], p['version']), (['甲', '乙', '丙', '收口', '丁'], '1.0'))
+        self.pm("[方案] 整改\n去掉: 乙、甲\n任务:\n- 戊 | src/e |\n[/方案]\n")
+        self.assertEqual(self.b.team.plan_of('proj', '整改')['items'], ['甲', '丙', '收口', '丁', '戊'])   # 甲已经派出去，去不掉
+
+    def test_supplements_stay_inside_the_text_limit(self):
+        T = self.b.team; T.save_plan('proj', '长', '版本: 1.0\n定性' + '长' * 5980 + '\n任务:\n- 甲 | a |\n', self.t, self.b.TEAM)
+        for i in range(3): T.save_plan('proj', '长', f'第{i}次补充的要求\n任务:\n- 补{i} | b{i} |\n', self.t, self.b.TEAM)
+        x = T.plan_of('proj', '长')['text']; self.assertLessEqual(len(x), T.PLAN_TEXT); self.assertTrue(x.startswith('版本: 1.0\n定性')); self.assertIn('第2次补充', x)
+
+    def test_closed_plan_name_is_not_reused_for_a_new_version(self):
+        self.pm(self.plan('官网', ['甲'], '1.0') + block(self.e.repo, '甲', 'src/a', plan='官网')); self.put('甲', status='done')
+        self.assertIn('换个方案名', self.pm(self.plan('官网', ['乙', '收口'], '1.1') + block(self.e.repo, '乙', 'src/b', plan='官网'), '[不回]')); self.assertEqual(len(self.new()), 1)
 
     def test_next_version_opens_when_closing_starts(self):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '收口', deps='甲', closing=True))
@@ -70,6 +87,21 @@ class Version(TT.Base):
         note = self.t.plan_note(t); self.assertIn('自己建这一个合并请求', note); self.assertNotIn('收口任务统一建', note); self.assertIn('建草稿合并请求', self.t.mr_note(t, 'origin/main'))
         self.pm(self.plan('改版', ['乙', '收口'], '1.0') + block(self.e.repo, '乙', 'src/b', plan='改版'))   # 临时活不占版本
         self.assertEqual(self.by('乙')['plan'], '改版'); self.assertTrue(self.t.part(self.by('乙')))
+
+    def test_adhoc_may_carry_one_review(self):
+        rv = block(self.e.repo, '评审', deps='甲', plan='小活').replace('角色: 开发', '角色: 评审')
+        self.assertEqual(self.pm("[方案] 小活\n版本: 临时\n任务:\n- 甲 | src/a |\n- 评审 | | 甲\n[/方案]\n" + block(self.e.repo, '甲', 'src/a', plan='小活') + rv), '')
+        r = self.by('评审'); self.assertTrue(self.t.part(r)); self.assertIn('不建合并请求', self.t.plan_note(r)); self.assertIn('不建合并请求', self.t.mr_note(r, 'origin/main'))
+
+    def test_role_text_change_reaches_a_running_manager_session(self):
+        """项目经理的角色说明改了（升级），老会话下一轮再带一次，只一次；那一轮没跑成就下次再带。"""
+        self.pm('收到'); self.assertIn('你是项目 proj 的项目经理', self.pm_prompts()[-1])
+        self.pm('收到'); self.assertNotIn('你是项目 proj 的项目经理', self.pm_prompts()[-1])
+        f = next(Path(self.e.inst).glob('roles/项目经理.md')); f.write_text(f.read_text() + '\n新规矩：按版本走\n')
+        s = next(v for k, v in self.b.sessions.items() if k.startswith('proj:proj')); run, self.b.run_claude = self.b.run_claude, lambda *a, **k: None
+        head = self.b.pm_head('proj', 'k', s); self.assertIn('角色说明更新了', head); self.assertIn('新规矩：按版本走', head); self.b.run_claude = run
+        self.pm('收到'); self.assertIn('新规矩：按版本走', self.pm_prompts()[-1])
+        self.pm('收到'); self.assertNotIn('新规矩：按版本走', self.pm_prompts()[-1])
 
     def test_many_adhoc_become_a_version(self):
         for n in ('一', '二', '三'): self.assertEqual(self.pm(self.plan(n, [n], '临时') + block(self.e.repo, n, f'src/{n}', plan=n)), '')
@@ -140,10 +172,11 @@ class Alerts(TT.Base):
         self.use(0.9, 4 * 3600); self.check(); self.assertEqual(len(self.dms), 1); self.assertIn('只剩 10%', self.dms[0]); self.assertNotIn('才过', self.dms[0])
 
     def test_stale_snapshot_uses_its_own_time(self):
-        """快照是半小时前的：按快照那一刻算窗口开了多久，不按现在。"""
-        now = time.time(); q = {'at': now - 1800, 'windows': {'five_hour': {'utilization': 0.26, 'resetsAt': now + 4 * 3600}}}
-        self.assertEqual([x[0] for x in self.t.quota_alerts(q, now)], ['five_hour_pace'])   # 半小时用了 26%
-        q['at'] = now; self.assertEqual(self.t.quota_alerts(q, now), [])                      # 一小时用了 26%，不快
+        """几分钟前的快照：按快照那一刻算窗口开了多久，不按现在；过了 10 分钟的不提。"""
+        now = time.time(); q = lambda ago, opened: {'at': now - ago, 'windows': {'five_hour': {'utilization': 0.3, 'resetsAt': now - ago - opened + 18000}}}
+        a = self.t.quota_alerts(q(480, 3480), now); self.assertEqual([x[0] for x in a], ['five_hour_pace']); self.assertIn('才过 58 分', a[0][3])   # 按现在算是 66 分、比值 1.36，就不报了
+        self.assertEqual(self.t.quota_alerts(q(700, 1800), now), [])   # 服务重启、活都停了，不拿旧数说事
+        q = q(0, 3600)
         q['windows']['five_hour']['resetsAt'] = now - 5; self.assertEqual(self.t.quota_alerts(q, now), [])
 
     def watch(self): self.b.plan_watched[0] = 0; self.b.plan_watch(time.time())
@@ -167,7 +200,10 @@ class Alerts(TT.Base):
         a, b = self.plan(more='预算: 10（估的）\n'); self.t.update(a, cost=12)
         self.watch(); self.assertEqual(self.dms, [], '升级后第一次只记下现状')
         self.t.update(b, cost=4); self.watch(); self.assertEqual(len(self.dms), 1); self.assertIn('估的 10', self.dms[0])
-        c, d = self.plan('另一个'); self.t.T['quota_alert'] = {'plan_usd': 0}; self.t.update(d, cost=500); self.watch(); self.assertEqual(len(self.dms), 1)
+        c, d = self.plan('写得高', '预算: 500\n'); self.t.update(c, cost=59); self.watch(); self.assertEqual(len(self.dms), 1)
+        self.t.update(d, cost=2); self.watch(); self.assertEqual(len(self.dms), 2); self.assertIn('预警线 60', self.dms[1])   # 预算写多高都不能把提醒调没
+        self.t.update(d, status='done', _force=True)
+        c, d = self.plan('另一个'); self.t.T['quota_alert'] = {'plan_usd': 0}; self.t.update(d, cost=500); self.watch(); self.assertEqual(len(self.dms), 2)
 
     def test_spent_since_skips_old_records(self):
         self.t.spend_add(3, 2); self.t.spend_add(3, 1.5); self.t.spend_add(4, 1)

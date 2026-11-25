@@ -101,7 +101,8 @@ def follow_gate(project, d):
 def plan_of(project, name): return ((load().get("plans") or {}).get(project) or {}).get(name)
 
 def save_plan(project, name, body, tk=None, c=None):
-    """[方案] 名称：登记任务单。一行一个任务，写 - 标题 | 文件 | 依赖。返回出错说明，空串就是登记好了。"""
+    """[方案] 名称：登记任务单。一行一个任务，写 - 标题 | 文件 | 依赖。返回出错说明，空串就是登记好了。
+    重发同名的：任务单列全了原来的，整份换成新的；没列全就是往里补，原来的任务和正文都留着。不做的写一行“去掉: 标题一、标题二”（已经派出去的去不掉，用 [取消任务]）。"""
     name = name.strip()
     if not name: return "[方案] 后面没写名称"
     m = re.search(r"^\s*任务\s*[:：]\s*$", body, re.M)
@@ -111,21 +112,29 @@ def save_plan(project, name, body, tk=None, c=None):
         if mm: items.append(mm.group(1).split("|")[0].strip())
     if not items: return f"方案“{name}”没有任务单：写一行“任务:”，下面一行一个任务，- 标题 | 文件 | 依赖"
     if len(set(items)) != len(items): return f"方案“{name}”里有重名的任务"
-    old = plan_of(project, name) or {}
+    old, text = plan_of(project, name) or {}, body
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD] if tk else []
-    done = {t["title"] for t in mine if t["status"] == "done"}
+    done, sent = {t["title"] for t in mine if t["status"] == "done"}, [t["title"] for t in mine]
+    drop = {x.strip() for x in re.split(r"[,，、;；]+", _line(body, "去掉")) if x.strip()} - set(sent)
+    had = [i for i in old.get("items") or [] if i not in drop]
+    if set(had) - set(items):   # 没列全：往里补
+        items = had + [i for i in items if i not in had]
+        head = (old.get("text") or "")[:max(1500, PLAN_TEXT - len(body) - 20)].rstrip()
+        text = f"{head}\n\n[补充]\n{body}"
+    items = [i for i in items if i not in drop]
+    items += [i for i in dict.fromkeys(sent) if i not in items]
     new = [i for i in items if i not in done]
     top = (c or DEFAULTS)["max_tasks"] + 2
     if len(new) > top: return f"方案“{name}”没做完的有 {len(new)} 个，太多（开发任务最多 {top - 2} 个，另加收口、评审）：同一类页面、同一套文件、一个接一个的活合成一个任务；还是太多，这个版本先做最要紧的，其余放下一个版本"
-    items += [t["title"] for t in mine if t["title"] not in items]   # 已经派出去的不因为重发任务单丢掉
     ver = version_of(body) or old.get("version") or ""
     _change(lambda st: st.setdefault("plans", {}).setdefault(project, {}).__setitem__(
-        name, {"items": items, "text": body[:6000], "at": time.time(), "version": ver, **({"budget": b} if (b := budget_of(body) or old.get("budget")) else {})}))
+        name, {"items": items, "text": text[:PLAN_TEXT], "at": time.time(), "version": ver, **({"budget": b} if (b := budget_of(body) or old.get("budget")) else {})}))
     return ""
 
 # ---------- 版本：项目类的活一个版本一个方案、一个合并请求，测试、CI、评审、发版每个版本只做一次（2026-11-25 主人定）----------
-ADHOC = "临时"   # 一个任务就做完的小活：不派收口、评审，自己测、自己建合并请求
+ADHOC = "临时"   # 一个任务就做完的小活：不派收口，自己测、自己建合并请求；改动要合并的后面跟一个评审
 ADHOC_DAY = 3    # 一个项目一天最多几个临时活，再多就该攒成一个版本
+PLAN_TEXT = 6000   # 方案正文留多少字，派出去的任务都带着
 
 def _line(body, name):
     m = re.search(r"^\s*(?:[-*]\s+)?(?:\*\*)?" + name + r"(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(\S.{0,60}?)\s*(?:\*\*)?\s*$", body or "", re.M)
@@ -150,12 +159,16 @@ def plan_open(tk, project, name):
 def plan_check(tk, project, name, body):
     """登记新方案前：写没写版本、是不是又另起了一个。返回不放行的原因，空串放行。"""
     name, plans = name.strip(), (load().get("plans") or {}).get(project) or {}
-    if not name or name in plans: return ""   # 重发已有的方案就是往里补
     ver, why = version_of(body), _line(body, "另开")
+    if name in plans:   # 重发已有的方案就是往里补；收口过的方案名不拿来做新版本
+        was = plans[name].get("version")
+        return f"方案“{name}”是版本 {was} 用过的，已经收口：新版本 {ver} 换个方案名" if ver and was and ver != was and not plan_open(tk, project, name) else ""
+    if not name: return ""
     if not ver: return f"方案“{name}”没写版本：正文里写一行“版本: x.y.z”（没有版本号写“日期-主题”）；一个任务就做完的小活写“版本: {ADHOC}”"
     if ver == ADHOC:
-        n = sum(1 for l in body.split("\n")[next((i for i, l in enumerate(body.split("\n")) if re.match(r"\s*任务\s*[:：]\s*$", l)), 10**6):] if ITEM.match(l))
-        if n > 1: return f"“版本: {ADHOC}”的方案只装一个任务，这里有 {n} 个：按版本做，写版本号"
+        ls = body.split("\n"); at = next((i for i, l in enumerate(ls) if re.match(r"\s*任务\s*[:：]\s*$", l)), len(ls))
+        n = sum(1 for l in ls[at:] for m in [ITEM.match(l)] if m and "评审" not in m.group(1).split("|")[0])
+        if n > 1: return f"“版本: {ADHOC}”的方案只装一个任务（要合并的再加一个评审），这里有 {n} 个：按版本做，写版本号"
         day = sum(1 for p in plans.values() if p.get("version") == ADHOC and time.time() - (p.get("at") or 0) < 86400)
         return f"{project} 一天里已经有 {day} 个临时活：攒成一个版本做；真要单独做，写一行“另开: 理由”" if day >= ADHOC_DAY and not why else ""
     same = next((n for n, p in plans.items() if p.get("version") == ver), "")

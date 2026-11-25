@@ -573,6 +573,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     it = (u.get("iterations") or [{}])[-1]
     with lock:
         s["started"] = True; s["last"] = time.time(); s["id"] = out.get("session_id", sid)
+        if s.get("pm_next"): s["pm_intro"] = s.pop("pm_next")   # 带角色说明的那一轮跑成了
         s["ctx"] = sum(it.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         s["cost"] = round((u.get("input_tokens") or 0) + 0.1 * (u.get("cache_read_input_tokens") or 0) + 2 * (u.get("cache_creation_input_tokens") or 0) + 5 * (u.get("output_tokens") or 0))   # 这一轮折成输入 token 当量
         s["env"] = [owner, private, chat_id, channel]   # 压缩时用同一套环境：自动记忆开关会改系统提示，换了就命中不了缓存
@@ -653,9 +654,8 @@ def handle(ev):
             prompt = build_prompt(ev, name, ctx, quoted)
             if ev.get("resumed"): prompt += "\n\n（服务刚重启，你上一轮处理这条消息做到一半断了。接着做完再回，已经做过的动作别重复。）"
             if pm:
-                prompt = (pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "") + prompt
+                prompt = pm_head(pm, key, s) + prompt
                 if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
-                with lock: s["pm_intro"] = True; s["team"] = 3
             extras = []   # 项目经理中途的结果并进最后一条一起办，里面的 [方案]、[派活] 不丢
             if STRICT: prompt = with_board(s, prompt, pm, owner and ev.get("chat_type") == "p2p" or bool(pm and owner))
             result = run_claude(key, s, prompt, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
@@ -1387,7 +1387,7 @@ def dispatch_one(ev, d):
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
                      status="approved" if owner else "pending", **({"idem": idem} if idem else {}),
-                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "draft": d.get("draft", False), "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:5000],
+                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "draft": d.get("draft", False), "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:team.PLAN_TEXT],
                          **({"adhoc": True} if (team.plan_of(ev["pm"], d["plan"]) or {}).get("version") == team.ADHOC else {})}
                         if STRICT and ev.get("pm") else {}),
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
@@ -1509,14 +1509,15 @@ def plan_watch(now):
     for (proj, name), ts in by.items():
         live = [t for t in ts if t["status"] in tasks.ACTIVE]
         said = (team.plan_of(proj, name) or {}).get("budget")
-        line = said or (tasks.T.get("quota_alert") or {}).get("plan_usd", 30)
+        base = (tasks.T.get("quota_alert") or {}).get("plan_usd", 30)
+        line = min(said, 2 * base) if said and base else said or base   # 预算是项目经理写的，写多高都不能把提醒调没
         if not live or not line: continue
         cost = sum(t.get("cost") or 0 for t in ts)
         step, key = max([s for s in PLAN_STEPS if cost >= s * line], default=0), f"{proj}/{name}"
         if step <= (sent.get(key) or 0): continue
         if not first:
             top = "、".join(f"{tasks.ref(t)} {t.get('cost') or 0:.1f}" for t in sorted(ts, key=lambda t: -(t.get("cost") or 0))[:3])
-            owner_dm("feishu" if FEISHU_ON else "wecom", f"花费提醒：{proj} 的方案“{name}”已花 {cost:.1f}（美元当量，只算任务），超过{'估的' if said else '预警线'} {line:g}" + (f" 的 {step:g} 倍" if step > 1 else "")
+            owner_dm("feishu" if FEISHU_ON else "wecom", f"花费提醒：{proj} 的方案“{name}”已花 {cost:.1f}（美元当量，只算任务），超过{'估的' if said == line else '预警线'} {line:g}" + (f" 的 {step:g} 倍" if step > 1 else "")
                      + f"。花得最多：{top}。还有 {len(live)} 个没完：{'、'.join(tasks.ref(t) for t in live[:8])}。\n只提醒，不会停；要停发 {BT}/stop {proj}{BT}。")
         new[key] = step
     if first or new != sent: save(PLAN_SENT, dict(list(new.items())[-200:]))
@@ -1941,6 +1942,14 @@ def pm_intro(project, key=""):
     if ts: rec += f"\n仓库：{ts[-1]['repo']}"
     return (f"[项目经理 {project}] 你是项目 {project} 的项目经理。\n{r.get('body', '')}\n" + (f"\n项目档案：\n{rec}\n" if rec else "") + "\n---\n")
 
+def pm_head(project, key, s):
+    """项目经理这一轮开头带的角色说明：新会话带整份；说明改过的（升级），老会话再带一次，免得照旧规矩办。跑成了才算带过。"""
+    sig = hashlib.sha1(((tasks.roles().get("项目经理") or {}).get("body") or "").encode()).hexdigest()[:10]
+    with lock: s["team"] = 3
+    if s["started"] and s.get("pm_intro") == sig: return ""
+    with lock: s["pm_next"] = sig
+    return "（你的角色说明更新了，以这份为准，前面的作废。）\n" + pm_intro(project) if s["started"] and s.get("pm_intro") else pm_intro(project, key)
+
 def pm_notes(project, key, text, vouch=False):
     """[交接]、[看板]、[方案] 由服务收下，不露给人。返回 (剩下的文字, 出错说明)。"""
     errs = []
@@ -2058,7 +2067,7 @@ def _delivery_turn(ev):
     fol = bool(pm and all(r.get("follow") and tasks.dl.follows(r) and r["from"].get("type") == "ctrl" and r["to"].get("project") == pm and follow_ok(r.get("src_im")) for r in batch))
     if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活、给已有任务追加要求：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
     else: tip = ""
-    prompt = (pm_intro(pm, key) if pm and not s["started"] else "") + "\n\n".join(
+    prompt = (pm_head(pm, key, s) if pm else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
         for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
         + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
@@ -2911,10 +2920,8 @@ def pm_relay(ev):
         try:
             with sem:
                 s = get_session(key)
-                prompt = ((pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "")
-                          + relay_prompt(t, e, n in (s.get("briefed") or []), PM_RELAY_TAIL))
+                prompt = pm_head(pm, key, s) + relay_prompt(t, e, n in (s.get("briefed") or []), PM_RELAY_TAIL)
                 if STRICT: prompt = with_board(s, prompt, pm, owner)
-                with lock: s["pm_intro"] = True; s["team"] = 3
                 result = run_claude(key, s, prompt, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"],
                                     quiet=True, layer=pm, hop=hop)
         except QuotaOut: return
