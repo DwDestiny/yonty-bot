@@ -9,8 +9,8 @@ English: read CONTRIBUTING.md first. Do not disclose vulnerabilities here, see S
 
 ## 怎么验证的 · Verification
 
-<!-- 贴命令和结果的最后几行。没跑的、跳过的照实写。只改文档可以不跑全量。
-Paste commands and the last lines of output. Say what you did not run. -->
+<!-- 合并请求不会自动跑 CI。贴你本机跑的命令和结果的最后几行，没跑的、跳过的照实写；只改文档可以不跑全量。看完代码后由维护者把提交推到 ci/ 分支，在 CI 上跑全量，见 docs/ci.md。
+Pull requests do not run CI by themselves. Paste the commands you ran and the last lines of output, and say what you did not run. After review, a maintainer pushes the commit to a ci/ branch to run the full suite in CI, see docs/ci.md. -->
 
 ```bash
 python3 -m unittest discover tests

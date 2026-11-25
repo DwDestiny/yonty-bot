@@ -1,6 +1,6 @@
 # 参与贡献 · Contributing
 
-> **English summary.** Bug reports, docs fixes and small patches are welcome. Open an issue before you change behaviour, config fields, hooks or the permission boundary. Tests need Python 3.9+ and git, and they never connect to an IM or call Claude. Never commit instance data (real IDs, names, tokens, private paths, chat content). Report security problems as described in [SECURITY.md](SECURITY.md), not in a public issue. English or Chinese is fine.
+> **English summary.** Bug reports, docs fixes and small patches are welcome. Open an issue before you change behaviour, config fields, hooks or the permission boundary. Tests need Python 3.9+ and git, and they never connect to an IM or call Claude. CI runs on a maintainer-pushed branch after review, see docs/ci.md. Never commit instance data (real IDs, names, tokens, private paths, chat content). Report security problems as described in [SECURITY.md](SECURITY.md), not in a public issue. English or Chinese is fine.
 
 欢迎提缺陷、改文档、提交小补丁，中文英文都可以。参与前请读[行为准则](CODE_OF_CONDUCT.md)。安全问题不要开公开议题，按 [SECURITY.md](SECURITY.md) 报告。
 
@@ -44,7 +44,8 @@ python3 -m unittest tests.test_yonty_bot.RepoDocsTest
 - 测试不连 IM，不调真的 Claude。
 - 一部分测试要用 `bwrap` 或 systemd 用户总线，机器上没有时会跳过。
 - 只改文档，跑上面两条单独的测试就够了，后一条会查文档链接和疑似真实 ID。改代码要跑全量。
-- 仓库没有 CI，合并请求里要写你跑了哪些命令、结果怎样。跳过的和没跑的也照实写。
+- 合并请求本身不会自动跑 CI，所以合并请求里要写你本机跑了哪些命令、结果怎样，跳过的和没跑的也照实写。
+- 维护者看完你的代码后，会把那个提交推到 `ci/` 分支，在 CI 上跑一遍全量测试：专用机跑大部分，GitHub 自带机器跑要起沙箱的测试，两边相加等于全量，一条不跳。做法见 [docs/ci.md](docs/ci.md)。你不用自己跑 CI，也不要在合并请求页面点“批准并运行”。
 
 ## 提交和合并请求
 

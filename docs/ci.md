@@ -45,7 +45,7 @@ git push origin --delete ci/<名字>    # 验完删掉
 
 **为什么分两边。** 沙箱要用 bwrap 在新的命名空间里挂 `/proc`，专用机的内核不许普通用户这么挂，要起沙箱的测试在那里必红。GitHub 自带的机器可以，只要先放开 `kernel.apparmor_restrict_unprivileged_userns` 这一项系统设置（Ubuntu 24.04 默认不许普通用户建用户命名空间）。
 
-**怎么分。** 清单 `scripts/ci/sandbox-tests.txt` 一行一个完整的测试编号。清单里的在 GitHub 机上跑，其余的在专用机上跑，新加的测试默认归专用机。两边用同一个脚本取编号：
+**怎么分。** 清单 `scripts/ci/sandbox-tests.txt` 一行一个完整的测试编号，现在 63 条（全量 762 条，专用机 699 条，数目以脚本打印为准）。清单里的在 GitHub 机上跑，其余的在专用机上跑，新加的测试默认归专用机。两边用同一个脚本取编号：
 
 ```bash
 python3 scripts/ci/split_tests.py check          # 只核对分法
@@ -64,14 +64,7 @@ python3 scripts/ci/split_tests.py run sandbox    # GitHub 机那一边
 
 **加一条要起沙箱的测试。** 把完整编号（`文件.类.方法`）加进清单，同时改清单头的条数。改名、删除测试也要一起改清单。要不要进清单，看它是不是真要起沙箱，不看它在专用机上红不红：有的测试在沙箱起不来时也会过。
 
-现在有 11 条这样的测试还在专用机上跑，它们在那里过了不代表沙箱没问题。改了沙箱，合并前在一台 bwrap 能用的 Linux 上补跑它们所在的文件：
-
-```bash
-for n in review_fixes review_round2_git review_round3_box review_round4_box \
-         review_round5_box review_round6_box v2_round2; do
-  python3 -m unittest discover -s tests -p "test_$n.py" || echo "没过：$n"
-done
-```
+要起沙箱但沙箱起不来也会过的测试，同样放进清单，让它们在 GitHub 机上真的起一次沙箱。判断办法：在 `PATH` 最前放一个会记录调用的 `bwrap`，看哪些测试真的调了它。
 
 ## 页面检查
 
