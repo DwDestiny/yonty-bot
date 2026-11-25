@@ -126,8 +126,8 @@ TRANSITIONS = {
     "running":   {"waiting", "done", "failed", "lost", "cancelled", "approved"},   # 跑一轮的结果；approved 是额度不够、退回排队等恢复
     "waiting":   {"approved", "cancelled"},                            # 有人回答或加预算后再排队
     "done":      {"approved", "failed"},                                         # 追加要求
-    "failed":    {"approved"},                                         # 接着干
-    "lost":      {"approved"},                                         # 进程没了，接着干
+    "failed":    {"approved", "cancelled"},                            # 接着干，或不要了
+    "lost":      {"approved", "cancelled"},                            # 进程没了，接着干，或不要了
     "cancelled": set(), "rejected": set(), "expired": set(),
 }
 
@@ -1021,7 +1021,7 @@ def parse_directive(text):
 
 DISPATCH_END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|/?方案|停|继续|不是我的|不回)(?:\s[^\]]*)?\]")
 
-SWALLOWED = re.compile(r"^\s*\[(?:任务指令|处置|改验证|取消任务|改依赖|挂起)\]\s*[^\s#:：]+#\d+")   # 没写 [/派活] 时，后面的标记会被当成任务书的字
+SWALLOWED = re.compile(r"^\s*\[(?:任务指令|处置|改验证|取消任务|改依赖|挂起)\]\s*[^\s#:：]+#\d+|^\s*\[撤方案\]\s*\S+")   # 没写 [/派活] 时，后面的标记会被当成任务书的字
 
 def parse_directives(text):
     """一条回复里的全部 [派活] 块。每块到下一个标记行或 [/派活] 为止。返回 (去掉块的回复, [字段 dict])。"""

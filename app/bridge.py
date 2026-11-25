@@ -1232,7 +1232,8 @@ def task_command(ev):
         if arg[0] == "brief": return f"{n} {t['title']} 的任务书：\n{t['brief']}"
         if arg[0] == "cancel":
             if not can_steer(t, ev): return f"{n} 不是你派的，取消找{t['requester']['name']}或{OWNER_NAME}。"
-            if t["status"] not in tasks.ACTIVE + ("pending",): return f"{n} 已经{tasks.LABEL.get(t['status'])}了。"
+            no = cancel_no(t)
+            if no: return f"{n} {no}。"
             cancel_task(t)
             return f"{n} 停了。" + (f"分支 {BT}{t['branch']}{BT} 留着。" if t.get("session_started") else "")
         if not owner: return f"清理只有{OWNER_NAME}能做。"
@@ -1247,15 +1248,11 @@ def task_command(ev):
     if m: return task_approve(ev, m.group(1) == "approve", m.group(2))
     if text in ("/approve", "/reject"): return f"用法：{BT}{text} 短名#N{BT}"
     m = FOLLOW_RE.match(text)
-    if m and owner and known_ref(m.group(1)):   # 主人的话直接转给任务
-        t, err = find_task(m.group(1), tasks.all_tasks())
-        return task_follow(ev, t, m.group(2).strip()) if t else err
+    if m and owner:   # 主人的话直接转给任务；没有这个任务（议题号、“问题#3”）就照常交给聊天，不吞
+        t, cands = tasks.resolve(m.group(1), tasks.all_tasks())
+        if t: return task_follow(ev, t, m.group(2).strip())
+        if len(cands) > 1: return ambiguous(m.group(1), cands)
     return None   # 别人的 #N 补充也交给主控：它决定转不转、怎么转（[任务指令]），见 chat_followups
-
-def known_ref(s):
-    """开头的“xx#N”是不是任务编号：只写 #N，或 # 前面是已有任务的短名。别的（“问题#3 怎么办”）照常交给聊天。"""
-    p = tasks.parse_ref(s)
-    return bool(p) and (p[0] is None or any(t.get("project") == p[0] for t in tasks.all_tasks()))
 
 def team_view():
     """角色和各项目上的事：谁在负责、做到哪。"""
@@ -1382,7 +1379,9 @@ def dispatch_one(ev, d):
     ag, ag_why = tasks.agents.pick(tasks._me(), dict(d, repo=repo), pm, owner, ex)
     pm = dict(pm, **ag)
     if d.get("agent") == "zcode" and not ag: cloud_note += f"（ZCode 接不了：{ag_why}，改用 Claude。）"
-    t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
+    with team.LK if d["plan"] and ev.get("pm") else contextlib.nullcontext():   # 跟撤方案用同一把锁：撤完的不会再派出去
+        if STRICT and ev.get("pm") and team.dropped(ev["pm"], d["plan"]): return (head + f"\n\n（派活没成：方案“{d['plan']}”已撤。）").strip()
+        t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
                      verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
@@ -1715,6 +1714,9 @@ def task_tick():
         for e in tasks.events(n, t.get("posted", 0)):
             idx = t.get("posted", 0)
             if e.get("quiet"): t = tasks.update(n, _touch=False, posted=idx + 1); continue
+            if t.get("cancelled_from") and e["kind"] in RELAY_KINDS:   # 失败后取消了：没处理的回报、催办都不再叫人
+                if (n, idx) in relaying: break
+                t = tasks.update(n, _touch=False, posted=idx + 1, relay_pending=None); continue
             if (e["kind"] in OVERDUE and not tasks.overdue_open(t)) or (e["kind"] == "blocked" and t["status"] != "approved"):   # 等到处理时已经过去了
                 if (n, idx) in relaying: break
                 t = tasks.update(n, posted=idx + 1); continue
@@ -1796,7 +1798,7 @@ def task_tick():
         elif t["status"] == "waiting":
             try: wait_watch(t, now)
             except Exception: log.exception("task #%s wait check failed", t["id"])
-        if t.get("schedule") and t["status"] in ("done", "failed", "lost") and not t.get("sched_after"):
+        if t.get("schedule") and (t["status"] in ("done", "failed", "lost") or t.get("cancelled_from")) and not t.get("sched_after"):
             tasks.update(t["id"], _touch=False, sched_after=True)
             done = [e["text"] for e in tasks.events(t["id"]) if e["kind"] in ("done", "failed")]
             alert = sch.after_run(tasks._me(), tasks.load(t["id"]), done[-1] if done else "")
@@ -1963,6 +1965,12 @@ def pm_notes(project, key, text, vouch=False):
         e = team.plan_check(tasks._me(), project, a, b) or team.save_plan(project, a, b, tasks._me(), TEAM)
         if e: errs.append(e)
         elif vouch: team.vouch_plan(project, a.strip(), b)
+    lines, names = text.split("\n"), {a.strip() for a, _ in ps}
+    code = team.fenced(lines)
+    for i in [i for i, l in enumerate(lines) if i not in code and (m := team.DROP.match(l)) and m.group(1).strip() in names][::-1]:   # 分不清先后，不猜
+        errs.append(f"{lines[i].strip()}：同一条回复里又登记又撤，没撤；只留一个")
+        del lines[i:i + 1 + bool(i + 1 < len(lines) and team.REASON.match(lines[i + 1]))]
+        text = "\n".join(lines).strip()
     return text, errs
 
 def pm_marks(project, key, owner, text, hop=0, about=None, idem=None, src=None, follow=False):
@@ -2096,7 +2104,7 @@ def _delivery_turn(ev):
             result = with_retry(ev2, key, result, redo, pm, follow=not t)
         else:
             result = unrunnable(pm, key, hop, result, lambda note: run_claude(key, s, note, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop), idem)
-        if t and result.strip(): result = turn_directives(t, result, hop, f"{pm} 的项目经理", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
+        if t and result.strip(): result = turn_directives(t, result, hop, f"{pm} 的项目经理", idem=idem, plan_pm=pm, cli=any(r.get("via") == "cli" for r in batch))
         team_src = rec.get("src_im") or (im if im and session_key(im) == bk else None)
         result = team.visible(pm_marks(pm, key, o_owner, result, hop, tid, idem, team_src, fol))
         if result and bk.startswith("p2p:") and not (im and not team_src):   # 在别的聊天里答复的，照下面的老路只发主人私聊，不带进那个群
@@ -2119,7 +2127,7 @@ def _delivery_turn(ev):
             owner_dm(im.get("channel", "feishu"), f"【{pm or '主控'} 对你答复的回应】\n{said}"
                      + ("\n（里面的派活、任务指令没执行：不是在它自己的私聊里答复的。）" if said != result.strip() else ""))
     if t and result.strip() and result.strip() != AMB_SILENT:
-        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=idem, cli=any(r.get("via") == "cli" for r in batch))
+        try: result = turn_directives(t, result, hop, f"{pm} 的项目经理" if pm else "主控", idem=idem, plan_pm=pm or "", cli=any(r.get("via") == "cli" for r in batch))
         except Exception: log.exception("delivery turn directives failed")
         if result.strip(): task_say(t, (f"【{pm}】" if pm else "") + result, f"dlr{rec['id']}")   # 跟投递本身的引用（dl 开头加编号）分开
 
@@ -2128,7 +2136,7 @@ def pending_marks(result):
     out = ["[派活]"] if tasks.parse_directive(result)[1] else []
     out += ["[任务指令]"] if [s for s, _ in split_taskcmds(tasks.parse_directive(result)[0]) if s is not None] else []
     out += ["[转交]"] if team.blocks(result, "转交")[1] else []
-    out += [f"[{m}]" for m in dict.fromkeys(re.findall(r"^\s*\[(处置|改验证|取消任务|改依赖|挂起)\]", result or "", re.M))]
+    out += [f"[{m}]" for m in dict.fromkeys(re.findall(r"^\s*\[(处置|改验证|取消任务|改依赖|挂起|撤方案)\]", result or "", re.M))]
     return out + (["[定时]"] if sch.parse_block(result)[1] else [])
 
 def follow_ok(src):
@@ -2166,7 +2174,7 @@ def follow_cmds(ev, text, errs, made, idem):
         if not x: errs.append(f"{s}：" + (ambiguous(s, cands) if len(cands) > 1 else f"不是{OWNER_NAME}在这个私聊里派的方案任务，不能追加")); return ""
         n, key = tasks.ref(x), f"{idem}:{x['id']}:{hashlib.sha1(body.encode()).hexdigest()[:12]}"
         if tasks.inbox_seen(x["id"], key): return ""
-        why = (f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "在等答复，这一轮不能替人答" if x["status"] == "waiting" else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
+        why = ("方案已撤" if team.dropped(x.get("project"), x["plan"]) else f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "在等答复，这一轮不能替人答" if x["status"] == "waiting" else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
                else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
         if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
         tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
@@ -2229,14 +2237,15 @@ def reply_target(fr):
     if fr.get("type") == "im": return "主人"   # 人答复的：发件人不是智能体，回话直接写在回复里，要再问就找主人
     return {"pm": f"项目经理 {fr.get('project')}", "ctrl": "主控"}.get(fr.get("type"), fr.get("ref"))
 
-def turn_directives(t, result, hop, who, idem=None, cli=False):
+def turn_directives(t, result, hop, who, idem=None, cli=False, plan_pm=""):
     """投递轮回复里的 [任务指令]、[派活]：按任务回报的规矩转（派活人的权限、每个任务最多自动追加 RELAY_MAX 次）。
     这一轮已经到跳数上限，再转就是下一跳，不转，记决策日志。
     cli：这一轮是命令行投递叫起来的，不带主人权限：[派活] 一律等主人批；[任务指令] 只能回给发来的那个任务，不改预算、不放开验收。"""
     mx = tasks.dl.conf(CFG)["max_hops"]
     if hop >= mx and not cli:   # 管理标记不算再转一跳，照办
         ow = bool(t["requester"].get("owner"))
-        result, bad = apply_ctl(result, [x for x in tasks.all_tasks() if ow or x["requester"].get("id") == t["requester"].get("id")], who, idem or "", own=ow)
+        result, bad = apply_ctl(result, [x for x in tasks.all_tasks() if ow or x["requester"].get("id") == t["requester"].get("id")], who, idem or "", own=ow, plan_pm=plan_pm)
+        if plan_pm: ctl_bad(t, [x for x in bad if x.startswith("[撤方案]")])
         if bad: result += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     if hop >= mx:
         if [s for s, _ in split_taskcmds(result) if s] or tasks.parse_directive(result)[1]:
@@ -2245,7 +2254,7 @@ def turn_directives(t, result, hop, who, idem=None, cli=False):
             if owner_dm_task(t):
                 owner_dm(t["origin"].get("channel", "feishu"), f"{tasks.ref(t)} 这条流程停下了：转了 {hop} 次，里面的派活和指令没转出去。要接着就回“继续 {t.get('project')}”。")
         return result
-    text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop, idem, cli)
+    text = relay_followups(t, result, f"{who}（替{t['requester']['name']}）", hop, idem, cli, plan_pm=plan_pm)
     if TASKS_ON and tasks.parse_directive(text)[1]:
         rev = relay_ev(t)
         if cli and t["requester"].get("owner"): rev.update(sender_id="", sender_name=f"{tasks.ref(t)}（命令行投递）")
@@ -2500,7 +2509,12 @@ def stall_tick():
     moving = {x["to"].get("project") or x["from"].get("project") for x in tasks.dl.load(tasks._me()) if x["status"] in ("new", "handing")}
     with lock: busy = {k.split(":")[1] for k, q in workers.items() if k.startswith("proj:") and q.unfinished_tasks}
     for p, plans in (team.load().get("plans") or {}).items():
+        if not plans: continue
         name, pl = max(plans.items(), key=lambda kv: kv[1].get("at") or 0)
+        if pl.get("dropped"):   # 最近的撤了就不提醒，也不去催更老的
+            stall_seen.pop(p, None)
+            if told.pop(p, None): save(STALL_FILE, told)
+            continue
         ts = [t for t in allt if t.get("project") == p and not t.get("schedule")]
         left = [i for i in pl["items"] if not any(t.get("plan") == name and t["title"] == i for t in ts)]
         mine = [t for t in ts if owner_dm_task(t)]
@@ -2636,7 +2650,7 @@ RELAY_MAX = int((CFG.get("tasks") or {}).get("relay_max") or 10)   # 防没人�
 # [任务指令] 短名#N 内容：从这一行起，取到下一个 [任务指令]、[派活]、[不回]、[/任务指令] 或回复结束，整段原样转。
 # 冒号后面换行也行。给人看的话写在指令前面；非要写在后面，就先单独一行 [/任务指令] 收尾。[派活] 起到结尾都是派活块，不拆。
 TASKCMD_HEAD = re.compile(r"^\s*\[任务指令\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
-TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令|处置|改验证|取消任务|改依赖|挂起)\]")
+TASKCMD_STOP = re.compile(r"^\s*\[(?:任务指令|派活|转交|看板|交接|处理掉|投递[^\]]*|方案|停|继续|不回|/任务指令|处置|改验证|取消任务|改依赖|挂起|撤方案)\]")
 TASKCMD_END = re.compile(r"^\s*\[/任务指令\]\s*$")
 DISPATCH_LINE = re.compile(r"^\s*\[派活\]\s*$")
 FENCE_LINE = re.compile(r"^\s*(`{3,}|~{3,})\w*\s*$")
@@ -2675,15 +2689,46 @@ def apply_taskcmds(text, fn):
 # 上级直接管任务的标记，一行一个：[处置] 短名#N 继续等 30｜重跑｜按失败收 理由；[改验证] 短名#N 命令（下一行 理由：…）；[取消任务] 短名#N 原因；[改依赖] 短名#N 标题、短名#N｜无
 CTL_HEAD = re.compile(r"^\s*\[(处置|改验证|取消任务|改依赖|挂起)\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
 
-def apply_ctl(text, pool, who, idem="", pm="", told=True, own=False):
+def ctl_drop(arg, why, who, pm, own, told, idem):
+    """[撤方案]：项目经理写名称，只撤自己项目的；主控写 项目短名 名称。只认主人身份的一轮。返回 (没办成的原因, 要说的话)。"""
+    if not own: return f"只有{OWNER_NAME}的会话能撤", ""
+    if pm: project, name = pm, arg.strip()
+    else:
+        project, name = (arg.split(None, 1) + ["", ""])[:2]
+        if not name: return "要写 [撤方案] 项目短名 名称", ""
+        if project not in (team.load().get("plans") or {}): return f"没有项目 {project} 的方案，要写 [撤方案] 项目短名 名称", ""
+    if not name: return "后面要写名称", ""
+    if not why: return "要在下一行写 理由：…", ""
+    e, again = team.drop_plan(tasks._me(), project, name, why, who, f"{idem}:{project}/{name}" if idem and idem != "chat" else "")
+    if e or again: return e, ""
+    tasks.decide("撤方案", to=project, why=f"{who}：{name}：{why}"[:300])
+    say = f"方案“{name}”撤了（{project}）：{why}"
+    ts = [t for t in tasks.all_tasks() if t.get("project") == project and t.get("plan") == name]
+    if told and ts:   # 项目经理撤的：告诉派活人，跟取消任务一样
+        try:
+            if task_say(ts[-1], f"{say}（{who}定的）", f"t{ts[-1]['id']}drop{int(time.time())}"): return "", ""
+        except Exception: log.exception("plan drop not told")
+    return "", say
+
+def apply_ctl(text, pool, who, idem="", pm="", told=True, own=False, plan_pm=""):
     """执行回复里的管理标记，返回 (剩下的文字, 没办成的说明)。只认代码块、派活块外面的。pool：这一轮能管的任务；pm：只能管这个项目；told：取消要不要告诉派活人；own：主人的话（同事那边不许动验证闸门）。"""
-    if not text or not any(CTL_HEAD.match(l) for l in text.split("\n")): return text, []
+    if not text or not any(CTL_HEAD.match(l) or team.DROP.match(l) for l in text.split("\n")): return text, []
     keep, bad, lines, i, fence, block, n = [], [], text.split("\n"), 0, False, False, 0
+    code = team.fenced(lines)
     while i < len(lines):
         l = lines[i]; i += 1
         if FENCE_LINE.match(l): fence = not fence
         if DISPATCH_LINE.match(l): block = True
         elif block and tasks.DISPATCH_END.match(l): block = False
+        m = None if fence or block or i - 1 in code else team.DROP.match(l)
+        if m:
+            r, name = team.REASON.match(lines[i]) if i < len(lines) else None, m.group(1).strip()
+            if r: i += 1
+            try: e, say = ctl_drop(name, r.group(1).strip() if r else "", who, pm or plan_pm, own, told, idem)
+            except Exception as x: log.exception("plan drop failed"); e, say = f"出错了（{type(x).__name__}）", ""
+            if e: bad.append(f"[撤方案] {name}：{e}，没撤")
+            if say: keep.append(f"（{say}。）")
+            continue
         m = None if fence or block else CTL_HEAD.match(l)
         if not m: keep.append(l); continue
         what, s, arg, why = m.group(1), m.group(2), m.group(3).strip().strip(BT), ""
@@ -2766,15 +2811,24 @@ def ctl_verify(t, cmd, why, who, told):
     if tasks.load(t["id"]).get("gate"): tasks.update(t["id"], _touch=False, ctl={"act": "重跑", "why": f"换了验证命令（{why}）", "who": who, "ts": time.time()})
     return ""
 
+def cancel_no(t):
+    """不能取消的原因；空串就是能。失败、中断的也能取消：不要了，不再等人定。"""
+    if t["status"] in tasks.ACTIVE + ("pending", "failed", "lost"): return ""
+    return f"已经{tasks.LABEL.get(t['status'])}了" + (f"，没有可取消的；结果没达成就写 [处置] {tasks.ref(t)} 没达成 理由" if t["status"] == "done" else "")
+
 def cancel_task(t):
-    tasks.update(t["id"], status="cancelled")
+    t = tasks.load(t["id"]) or t
+    ended = t["status"] in ("failed", "lost")
+    tasks.update(t["id"], status="cancelled", **({"cancelled_from": t["status"]} if ended else {}))
     if t["status"] == "running": tasks.stop(t)
-    try: tasks.dl.close_ended(tasks._me())   # 取消了马上关，不等下一拍
+    try:
+        if ended: tasks.dl.close_all(tasks._me(), t["id"])   # 失败留下的请求，带编号的、排队的也关
+        tasks.dl.close_ended(tasks._me())   # 取消了马上关，不等下一拍
     except Exception: log.exception("requests of task #%s not closed", t["id"])
 
 def ctl_cancel(t, why, _, who, told):
     if not why: return "要写原因"
-    if t["status"] not in tasks.ACTIVE + ("pending",): return f"已经{tasks.LABEL.get(t['status'])}"
+    if cancel_no(t): return cancel_no(t)
     cancel_task(t)
     if told: task_say(t, f"{tasks.ref(t)} 取消了：{t['title']}\n原因：{why}（{who}定的）", f"t{t['id']}cancel")
     return ""
@@ -2799,7 +2853,8 @@ def ctl_deps(t, arg, _, who, told):
         tasks.inbox_add(t["id"], who, bool(t["requester"].get("owner")), f"你开工早了，先退回排队，等：{'、'.join(ds)}。再开工时从头核对前置，不满足就按任务书停下。", upper=True, keep_budget=True)
         tasks.dl.close_task(tasks._me(), t["id"], lambda r: r["kind"] not in tasks.dl.OWNER_CATS)
         tasks.update(t["id"], status="approved")
-    tasks.update(t["id"], deps=ds, wait_why="", blocked_seen=[]); return ""
+    gone = [x["id"] for x in tasks.all_tasks() if t.get("closing") and x.get("cancelled_from") and x.get("plan") == t["plan"] and x.get("project") == t.get("project")]
+    tasks.update(t["id"], deps=ds, wait_why="", blocked_seen=[], **({"deps_ok": gone} if gone else {})); return ""
 
 def ctl_bad(t, bad):
     """项目经理的话没人看：没办成的标记再叫它一次，每个任务最多 3 次。"""
@@ -2863,6 +2918,7 @@ def task_relay(ev):
     t = tasks.load(n)
     try:
         if not t or t.get("posted", 0) != idx: return   # 已经处理过（重启后重复排队）
+        if t.get("cancelled_from"): tasks.update(n, _touch=False, posted=idx + 1, relay_pending=None); return   # 排队时取消了
         ref = tasks.ref(t)
         pend = t.get("relay_pending") or {}
         if pend.get("idx") == idx:                     # 主控已经回过，只是上次没发出去：直接重发，不再跑一轮
@@ -2910,6 +2966,7 @@ def pm_relay(ev):
     t, fell_back = tasks.load(n), False
     try:
         if not t or t.get("posted", 0) != idx: return
+        if t.get("cancelled_from"): tasks.update(n, _touch=False, posted=idx + 1, relay_pending=None); return
         tk, ref = tasks._me(), tasks.ref(t)
         hop = min(t.get("hop") or 0, 1)   # 任务真干了一轮活才有回报，跳数重新数；来回返工另有每个任务的自动追加上限管着
         okey = origin_key(t); key = pm_key(pm, okey)
@@ -2951,6 +3008,7 @@ def pm_relay(ev):
         answered_q = len(tasks.inbox_items(n)) > inbox0
         if t.get("plan") and not t.get("closing") and e["kind"] == "done" and not absorbed and not mine:
             tasks.decide("项目经理处理掉", task=ref, why="方案里的小任务做完，看板上有，不逐个报")
+        elif not mine and (tasks.load(n).get("cancelled_from") or team.left_over(tasks.load(n))): tasks.decide("项目经理处理掉", task=ref, why="任务取消了，或方案撤了")
         elif e["kind"] in OVERDUE or (e["kind"] == "nudge" and answered_q): pass
         elif e["kind"] in ("question", "nudge", "blocked") and not mine and ((tasks.load(n).get("hold") or {}).get("at") or 0) >= began: pass   # 挂起了，理由记着   # 没处置的到点升级给主控，不替它报完成
         elif absorbed:
@@ -3003,12 +3061,13 @@ def relay_post(t, idx, text):
     if not ok: log.error("task #%s relay %s dropped after 20 tries", n, idx)
     tasks.update(n, posted=idx + 1, last_post=time.time(), post_fail=0, relay_pending=None)
 
-def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
+def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm="", plan_pm=""):
     """主控回复里的 [任务指令] 短名#N 内容：转给任务接着跑。只能指挥派活人能指挥的任务，每个任务有上限。
     idem：这一轮的幂等键，同一轮重跑（529、服务重启）再出一次同一条指令不转两次。cli 见 turn_directives。"""
     owner = bool(t["requester"].get("owner")) and not cli
     pool = [x for x in tasks.all_tasks() if x["requester"].get("id") == t["requester"].get("id") or owner] if not cli else [t]
-    text, bad = apply_ctl(text, [] if cli else pool, who or f"主控（替{t['requester']['name']}）", idem or "", pm, told=bool(who), own=owner)
+    text, bad = apply_ctl(text, [] if cli else pool, who or f"主控（替{t['requester']['name']}）", idem or "", pm, told=bool(who), own=owner, plan_pm=plan_pm)
+    if plan_pm: ctl_bad(t, [x for x in bad if x.startswith("[撤方案]")])   # 投递轮里项目经理的话没人看，没撤成的叫它一次
     if bad and pm: ctl_bad(t, bad)
     elif bad: text += "\n\n" + "\n".join(f"（{x}。）" for x in bad)
     count = {}
@@ -3412,7 +3471,7 @@ def ftask_result(t):
 
 def ftask_unplanned(t):
     p = team.plan_of(t.get("project"), t["plan"]) if t.get("plan") else None
-    return bool(p) and any(not any(x.get("plan") == t["plan"] and x["title"] == i for x in tasks.all_tasks()) for i in p["items"])
+    return bool(p) and not p.get("dropped") and any(not any(x.get("plan") == t["plan"] and x["title"] == i for x in tasks.all_tasks()) for i in p["items"])
 
 def ftask_text(t):
     """同步出去的飞书任务的标题和说明：方案用方案的任务单，单个任务用任务书开头。"""
@@ -3458,9 +3517,12 @@ def ftask_plan(ts):
     if not t0.get("plan"): return []
     items = list((team.plan_of(t0.get("project"), t0["plan"]) or {}).get("items") or [])
     by = {t["title"]: t for t in sorted((x for x in tasks.all_tasks() if x.get("plan") == t0["plan"] and x.get("project") == t0.get("project")), key=lambda x: x["id"])}
+    cut = team.dropped(t0.get("project"), t0["plan"])
+    if cut: items = [i for i in items if i in by]
     def state(t):
         if not t: return "未派"
         s = t["status"]
+        if cut and s in ("failed", "lost"): return "不做了"
         if t.get("held") and s in tasks.ACTIVE: return "停工"
         if s == "done": return "完成" if tasks.accepted(t) else "待验收"
         return {"running": "进行中", "waiting": "等答复", "approved": "排队", "pending": "排队", "failed": "没做成", "lost": "没做成"}.get(s, "已取消")
@@ -3500,7 +3562,7 @@ def board_tick():
 def ftask_tick():
     board_tick()
     if FT: FT.tick(tasks.all_tasks(), lambda t: tasks.gate_text(t) or tasks.LABEL.get(t["status"], t["status"]), tasks.ref, ftask_result, ftask_unplanned,
-                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta, ftask_plan)
+                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta, ftask_plan, team.left_over)
 
 def ftask_loop(stopping):
     """单独一个线程写飞书：网络慢不拖住任务调度。"""
