@@ -6,6 +6,7 @@ import os, subprocess, sys, shutil, tempfile
 from fontTools.ttLib import TTCollection
 from fontTools.pens.svgPathPen import SVGPathPen
 from fontTools.pens.transformPen import TransformPen
+from fontTools.pens.boundsPen import BoundsPen
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "hero")
 FD = "/usr/share/fonts/opentype/noto/"
@@ -29,9 +30,21 @@ MONO = ("NotoSansCJK-Regular.ttc", "Noto Sans Mono CJK SC")
 def n(v):
     return f"{v:.1f}".rstrip("0").rstrip(".")
 
+QUOTES = "\u201c\u201d"  # CJK 字体里的弯引号是全角，按字形实际宽度收紧
+
+def metrics(c, gs, cmap):
+    """返回 (排版宽度, 画的时候向左的偏移)，单位是字体单位。"""
+    g = gs[cmap[ord(c)]]
+    if c not in QUOTES:
+        return g.width, 0
+    bp = BoundsPen(gs); g.draw(bp)
+    x0, _, x1, _ = bp.bounds
+    pad = 50
+    return (x1 - x0) + 2 * pad, x0 - pad
+
 def width(s, size, fk):
     f, gs, cmap, upem = font(*fk)
-    return sum(gs[cmap[ord(c)]].width for c in s) * size / upem
+    return sum(metrics(c, gs, cmap)[0] for c in s) * size / upem
 
 def text(s, x, y, size, fk, fill, anchor="start", heavy=0.0):
     f, gs, cmap, upem = font(*fk)
@@ -47,9 +60,10 @@ def text(s, x, y, size, fk, fill, anchor="start", heavy=0.0):
             raise SystemExit(f"缺字：{c!r}（{fk[1]}）")
         g = gs[cmap[ord(c)]]
         pen = SVGPathPen(gs, ntos=n)
-        g.draw(TransformPen(pen, (sc, 0, 0, -sc, x, y)))
+        adv, off = metrics(c, gs, cmap)
+        g.draw(TransformPen(pen, (sc, 0, 0, -sc, x - off * sc, y)))
         d.append(pen.getCommands())
-        x += g.width * sc
+        x += adv * sc
     st = f' stroke="{fill}" stroke-width="{n(size*heavy)}" stroke-linejoin="round"' if heavy else ""
     return f'<path fill="{fill}"{st} d="{"".join(d)}"/>'
 
@@ -88,24 +102,24 @@ def hero(lang, c):
         tag = "示意 · 任务与仓库均为虚构"
         title, desc = "说做完，不算数。", "流程示意：任务说做完后，服务复跑验证命令，没过就退回，过了才开草稿合并请求。"
     else:
-        a = "Saying done "
-        b.append(text(a, 64, 150, 84, BOLD, c["fg"], heavy=0.03))
-        b.append(text("doesn't count.", 64 + width(a, 84, BOLD), 150, 84, BOLD, c["red"], heavy=0.03))
+        a = "\u201cDone\u201d "
+        b.append(text(a, 64, 150, 92, BOLD, c["fg"], heavy=0.03))
+        b.append(text("doesn't count.", 64 + width(a, 92, BOLD), 150, 92, BOLD, c["red"], heavy=0.03))
         b.append(text("The service re-runs the check itself. Fail, and it goes back.", 66, 210, 32, SANS, c["sub"]))
         labels = ["Chat request", "Start", "Says done", "PASS", "Draft PR"]
         head, mono = "[Check failed]", "1 failed, 11 passed  →  sent back"
         rest = " Sent back #1: npm test"
         tag = "Illustration · fictional task and repo"
-        title, desc = "Saying done doesn't count.", "Flow sketch: after a task says done, the service re-runs the check. If it fails the task goes back; if it passes, a draft pull request opens."
+        title, desc = "\u201cDone\u201d doesn't count.", "Flow sketch: after a task says done, the service re-runs the check. If it fails the task goes back; if it passes, a draft pull request opens."
     gx = 700
     b.append(f'<path d="M64 {LY}H{gx}" stroke="{c["fg"]}" stroke-width="6"/>')
     b.append(f'<path d="M{gx} {LY}H1216" stroke="{c["dim"]}" stroke-width="6" stroke-dasharray="3 12" stroke-linecap="round"/>')
-    xs = [120, 350, 580, 960, 1150]
+    xs = [150, 370, 590, 960, 1128]
     for i, (x, lab) in enumerate(zip(xs, labels)):
         b += node(x, LY, 33, lab, i + 1, c, 28, dim=i >= 3)
-    b.append(f'<rect x="{gx-14}" y="{LY-110}" width="28" height="220" rx="3" fill="{c["red"]}"/>')
+    b.append(f'<rect x="{gx-14}" y="{LY-110}" width="28" height="200" rx="3" fill="{c["red"]}"/>')
     b.append(cross(gx + 90, LY, 26, c, 14))
-    cx0, cw, cy0 = 330, 640, 470
+    cx0, cw, cy0 = 330, 640, 482
     b.append(f'<rect x="{cx0}" y="{cy0}" width="{cw}" height="92" rx="6" fill="{c["card"]}" stroke="{c["red"]}" stroke-width="4"/>')
     b.append(text(head, cx0 + 24, cy0 + 38, 26, BOLD, c["red"]))
     b.append(text(rest, cx0 + 24 + width(head, 26, BOLD), cy0 + 38, 26, SANS, c["fg"]))
@@ -119,11 +133,11 @@ def card():
     b = [f'<rect x="64" y="58" width="16" height="44" rx="2" fill="{c["red"]}"/>',
          text("Yonty Bot", 96, 94, 38, BOLD, c["fg"], heavy=0.02),
          text("Illustration · fictional task", 1216, 92, 20, SANS, c["mute"], "end"),
-         text("Saying done", 64, 232, 112, BOLD, c["fg"], heavy=0.03),
-         text("doesn't count.", 64, 346, 112, BOLD, c["red"], heavy=0.03),
-         text("说做完，不算数。", 66, 412, 44, BOLD, c["fg"]),
-         text("A coding agent in your team chat. It only counts as done", 66, 462, 28, SANS, c["sub"]),
-         text("when the service re-runs your check and it passes.", 66, 498, 28, SANS, c["sub"])]
+         text("\u201cDone\u201d", 64, 226, 112, BOLD, c["fg"], heavy=0.03),
+         text("doesn't count.", 64, 352, 112, BOLD, c["red"], heavy=0.03),
+         text("说做完，不算数。", 66, 418, 44, BOLD, c["fg"]),
+         text("A coding agent in your team chat. It only counts as done", 66, 466, 28, SANS, c["sub"]),
+         text("when the service re-runs your check and it passes.", 66, 502, 28, SANS, c["sub"])]
     gx = 700
     b.append(f'<path d="M64 {LY}H{gx}" stroke="{c["fg"]}" stroke-width="5"/>')
     b.append(f'<path d="M{gx} {LY}H1216" stroke="{c["dim"]}" stroke-width="5" stroke-dasharray="3 11" stroke-linecap="round"/>')
@@ -134,7 +148,7 @@ def card():
         b.append(text(lab, x, LY + 46, 22, SANS, col, "middle"))
     b.append(f'<rect x="{gx-11}" y="{LY-48}" width="22" height="96" rx="3" fill="{c["red"]}"/>')
     b.append(cross(gx + 80, LY, 15, c, 9))
-    return wrap(W, H, "Yonty Bot: Saying done doesn't count.", "社交卡片：说做完，不算数。", b, c)
+    return wrap(W, H, "Yonty Bot: \u201cDone\u201d doesn't count.", "社交卡片：说做完，不算数。", b, c)
 
 def chrome_png(svg, png, w, h):
     tmp = tempfile.mkdtemp()

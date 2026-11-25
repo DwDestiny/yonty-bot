@@ -17,7 +17,7 @@ python3 -I docs/assets/source/hero/build.py
 - 全部用代码画的矢量。文字用 `fontTools` 转成路径，GitHub 上不依赖系统字体；SVG 不含脚本、外链和位图。
 - 文案、配色、版面都在 `build.py` 里。改主句或流程文字后重出即可，缺字会直接报错。
 - 画面里的任务、仓库是虚构的，图上写了“示意”（Illustration）。不写版本号、星数和用户数。
-- 英文主句：`Saying done doesn't count.`。备选 `Saying it's done doesn't count.`，选前者：更短，和中文“说做完，不算数。”一样两段。
+- 英文主句：`“Done” doesn't count.`（弯引号，后半句红色）。备选 `Saying done doesn't count.`，选前者：引号把“说做完”的口气带出来，和中文一样两段。弯引号在 CJK 字体里是全角，脚本按字形实际宽度收紧。
 - 社交卡片以英文为主，带中文主句；只出 PNG，中间 SVG 生成后即删。
 - 没有使用 AI 生图：主句、闸门、流程都是矢量，本版没有需要背景或插画的位置。
 
