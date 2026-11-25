@@ -188,7 +188,7 @@ class RelayTest(Base):
             wait = over.wait; over.wait = lambda s: wait(0.05)
             th = threading.Thread(target=self.t.watch_turn, args=(t['id'], P(), st, 0.1, over)); th.start()
             end = time.time() + 10
-            while time.time() < end and not self.t.load(t['id']).get('turn_over'): time.sleep(0.02)
+            while time.time() < end and 'overdue' not in self.kinds(t): time.sleep(0.02)   # 先写 turn_over 再写事件，等事件
             self.assertIn('overdue', self.kinds(t)); self.pm(f"[处置] {self.t.ref(t)} {act}", t, act)
             if act.startswith('继续等'): time.sleep(0.5); over.set()
             th.join(10)
@@ -363,8 +363,70 @@ class LoopTest(Base):
         self.assertIn(self.t.ref(b), self.why(c))
 
     def test_cap_refused_rework_is_not_accepted(self):
-        a = self.plan('打包', auto_follow=3); self.finish(a); self.b.task_say = lambda *x: 'om'
+        a = self.plan('打包', auto_follow=10, turn=1); self.finish(a); self.b.task_say = lambda *x: 'om'
         self.pm(f"[任务指令] {self.t.ref(a)} 再来", a, 'i1'); self.assertEqual(self.t.load(a['id'])['status'], 'failed')
+
+    def test_extra_for_unstarted_task_is_not_capped(self):
+        a = self.plan('收口', status='approved', turn=0)
+        for i in range(14): self.pm(f"[任务指令] {self.t.ref(a)} 补充{i}", a, f'x{i}')
+        self.assertEqual((len(self.t.inbox_items(a['id'])), self.t.load(a['id']).get('auto_follow', 0)), (14, 0))
+
+    def test_second_quality_rework_moves_up_a_tier(self):
+        a = self.plan('样片', turn=1, model='sonnet', effort='medium', auto_model=True)
+        for i, why in enumerate(('原因: 需求变', '质感没过', '原因: 做错')):
+            self.t.update(a['id'], _force=True, status='done'); self.pm(f"[任务指令] {self.t.ref(a)} {why}\n再改", a, f'r{i}')
+            self.assertEqual(bool(self.t.load(a['id']).get('bump')), i == 2, why)
+
+    def test_direction_task_is_not_polished(self):
+        a = self.plan('样片', turn=1, draft=True, auto_model=False)
+        self.finish(a); self.pm(f"[任务指令] {self.t.ref(a)} 原因: 做错\n改", a, 'd1'); self.assertEqual(self.t.load(a['id'])['status'], 'approved')
+        self.t.update(a['id'], _force=True, status='done'); self.pm(f"[任务指令] {self.t.ref(a)} 原因: 做错\n再改", a, 'd2')
+        self.assertEqual(self.t.load(a['id'])['status'], 'done')
+        self.pm(f"[任务指令] {self.t.ref(a)} 原因: 需求变\n主人要换颜色", a, 'd3'); self.assertEqual(self.t.load(a['id'])['status'], 'approved')
+
+    def test_mark_after_dispatch_is_not_swallowed(self):
+        s = "[派活]\n标题: 甲\n任务书:\n做\n[任务指令] 是标记名，讲解用\n\n[任务指令] proj#24 光效以新任务为准\n[/任务指令]"
+        self.b.team.save_plan('proj', 'Z', '任务:\n- 甲 | a |\n')
+        d = lambda x: dict(self.t.parse_directives(x)[1][0], plan='Z', files=['a'], role='产品')
+        self.assertIn('[/派活]', self.b.team.gate(self.t, 'proj', d(s), self.b.TEAM))          # 没收尾：退回，不悄悄吞掉
+        ok = s.replace('\n\n[任务指令] proj', '\n[/派活]\n[任务指令] proj')
+        self.assertEqual(self.b.team.gate(self.t, 'proj', d(ok), self.b.TEAM), '')
+        self.assertEqual([x for x in self.b.split_taskcmds(ok) if x[0]], [('proj#24', '光效以新任务为准')])
+
+    def test_title_with_separator_resolves_as_dependency(self):
+        self.b.team.save_plan('proj', 'Q', '任务:\n- 定位、竞品与证据 | a |\n- 架构 | b | 定位、竞品与证据\n')
+        d = {'plan': 'Q', 'title': '架构', 'files': ['b'], 'deps': ['定位', '竞品与证据'], 'deps_raw': '定位、竞品与证据', 'role': '产品'}
+        self.assertEqual(self.b.team.gate(self.t, 'proj', d, self.b.TEAM), ''); self.assertEqual(d['deps'], ['定位、竞品与证据'])
+
+    def test_ended_tasks_question_does_not_block_next(self):
+        dl, a = self.t.dl, self.plan('表达', status='running')
+        s = {'type': 'task', 'task': a['id'], 'ref': self.t.ref(a), 'project': a['project'], 'key': 'p2p:oc_p', 'label': 'x', 'owner': False, 'hop': 0}
+        for x in ('甲还是乙', '要登录'): dl.submit(self.t, s, '主人', '方向', x, need_reply=True)
+        st = lambda: [r['status'] for r in dl.load(self.t)]
+        dl.update(self.t, dl.load(self.t)[0]['id'], status='open'); self.assertEqual(st(), ['open', 'queued'])
+        dl.close_ended(self.t); self.assertEqual(st(), ['open', 'queued'])
+        self.finish(a); dl.close_ended(self.t); dl.release(self.t); self.assertEqual(st(), ['open', 'new'])
+
+    def test_plain_node_goes_to_owner_without_waking_controller(self):
+        own = 'p2p:oc_p'   # 真实会话键是聊天 ID，不是 open_id
+        r = lambda text, **k: dict({'kind': '节点', 'from': {'type': 'pm', 'owner': True}, 'about': 5, 'full': text}, **k)
+        for x in ('样片做完，留一种、淘汰一种，没上真机。', '首版交回，检查全过，已退回再磨一轮。'): self.assertTrue(self.b.fyi(r(x), own), x)
+        for x in ('请部署', '标题写错，三条派活没成', '选哪个？'): self.assertFalse(self.b.fyi(r(x), own), x)
+        self.assertFalse(self.b.fyi(r('做完', kind='完成'), own)); self.assertFalse(self.b.fyi(r('做完'), 'grp:x')); self.assertFalse(self.b.fyi(r('做完', about=None), own)); self.assertFalse(self.b.fyi(r('做完', **{'from': {'type': 'pm', 'owner': False}}), own))
+        a, said, woke = self.plan('样片'), [], []
+        self.b.owner_post = lambda c, t, k=None, tries=0: said.append(t) or (c, 'om'); self.b.enqueue = lambda k, ev: woke.append(ev)
+        s = self.t.dl.pm_sender(a['project'], f"proj:{a['project']}:{own}", True)
+        self.t.dl.submit(self.t, s, '主控', '节点', '流线做完，没上真机。', 0, None, {'about': a['id'], 'voice': True}, trusted=True)
+        with mock.patch.object(self.b, 'STRICT', True): self.b.delivery_tick()
+        self.assertEqual((len(said), woke), (1, [])); self.assertIn('流线做完', said[0]); self.assertEqual(self.t.dl.load(self.t)[-1]['status'], 'sent')
+
+    def test_stray_chrome_of_finished_task_only(self):
+        a, b = self.plan('甲', status='running'), self.plan('乙')
+        self.finish(b); cw = {'11': a['id'], '22': b['id']}
+        out = types.SimpleNamespace(stdout=''.join(f'app-com.google.Chrome-{p}.scope loaded active running x\n' for p in ('11', '22', '33')))
+        link = lambda p: f"{self.t.TASK_ROOT}/{cw[p.split('/')[2]]}/_tmp (deleted)" if p.split('/')[2] in cw else '/home/x'
+        with mock.patch.object(self.t.subprocess, 'run', lambda *x, **k: out), mock.patch.object(self.t.os, 'readlink', link), mock.patch.object(self.t.os.path, 'realpath', lambda p: p):
+            self.assertEqual(self.t.stray_scopes(), [('app-com.google.Chrome-22.scope', b['id'])])
 
     def test_hold_is_quiet_and_wakes_when_ready(self):
         said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
@@ -568,6 +630,44 @@ class FeishuTaskTest(unittest.TestCase):
         self.f.on_event(self.ev); self.assertEqual(self.sub, [])
         self.f.st['g0'] = {'at': time.time(), 'own': True}                 # 服务自己建的任务也挂着 L
         self.f.on_event(dict(self.ev, event={'task_guid': 'G3', 'event_types': ['task_create']})); self.assertEqual(len(self.sub), 1)
+
+    def test_auto_completed_by_feishu_still_gets_end_time(self):
+        real = self.f.api
+        def api(m, p, d=None, **k):
+            if m == 'PATCH' and 'completed_at' in ((d or {}).get('task') or {}) and d['task']['completed_at'] != '0': raise RuntimeError(("cannot set non-zero completed_at for a completed task " + "x" * 400 + " to 0, then update its 'completed'_at to new value. code=1470400&method_id=1")[-300:])
+            return real(m, p, d, **k)
+        self.f.api = api
+        t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'updated': 1}
+        self.tick([t]); self.f.st['g1']['meta'] = 1
+        self.f.meta = lambda ts: {'desc': 'd', 'start': 1000, 'end': 2000, 'custom': {}}
+        self.f.fill('g1', self.f.st['g1'], [t], True)
+        last = self.sent('/tasks/g1')[-1]; self.assertIn('due', last['task']); self.assertNotIn('completed_at', last['task'])
+        self.f.st['g1'].update(closed=True, user_closed=True, want=[4, '执行完成'])
+        self.tick([dict(t, id=2)]); self.assertIn('g2', self.f.st)     # 服务收掉的方案又来新活：另建
+        self.f.st['g2'].update(closed=True, user_closed=True, want=[2, 'x'])
+        self.tick([dict(t, id=3)]); self.assertNotIn('g3', self.f.st)  # 主人自己勾掉的不再建
+
+    def test_own_subtask_event_is_ignored_and_note_becomes_step(self):
+        self.lark.task = dict(self.lark.task, creator={'id': 'cli_me', 'type': 'app'})
+        self.f.on_event(dict(self.ev, event={'task_guid': 'SUB', 'event_types': ['task_create']})); self.assertEqual((self.said, self.sub, self.f.st), ([], [], {}))
+        t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'updated': 1}
+        self.tick([t]); self.f.note(t, '留一种，淘汰一种'); self.tick([t]); self.tick([t])
+        self.assertEqual(json.dumps(self.sent('append'), ensure_ascii=False).count('留一种'), 1)
+
+    def test_whole_batch_listed_at_once_then_updated(self):
+        rec, n, real = {'own': True}, [0], self.f.api
+        def api(m, p, d=None, **k):
+            if p.endswith('/subtasks'): n[0] += 1; real(m, p, d, **k); return {'subtask': {'guid': f's{n[0]}'}}
+            return real(m, p, d, **k)
+        self.f.api = api
+        rows = [('甲', '进行中', 'p#1'), ('乙', '排队', 'p#2')] + [(f'丙{i}', '未派', '') for i in range(8)]
+        self.assertFalse(self.f.subs('g', rec, rows)); self.assertTrue(self.f.subs('g', rec, rows))     # 一拍最多 8 次写
+        self.assertEqual(n[0], 10); k = len(self.lark.calls)
+        self.f.subs('g', rec, rows); self.assertEqual(len(self.lark.calls), k)                          # 没变不写
+        self.f.subs('g', rec, [('甲', '完成', 'p#1')] + rows[1:])
+        self.assertNotEqual(self.sent('/tasks/s1')[-1]['task']['completed_at'], '0')
+        self.f.subs('g', rec, rows); self.assertEqual(self.sent('/tasks/s1')[-1]['task']['completed_at'], '0')   # 又叫回去：重新打开
+        self.f.subs('g', rec, rows[:-1]); self.assertIn('不做了', self.sent('/tasks/s10')[-1]['task']['summary'])
 
     def test_steps_limited_still_marks_doing(self):
         self.f.on_event(self.ev)

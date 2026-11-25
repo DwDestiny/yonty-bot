@@ -272,6 +272,18 @@ class HandbackEndTest(unittest.TestCase):
         self.assertEqual(x['status'], 'done', ev)
         self.assertIn('只读角色', self.e.t.events(x['id'])[-1]['text'])
 
+    def test_product_with_commits_is_verified(self):
+        from unittest import mock
+        with mock.patch.object(self.e.t, 'committed', lambda t: True):
+            x, ev = self.go('写完了', role='产品', verify='false'); self.assertEqual(x['status'], 'failed', ev)
+            x, ev = self.go('写完了', role='产品', verify='true'); self.assertIn('PASS', self.e.t.events(x['id'])[-1]['text'])
+
+    def test_bump_hands_over_to_next_tier(self):
+        t = self.e.t; x, _ = self.go('做完了', model='sonnet', effort='medium', auto_model=True, verify='true')
+        old = x['session_id']; t.update(x['id'], _force=True, status='running', turn=2, bump='上级看过结果退回 2 次', redone=2, session_started=True)
+        t.inbox_add(x['id'], '项目经理', True, 'REDO-去掉硬边', upper=True); t.run(x['id']); y = t.load(x['id'])
+        self.assertEqual((y['status'], y['model'], y.get('bump'), y['redone']), ('done', 'opus', None, 0)); self.assertNotEqual(y['session_id'], old)
+
     def test_fail_handback_ends_failed(self):
         x, ev = self.go('[提问] 基线上的测试本来就挂，修不了，按失败交回')
         self.assertEqual(x['status'], 'failed')

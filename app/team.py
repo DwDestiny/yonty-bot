@@ -129,6 +129,11 @@ def gate(tk, project, d, c):
     if not d.get("plan"): return f"“{d['title']}”没写“方案:”：先写 [方案] 登记任务单，再照着派"
     p = plan_of(project, d["plan"])
     if not p: return f"没有登记过方案“{d['plan']}”：先写 [方案] {d['plan']}"
+    if d.get("swallowed"): return f"“{d['title']}”的任务书里有一行“{d['swallowed']}”，没写 [/派活]，分不清是任务书的字还是要执行的标记：任务书结尾单独一行写 [/派活]，要执行的标记写在它后面"
+    raw, got = d.get("deps_raw") or "", []
+    for it in sorted((i for i in p["items"] if re.search(r"[,，、;；]", i)), key=len, reverse=True):   # 标题里带顿号、逗号的先整条认出来，再拆剩下的
+        if it in raw: got.append(it); raw = raw.replace(it, "、")
+    if got: d["deps"] = got + [x.strip() for x in re.split(r"[,，、;；]+", raw) if x.strip() and x.strip() not in ("无", "没有", "-")]
     if d["title"] not in p["items"]: return f"“{d['title']}”不在方案“{d['plan']}”的任务单里（有：{'、'.join(p['items'])}），标题要一样；要加活先更新方案"
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"

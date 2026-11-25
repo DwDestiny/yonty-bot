@@ -10,6 +10,8 @@ import hashlib, json, threading, time
 API = "/open-apis/task/v2"
 DOING, CONFIRM, FINISHED = 2, 3, 4          # 飞书的 agent_task_status：正在执行、待确认、执行完成
 ENDED = ("done", "failed", "lost", "cancelled", "rejected", "expired")
+SUB_ORDER = ("完成", "进行中", "待验收", "等答复", "排队", "未派", "没做成", "停工", "已取消")
+SUB_OVER = ("完成", "已取消", "不做了")
 GRACE_S = 300                               # 主控回了话、没派出任务，等这么久再标“待确认”；全部做完后等这么久看有没有后续
 
 
@@ -22,7 +24,7 @@ class FeishuTasks:
         try:
             with open(self.lists_path, encoding="utf-8") as f: self.lists = json.load(f)
         except (OSError, ValueError): self.lists = {}
-        self.lock, self.next, self.app, self.meta = threading.RLock(), 0, "", None
+        self.lock, self.next, self.app, self.meta, self.plan = threading.RLock(), 0, "", None, None
         try:
             with open(path, encoding="utf-8") as f: self.st = json.load(f)
         except (OSError, ValueError): self.st = {}
@@ -64,6 +66,7 @@ class FeishuTasks:
             if rec and not any(x.startswith("task_comment") for x in types) and "task_completed_update" not in types and not rec.get("skipped"): return
             t = self.api("GET", f"/tasks/{guid}").get("task") or {}
             ms, mine = t.get("members") or [], [app] if app else []
+            if not rec and (t.get("creator") or {}).get("id") == app: return   # 服务自己建的子任务
             if not any(m.get("type") == "app" and m.get("role") == "assignee" and (not mine or m.get("id") in mine) for m in ms): return
             if (t.get("completed_at") or "0") != "0" or t.get("status") == "done":
                 if rec:
@@ -160,7 +163,7 @@ class FeishuTasks:
         """看板上在干的活，飞书任务里没有的就建一条：一个方案一条，不在方案里的一个任务一条。负责人是机器人，主人是关注人。"""
         for t in tasks:
             if t["status"] not in ("approved", "running", "waiting") or t.get("schedule") or not mine(t): continue
-            if any(self.of(r, t) for r in self.st.values() if not r.get("skipped") and (not r.get("closed") or r.get("user_closed"))): continue
+            if any(self.of(r, t) for r in self.st.values() if not r.get("skipped") and (not r.get("closed") or (r.get("user_closed") and (r.get("want") or [0])[0] != FINISHED))): continue   # 服务自己收掉的方案又来了新活：另建一条
             title, desc = text(t)
             g = (self.api("POST", "/tasks", {"summary": title[:200], "description": desc[:2500], "client_token": hashlib.sha1(f"{self.key(t)}|{t['id']}|{t.get('turn') or 0}".encode()).hexdigest(),
                                              "members": [{"id": self.app, "type": "app", "role": "assignee"}, {"id": self.owner, "type": "user", "role": "follower"}]}).get("task") or {}).get("guid")
@@ -245,18 +248,50 @@ class FeishuTasks:
         if done and final:
             if rec.get("hist"): self.api("PATCH", f"/tasks/{guid}", {"task": {"completed_at": "0"}, "update_fields": ["completed_at"]})
             else: task.pop("completed_at")   # 主人关注着的不来回勾，免得提醒
-        self.api("PATCH", f"/tasks/{guid}", {"task": task, "update_fields": list(task)})
+        try: self.api("PATCH", f"/tasks/{guid}", {"task": task, "update_fields": list(task)})
+        except RuntimeError as e:
+            if "completed_at" not in task or "1470400" not in str(e): raise   # 报错只留末尾 300 字，认错误码
+            task.pop("completed_at")   # 标成“执行完成”时飞书已经自己勾掉了，再写完成时间会报错：只补别的字段
+            self.api("PATCH", f"/tasks/{guid}", {"task": task, "update_fields": list(task)})
+
+    def subs(self, guid, rec, rows):
+        """方案里每个任务一条子任务：一登记就全部建好，状态变了改标题，做完勾掉。一拍最多写 8 次，剩下的下一拍接着。返回写完没有。"""
+        have, n, names = rec.setdefault("subs", {}), 0, {r[0] for r in rows}
+        rows = list(rows) + [(k, "不做了", "") for k in have if k not in names]
+        for title, state, ref in rows:
+            cur = have.get(title) or {}
+            if cur.get("s") == f"{state}|{ref}": continue
+            if n >= 8: return False
+            n += 1
+            text = f"{state} · {ref + ' ' if ref else ''}{title}"[:200]
+            if not cur.get("g"):
+                g = ((self.api("POST", f"/tasks/{guid}/subtasks", {"summary": text, "client_token": hashlib.sha1(f"{guid}|{title}".encode()).hexdigest(),
+                                                                  "members": [{"id": self.app, "type": "app", "role": "assignee"}]}).get("subtask")) or {}).get("guid")
+                if not g: raise RuntimeError("建子任务没返回 guid")
+                cur = have[title] = {"g": g, "s": "", "done": False}; self._save()
+            over = state in SUB_OVER
+            if cur["done"] != over:
+                self.api("PATCH", f"/tasks/{cur['g']}", {"task": {"summary": text, "completed_at": str(int(time.time() * 1000)) if over else "0"}, "update_fields": ["summary", "completed_at"]})
+            else: self.api("PATCH", f"/tasks/{cur['g']}", {"task": {"summary": text}, "update_fields": ["summary"]})
+            cur.update(s=f"{state}|{ref}", done=over); self._save()
+        return True
+
+    def note(self, t, text):
+        """项目经理的普通进展，记进这条飞书任务的步骤。"""
+        with self.lock:
+            for rec in self.st.values():
+                if rec.get("own") and not rec.get("closed") and self.of(rec, t): rec["notes"] = (rec.get("notes") or []) + [text[:500]]; self._save(); return
 
     def covers(self, now=None):
         """飞书任务同步正常：开工、进展这些不用再另发消息。"""
         return bool(self.app) and (now or time.time()) >= getattr(self, "mirror_at", 0)
 
-    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: [], meta=None):
+    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: [], meta=None, plan=None):
         """把长任务的状态写回飞书任务。result(t) 取完成时的结论；unplanned(t) 方案里还有没派的；mine(t) 要不要同步出去；progress(t) 任务自己写的 [进展]。"""
         now = time.time()
         if now < self.next: return
         self.next = now + 20
-        self.progress, self.meta = progress, meta
+        self.progress, self.meta, self.plan = progress, meta, plan
         with self.lock:
             for rec in self.st.values():   # 从指派的飞书任务里派出来的方案，后面补的活也归它，不另建
                 got = {self.key(t) for t in tasks if (t.get("origin") or {}).get("message_id") in (rec.get("mids") or []) and not rec.get("own")} - set(rec.get("keys") or [])
@@ -276,7 +311,8 @@ class FeishuTasks:
     def _sync(self, guid, rec, ts, label, ref, result, unplanned, now):
         while rec.get("out"):
             self.comment(guid, rec["out"][0]); rec["out"].pop(0); self._save()
-        texts, steps, prog = [], dict(rec["steps"]), dict(rec.get("prog") or {})
+        notes = list(rec.get("notes") or [])
+        texts, steps, prog = notes[:], dict(rec["steps"]), dict(rec.get("prog") or {})
         for t in ts:
             s = f"{t['status']}-{t.get('turn') or 0}"
             first = rec.get("own") and str(t["id"]) not in rec["steps"] and t["status"] in ENDED   # 建这条之前就做完的：只记一行结果
@@ -294,6 +330,14 @@ class FeishuTasks:
         elif len(done) == len([t for t in ts if t["status"] not in ("cancelled", "rejected", "expired")]) and done: want = (FINISHED, "执行完成")
         elif not done and all(t["status"] in ("cancelled", "rejected", "expired") for t in ts): want = (FINISHED, "已取消")
         else: want = (CONFIRM, "没做成，等你定")
+        rows = self.plan(ts) if self.plan and rec.get("own") and not rec.get("hist") and ts else []
+        sub_ok = True
+        if rows:
+            c = {}
+            for _, s, _ in rows: c[s] = c.get(s, 0) + 1
+            if want[0] == DOING: want = (DOING, (f"共 {len(rows)}：" + " ".join(f"{k}{c[k]}" for k in SUB_ORDER if c.get(k)))[:40])
+            try: sub_ok = self.subs(guid, rec, rows)
+            except Exception as e: self.log.warning("feishu subtasks failed: %s", str(e)[:200])   # 清单写不上不耽误整条任务的状态，下一拍再补
         told = None
         sig = "|".join(sorted(f"{t['id']}:{t['status']}:{t.get('turn') or 0}" for t in ts))
         if ts and want[0] != DOING and not live and not any(t.get("held") for t in ts) and rec.get("told") != sig:
@@ -308,8 +352,10 @@ class FeishuTasks:
         for i in range(0, len(texts), 20):
             part = texts[i:i + 20]
             self.steps(guid, part, guid + "|" + "|".join(part) + json.dumps(steps, sort_keys=True))
+        if notes: rec["notes"] = rec["notes"][len(notes):]; self._save()
         if told: rec["told"] = told   # 步骤写进去了才算说过
         if texts or told or steps != rec["steps"] or prog != (rec.get("prog") or {}): rec["steps"], rec["prog"] = steps, prog; self._save()
+        if want[0] == FINISHED and not sub_ok: return   # 子任务没勾完，下一拍再收
         if rec.get("want") != list(want):
             self.status(guid, *want); rec["want"] = list(want); self._save()
         if rec.get("own") and want[0] == FINISHED:   # 服务自己建的，做完就勾掉；主人指派的留给主人勾

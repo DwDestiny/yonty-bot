@@ -233,14 +233,14 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
             upstream = trusted and (sender["type"] == "ctrl" or (sender["type"] == "pm" and sender.get("project") == t2.get("project")))
             if upstream and t2["requester"].get("owner") and not sender.get("owner"):
                 upstream, why = False, "这一轮不是主人触发的，主人派的任务只收留言"
-            else: why = tk.steer_block(t2, full, tk.T.get("relay_max", 3)) if upstream else ""
+            else: why = tk.steer_block(t2, full, tk.T.get("relay_max") or 10) if upstream else ""
             if why: upstream = False
             n = tk.inbox_add(t2["id"], sender["label"], bool(sender.get("owner")) and upstream, full,
                              kind="指令" if upstream else "留言", src=sender, upper=upstream)
             tk.update(t2["id"], _touch=False, hop=max(t2.get("hop") or 0, nh))   # 任务再往外投时从这一跳接着数
             if upstream:
                 _close([r for r in recs if sender.get("owner") or r["kind"] not in OWNER_CATS], t2["id"])
-                tk.update(t2["id"], auto_follow=(t2.get("auto_follow") or 0) + (0 if tk.BUDGET_RE.search(full) else 1))
+                tk.update(t2["id"], auto_follow=(t2.get("auto_follow") or 0) + (0 if tk.BUDGET_RE.search(full) else tk.counts(t2)))
                 if t2["status"] in ("waiting", "done", "failed", "lost"): tk.update(t2["id"], status="approved")
             rec["status"] = "sent"
             receipt = f"已进 {tk.ref(t2)} 的收件箱（i{n}）" + ("。" if upstream else (
@@ -332,9 +332,9 @@ def close_ended(tk):
     for r in hit: tk.decide("请求关了", sender=r["from"]["ref"], category=r["kind"], why="任务已经" + tk.LABEL.get(end[r["from"]["task"]], "结束"))
 
 
-def _release(recs):
-    """前面没有挂着的、正要发的，排队的第一条就放出来。返回放了几条。"""
-    busy, n = {lane(r["from"]) for r in recs if r.get("q") and r["status"] in ("new", "open")}, 0
+def _release(recs, ended=()):
+    """前面没有挂着的、正要发的，排队的第一条就放出来。ended：已经结束的任务，它挂着的问题还能按编号答，但不再挡后面的。返回放了几条。"""
+    busy, n = {lane(r["from"]) for r in recs if r.get("q") and (r["status"] == "new" or r["status"] == "open" and r["from"].get("task") not in ended)}, 0
     for r in sorted((r for r in recs if r["status"] == "queued"), key=lambda r: r["id"]):
         if lane(r["from"]) not in busy: r["status"], n = "new", n + 1; busy.add(lane(r["from"]))
     return n
@@ -345,7 +345,8 @@ def release(tk):
     if not any(r["status"] == "queued" for r in load(tk)): return
     with lock(tk):
         recs = load(tk)
-        if _release(recs): save(tk, recs)
+        ids = {r["from"]["task"] for r in recs if r["status"] in ("queued", "open") and r["from"].get("task")}
+        if _release(recs, {i for i in ids for t in [tk.load(i)] if t and t["status"] not in tk.ACTIVE + ("pending",)}): save(tk, recs)
 
 
 # ---------- 防刷屏（方案 7.5）：进展限频、主人私聊限额。bridge 每拍送投递时调 ----------

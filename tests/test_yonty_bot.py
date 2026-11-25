@@ -792,9 +792,9 @@ class TaskTest(unittest.TestCase):
         self.run_relay(n, f'[任务指令] #{n} 加\n[不回]')
         self.assertEqual(self.t.load(n)['posted'], 1)
         self.assertEqual(self.sent, [])                    # 主控替它答了、不用跟人说：一条都不发
-        m = self.relay_task('done', '做完了', auto_follow=3)
+        m = self.relay_task('done', '做完了', auto_follow=10, turn=1)
         self.run_relay(m, f'做完了，链接在这。\n[任务指令] #{m} 再跑一遍测试')   # 给人看的话写在指令前面
-        self.assertEqual(self.t.load(m)['auto_follow'], 3)   # 到上限不再自动追加
+        self.assertEqual(self.t.load(m)['auto_follow'], 10)   # 到上限不再自动追加
         self.assertIn('请人来定', self.sent[-1][1])
         self.assertIn('claude --resume', self.sent[-1][1])  # 主人私聊的完成汇报带接手命令
         k = self.relay_task('failed', '测试挂了')
