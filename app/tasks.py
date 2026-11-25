@@ -19,8 +19,8 @@ X = os.path.expanduser
 SLUG = CFG.get("service_name") or "fcb-" + os.path.basename(ROOT)
 OWNER_NAME = CFG.get("owner_name", "主人")
 T = dict({"enabled": True, "root": "~/work/.bot-tasks", "approval_hours": 24, "heartbeat_min": 30,
-          # 资源：任务检查点按同类任务的实际花费估，主控可改，到了交回主控定（不是硬停）；订阅额度用得快只提醒主人，不拦活
-          "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1},
+          # 资源：任务检查点按同类任务的实际花费估，主控可改，到了交回主控定（不是硬停）；订阅额度用得快先提醒主人，到 quota_pause 暂停
+          "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1}, "quota_pause": 0.95,
           # 质量：多久没动静算卡住（进程还在吃 CPU 不算）、验证没过最多返工几次
           "stuck_min": 40, "verify_retries": 2, "verify_timeout_min": 20,
           # 等回复的任务最多挡同一件事的排队多久（分钟）：过了让排队的先跑，并提醒主控一次
@@ -122,7 +122,7 @@ def load(tid):
 TRANSITIONS = {
     "pending":   {"approved", "rejected", "expired", "cancelled"},     # 同事派的等主人批
     "approved":  {"running", "cancelled"},                             # 排队，有名额就开工
-    "running":   {"waiting", "done", "failed", "lost", "cancelled"},   # 跑一轮的结果
+    "running":   {"waiting", "done", "failed", "lost", "cancelled", "approved"},   # 跑一轮的结果；approved 是额度不够、退回排队等恢复
     "waiting":   {"approved", "cancelled"},                            # 有人回答或加预算后再排队
     "done":      {"approved", "failed"},                                         # 追加要求
     "failed":    {"approved"},                                         # 接着干
@@ -133,11 +133,12 @@ TRANSITIONS = {
 class InvalidTransition(ValueError):
     pass
 
-def update(tid, _force=False, _touch=True, **kv):
-    """改任务字段。改 status 要符合 TRANSITIONS；_force 只给测试造场景用；_touch=False 不改 updated（迁移用）。"""
+def update(tid, _force=False, _touch=True, _from=None, **kv):
+    """改任务字段。改 status 要符合 TRANSITIONS；_force 只给测试造场景用；_touch=False 不改 updated（迁移用）；_from 现在不是这个状态就不改、报错。"""
     with _Lock(os.path.join(tdir(tid), ".lock")):
         t = load(tid) or {}
         old, new = t.get("status"), kv.get("status")
+        if _from and old != _from: raise InvalidTransition(f"{ref(t)} 已经是 {old}，不是 {_from}")
         if not _force and new and old and new != old and new not in TRANSITIONS.get(old, set()):
             raise InvalidTransition(f"{ref(t)} 不能从 {old} 变成 {new}")
         t.update(kv)
@@ -518,12 +519,21 @@ def spent_today():
     except FileNotFoundError: pass
     return total
 
-# ---------- 订阅额度：Claude 的 rate_limit_event 带 5 小时、7 天两个窗口的用量（整个订阅，含终端里的会话）。只提醒，不拦活 ----------
+# ---------- 订阅额度：Claude 的 rate_limit_event 带 5 小时、7 天两个窗口的用量（整个订阅，含终端里的会话）。
+# 快用完先提醒；剩余不到 1 - quota_pause 就暂停：任务退回排队，恢复后自己接着跑。暂停状态只由 bridge 写（quota_tick），这里只读 ----------
 QUOTA = os.path.join(STORE, "quota.json")
 WINDOW_S = {"five_hour": 5 * 3600, "seven_day": 7 * 86400}
 
+PAUSE = os.path.join(ROOT, "state", "quota_pause.json")
+LIMIT_RE = re.compile(r"\s*You've hit your .{0,40}limit\b", re.I)   # 升级前就开着的单元、老 CLI 没有结构化字段，只能认这句
+QUOTA_MARGIN_S = 60   # 到刷新时间再等一分钟
+
 def quota_note(info):
-    w = (info or {}).get("unifiedWindows") or {}
+    info = info or {}
+    w, k = dict(info.get("unifiedWindows") or {}), info.get("rateLimitType")
+    if info.get("status") == "rejected" and k and not info.get("isUsingOverage"):   # 按模型分的窗口不在 unifiedWindows 里，也记上
+        w = w or dict(quota().get("windows") or {})
+        w[k] = dict(w.get(k) or {}, status="rejected", utilization=1, resetsAt=info.get("resetsAt") or time.time() + 1800)
     if not w: return
     os.makedirs(STORE, exist_ok=True)
     fsio.write_json(QUOTA, {"at": time.time(), "windows": w})
@@ -532,6 +542,71 @@ def quota():
     try:
         with open(QUOTA) as f: return json.load(f)
     except (FileNotFoundError, ValueError): return {}
+
+def quota_hit(o):
+    """这个结果是不是撞了订阅额度。是就保证快照里有一个用完的窗口，bridge 下一拍就暂停。"""
+    if not o or not o.get("is_error") or (o.get("api_error") != "usage_limit_reached" and not LIMIT_RE.match(o.get("result") or "")): return False
+    if not any(x[2] for x in quota_over()):
+        quota_note({"status": "rejected", "rateLimitType": "five_hour", "resetsAt": time.time() + 1800, "unifiedWindows": quota().get("windows")})
+    return True
+
+def quota_over(q=None, now=None, on=()):
+    """[(窗口, 刷新时间, 是不是已经用完, 用量)]：要暂停的窗口。on 是已经为它暂停的窗口：用量要回落 5 个点才算缓过来，免得来回跳。"""
+    q, now, out = q if q is not None else quota(), now or time.time(), []
+    line = float(T.get("quota_pause", 0.95) or 0)
+    for k, w in (q.get("windows") or {}).items():
+        u, reset, dead = w.get("utilization") or 0, w.get("resetsAt") or 0, w.get("status") == "rejected"
+        if reset + QUOTA_MARGIN_S <= now or not line: continue
+        if dead or u >= line - (0.05 if k in on else 0) - 1e-9: out.append((k, reset, dead, u))
+    return out
+
+def quota_paused():
+    """bridge 写的暂停状态；没暂停返回 None。"""
+    try:
+        with open(PAUSE) as f: p = json.load(f)
+    except (OSError, ValueError): return None
+    return p if p.get("on") else None
+
+def quota_park(tid, **kv):
+    """额度不够：退回排队，会话和工作树都留着，恢复后接着跑。不发事件，不算失败。"""
+    t = load(tid) or {}
+    try: return update(tid, _from="running", status="approved", quota_hold=time.time(), quota_turn=(t.get("turn") or 0) + 1, wait_why="等额度恢复", **kv)
+    except InvalidTransition: return None
+
+def to_agent(tid, name="zcode"):
+    """额度不够时换另一个智能体接着干（Claude → ZCode）。摘要不叫 Claude 写，用 git 记录和待办补。返回没换成的原因，空串是换好了。
+    原来的工作树挪到旁边留着（没进 Git 的产物不丢），新智能体从分支上另开一份。"""
+    t = load(tid)
+    why = agents.movable(_me(), t, name)
+    if why: return why
+    if t["status"] != "approved": return "不在排队"
+    if alive(t):
+        stop(t)
+        if alive(t): return "上一轮还没停下来，过一会儿再换"
+    wt, b, note = t["worktree"], t["branch"], ""
+    if os.path.isdir(wt + ".claude"): return "已经换过一次"
+    if os.path.isdir(wt):
+        if git(wt, "symbolic-ref", "--short", "HEAD").stdout.strip() != b: return "工作树不在任务分支上（可能停在变基中途）"
+        git(wt, "add", "-A")
+        if git(wt, "diff", "--cached", "--quiet").returncode:
+            r = git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-qm", "wip：换人前的存档", "--no-verify")
+            if r.returncode: return "没提交的改动存不下来：" + (r.stderr or r.stdout).strip()[-150:]
+        base = t.get("base") or "HEAD"
+        note = cut(git(wt, "log", "--oneline", f"{base}..HEAD").stdout + git(wt, "diff", "--stat", f"{base}...HEAD").stdout, 2500)
+        r = git(wt, "checkout", "-q", "--detach")
+        if r.returncode == 0: r = git(t["repo"], "worktree", "move", wt, wt + ".claude")
+        if r.returncode:
+            git(wt, "checkout", "-q", b); return "工作树挪不开：" + r.stderr.strip()[-150:]
+    got = [x for x in inbox_items(tid) if x.get("kind", "指令") == "指令"]
+    old, conf = agent_of(t).label, (T.get("agents") or {}).get(name) or {}
+    takeover = (f"\n[换人接手] 这个任务先由 {old}（{t.get('model')}）做，额度用完了，现在换你接着做。已有的提交都在分支上（没提交的存成了一个“wip”提交），"
+                f"先看 git log、git diff 再动手。\n" + (f"之前收到过的指令，编号 {'、'.join('i%d' % x['n'] for x in got)}，开工前逐条用 inbox 命令重新取一遍。\n" if got else "")
+                + "待办清单：" + "；".join(f"{x.get('content')}（{x.get('status')}）" for x in t.get("todos") or []) + f"\n分支上的改动：\n{note}\n") if t.get("session_started") else t.get("takeover", "")
+    update(tid, agent=name, model=conf.get("model"), effort=conf.get("effort", "high"), agent_back={"model": t.get("model"), "effort": t.get("effort")},
+           moved=git(t["repo"], "rev-parse", "--verify", "--quiet", "refs/heads/" + b).returncode == 0, session_id=str(uuid.uuid4()), session_started=False, forked_from="", cost_base=-(t.get("cost") or 0),
+           takeover=takeover, scope="", verify_round=0, next_prompt=None, quota_hold=None, wait_why="", auto_model=True)
+    decide("换智能体接手", task=ref(t), why="Claude 额度不够，主人要换")
+    return ""
 
 def left_text(sec):
     """还剩多久：2 天 3 小时、1 小时 48 分、12 分、不到 1 分钟。"""
@@ -1577,7 +1652,8 @@ def make_worktree(t):
         elif r.returncode == 0: base = r.stdout.strip()
         elif git(repo, "rev-parse", "--verify", "--quiet", "origin/main").returncode == 0: base = "origin/main"
     if t.get("schedule") or agent_of(t).boxed:
-        sha = git(repo, "rev-parse", "--verify", "--quiet", base + "^{commit}").stdout.strip()
+        if t.get("moved"): base = t.get("base") or base   # 换人接手：从任务分支接着做，不从主干重来
+        sha = git(repo, "rev-parse", "--verify", "--quiet", ("refs/heads/" + t["branch"] if t.get("moved") else base) + "^{commit}").stdout.strip()
         r = subprocess.run(["git", "clone", "--quiet", "--shared", "--no-checkout", repo, wt], capture_output=True, text=True)
         if r.returncode == 0: r = git(wt, "checkout", "-q", "-b", t["branch"], sha)
         if r.returncode != 0:
@@ -1657,12 +1733,16 @@ def run_accept(tid):
             try: obj = json.loads(line)
             except Exception: continue
             if obj.get("type") == "assistant": update(tid, last_tool_at=time.time())
+            elif obj.get("type") == "rate_limit_event": quota_note(obj.get("rate_limit_info"))
             elif obj.get("type") == "result": final = obj
         p.wait(); p.stdout.close()
     usd = round((final or {}).get("total_cost_usd") or 0, 3)
     if usd: spend_add(tid, usd)
     update(tid, cost=round((load(tid).get("cost") or 0) + usd, 3), accept_cost=round((load(tid).get("accept_cost") or 0) + usd, 3), accept_session=sid)
     if load(tid).get("status") != "running": return
+    if quota_hit(final):   # 额度用完：半截的验收丢掉，恢复后重新写，不当成“没做成”
+        git(wt, "reset", "--hard", "-q", t["accept_from"]); git(wt, "clean", "-fdq")
+        quota_park(tid); return
     if git(wt, "status", "--porcelain").stdout.strip():   # 写了没提交：服务替它提交
         git(wt, "add", "-A"); git(wt, "-c", "user.name=yonty-bot", "-c", "user.email=yonty-bot@localhost", "commit", "-q", "-m", f"验收测试（{tref(tid)}）")
     head = git(wt, "rev-parse", "HEAD").stdout.strip()
@@ -1815,7 +1895,12 @@ def run(tid):
         if agent_of(t).boxed and not t.get("scope"):   # 沙箱按范围文件搭：这里是空范围，只看得到仓库和工作树
             sp = os.path.join(tdir(tid), "scope.json"); fsio.write(sp, json.dumps({"read": [], "actions": [], "devices": []}))
             t = update(tid, scope=sp)
-        if not t.get("session_started"):
+        saved = t.get("next_prompt")
+        if saved and os.path.isdir(t["worktree"]):   # 上次正要跑下一段时额度不够停下的：原样接着
+            (prompt, resume, fork), items = saved, inbox_take(tid)
+            if items: prompt += "\n\n" + format_inbox(items)
+            update(tid, next_prompt=None)
+        elif not t.get("session_started"):
             base = make_worktree(t)
             update(tid, base=base)
             if t["turn"] == 1 and not t.get("accept_commit"): event(tid, "start", "")
@@ -1840,6 +1925,8 @@ def run(tid):
         while True:
             t = load(tid)
             ag = agent_of(t)
+            if ag.name == "claude" and quota_paused():
+                quota_park(tid, next_prompt=[prompt, resume, fork]); return
             budget = t.get("budget") or T["budget_default"]
             env = dict(run_env(t), **ag.env(_me(), t))
             box = sandbox(t)
@@ -1902,6 +1989,10 @@ def run(tid):
                 total, prev = max(0.0, raw_total - (load(tid).get("cost_base") or 0)), load(tid).get("cost") or 0
                 if total > prev: spend_add(tid, total - prev); update(tid, _touch=False, cost=round(total, 3))
                 return
+            if ag.name == "claude" and quota_hit(final):   # 撞了额度：会话里已有这一轮的提示，恢复后续接；不报失败，不叫项目经理、主控
+                total, prev = max(0.0, raw_total - (load(tid).get("cost_base") or 0)), load(tid).get("cost") or 0
+                if total > prev: spend_add(tid, total - prev); update(tid, _touch=False, cost=round(total, 3))
+                quota_park(tid); return
             text = final.get("result") or ""
             text = "\n".join(l for l in text.splitlines() if not re.match(r"\s*\[进展\]", l)).strip()
             text, notes = split_handoff(text)
@@ -2288,6 +2379,9 @@ def cloud_verify(t):
     return run_verify(t)
 
 def remove_worktree(t):
+    if os.path.isdir((t.get("worktree") or "") + ".claude"):   # 换人前留的那份
+        r = git(t["repo"], "worktree", "remove", t["worktree"] + ".claude")
+        if r.returncode: return False, r.stderr.strip()[-200:]
     if t.get("clone"):   # 独立的 clone：先把分支拉回主仓库，再直接删目录（不在它里面跑 git）
         why = clone_fetch(t)
         if why: return False, "分支没拉回主仓库，先不删：" + why

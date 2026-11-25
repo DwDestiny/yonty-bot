@@ -30,6 +30,7 @@
       "five_hour": 0.85,
       "seven_day_pace": 1.1
     },
+    "quota_pause": 0.95,
     "sibling_warm_min": 55,
     "sibling_max_ctx": 150000,
     "compact": {
