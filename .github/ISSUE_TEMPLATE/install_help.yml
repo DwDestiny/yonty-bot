@@ -1,0 +1,82 @@
+name: "安装求助 · Installation help"
+description: "照文档装，卡在某一步 · Stuck while following the docs"
+title: "[安装 Install] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **公开议题，请先脱敏。** 不要贴令牌、密钥、登录链接、真实的用户/群/应用 ID、真实姓名、聊天内容、内网地址。安全漏洞不要写在这里，按 [SECURITY.md](https://github.com/DwDestiny/yonty-bot/blob/main/SECURITY.md) 私下报告。
+
+        **This issue is public. Redact first.** No tokens, keys, login links, real user/chat/app IDs, real names, chat content or internal addresses. Report vulnerabilities privately as described in SECURITY.md.
+  - type: input
+    id: step
+    attributes:
+      label: "卡在哪一步 · Which step"
+      description: "写文档名和步骤，例如 docs/guide.md 步骤 5 · Doc and step"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: "运行的命令 · Command you ran"
+      description: "去掉 ID 和私人路径 · Remove IDs and private paths"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: "看到的输出 · Output"
+      description: "报错原文，先脱敏。不要贴登录链接和 config.json 的真实值 · Error text, redacted. No login links or real config.json values"
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: tried
+    attributes:
+      label: "试过什么 · What you tried"
+      description: "没有可以不填 · Optional"
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: "Yonty Bot 版本 · Version"
+      description: "仓库根目录 VERSION 文件里的值 · The value in the VERSION file"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: "系统 · System"
+      description: "例如 Ubuntu 24.04、macOS 15；Python 版本 · OS and Python version"
+    validations:
+      required: true
+  - type: input
+    id: tools
+    attributes:
+      label: "工具版本 · Tool versions"
+      description: "Claude Code、lark-cli 或 wecom-cli、Node（启用企微时）· Claude Code, lark-cli or wecom-cli, Node (for WeCom)"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: "渠道 · Channel"
+      options:
+        - "飞书 · Feishu/Lark"
+        - "企业微信 · WeCom"
+        - "两个都接 · Both"
+        - "与渠道无关 · Not channel-related"
+    validations:
+      required: true
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: "提交前确认 · Before you submit"
+      options:
+        - label: "我已去掉令牌、真实 ID、真实姓名、聊天内容和内网地址 · I removed tokens, real IDs, real names, chat content and internal addresses"
+          required: true
+        - label: "我搜过已有议题，没有重复的 · I searched existing issues"
+          required: true
