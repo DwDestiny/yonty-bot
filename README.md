@@ -6,10 +6,12 @@
 
 自己部署，MIT。你和同事在同一个群里用：同事问代码当场答，同事要改代码，你批了才开工。没写验证命令的任务，服务不复核，结论里会写明。
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/hero.zh.dark.svg">
   <img src="docs/assets/hero/hero.zh.svg" alt="说做完，不算数。任务说做完后，服务复跑验证命令，没过就退回，PASS 之后由你决定合并。没写验证命令时服务不复核。" width="100%">
 </picture>
+</p>
 
 **前置备好后**（Linux 服务器、登录好的 Claude Code 和 `lark-cli`、已发布的飞书应用，清单见[安装](#安装)）：
 
@@ -70,10 +72,12 @@
 
 ## 它怎么干活
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/flow.zh.dark.svg">
   <img src="docs/assets/diagrams/flow.zh.svg" alt="派活流程：聊天里说一件事，到后台开工、服务复跑验证、汇报" width="480">
 </picture>
+</p>
 
 **你派的活**（你是装机器人的人，文档里叫“主人”）：
 
@@ -88,10 +92,12 @@
 
 **草稿合并请求和验证的先后**：默认的 Claude 任务先推分支、建草稿合并请求，然后服务才复跑验证。所以看到草稿，不代表验证过了，要看结论。云端任务和 ZCode 任务反过来，复跑过了才由服务建。建草稿支持 GitHub 和阿里云 Codeup，别的平台给你分支名。
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/gate.zh.dark.svg">
   <img src="docs/assets/diagrams/gate.zh.svg" alt="复跑验证：说做完后服务跑命令，没过退回，再不过写 BLOCKED，没写验证命令则写明没复核" width="480">
 </picture>
+</p>
 
 ### 主控、项目经理、开发各做什么
 
@@ -101,10 +107,12 @@
 | 项目经理 | 出方案、拆任务、派工、验收。不写代码 |
 | 开发 | 在后台的独立分支上写代码、跑测试、交回结果 |
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.zh.dark.svg">
   <img src="docs/assets/diagrams/layers.zh.svg" alt="主控、项目经理、开发的分工，以及服务负责的身份、排队、验证和停工" width="480">
 </picture>
+</p>
 
 ## 更多能力
 
@@ -161,10 +169,12 @@
 
 ## 安全边界
 
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/boundary.zh.dark.svg">
   <img src="docs/assets/diagrams/boundary.zh.svg" alt="权限边界：钩子拦的、要你批的、没有硬拦的、定时任务沙箱里仍然读得到的" width="480">
 </picture>
+</p>
 
 ### 谁能让它干什么
 
@@ -186,7 +196,7 @@
 
 - 会话内容、读到的代码、前文和旁听消息，由 `claude` 发给 Anthropic。飞书群默认带最近 2 小时最多 20 条前文，私聊带 24 小时。企业微信没有前文。
 - 每天查一次更新，访问官方 npm 源、GitHub 和源码仓库。
-- 可选的判断接口（配置里叫 `decide`）默认关。`decide.enabled` 一改成 `true`，模板里的 `points.ambient` 是 `shadow`，**旁听判断立刻开始外发**。`shadow` 的意思是结果只记录、不生效，内容照样发出去。
+- 可选的判断接口（配置里叫 `decide`）默认关。`decide.enabled` 一改成 `true`，模板里的 `points.ambient` 是 `shadow`，**旁听判断就开始外发**。`shadow` 的意思是结果只记录、不生效，内容照样发出去。
 
 判断接口打开后发什么：
 
@@ -221,7 +231,7 @@ Yonty Bot 是独立项目，与 Anthropic 无关。它是驱动本机官方命�
 下面只说 2026-11-25 读过 README 的项目。README 没写，不等于没有。
 
 - 要多种智能体、多个聊天平台或网页后台，看 [cc-connect](https://github.com/chenhg5/cc-connect)。要桌面工作台，看 [emdash](https://github.com/generalaction/emdash)。
-- 要扫码就能用的飞书桥接和用户名单，看 [lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)。要逐次审批工具调用和审计记录，看 [wardendeck](https://github.com/bocoboho/wardendeck)。
+- 要一条命令加扫码的飞书桥接，带用户、群和管理员名单，看 [lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge)。要逐次审批工具调用和审计记录，看 [wardendeck](https://github.com/bocoboho/wardendeck)。
 - 要多智能体分工或换厂商的模型复核，看 [orcha](https://github.com/Ink-dark/orcha) 和 [cc-lark](https://github.com/yixin-1024/feishu-claude-code)。
 - Yonty Bot 做的是从聊天派活到验证：项目经理拆任务，后台在独立分支上做，服务复跑派活时定的命令，交回草稿合并请求。
 
