@@ -67,6 +67,7 @@ class QuotaPause(unittest.TestCase):
         def limit(cmd, prompt, env, on_extra=None): self.use(1, 3600, 'rejected'); return HIT, LIMIT, 1, ''
         self.b.stream_claude = limit; n = len(self.e.sent); self.tick(3)
         self.assertEqual(len(self.e.sent), n); self.assertEqual(self.t.load(a).get('posted', 0), 0)
+        self.assertNotIn('回报退回主控', [d['kind'] for d in self.e.decisions()])
         self.b.stream_claude = orig; self.refresh(); self.tick(2); self.e.drain()
         self.assertEqual(self.t.load(a).get('posted'), 1); self.assertTrue(self.e.streams)
 
