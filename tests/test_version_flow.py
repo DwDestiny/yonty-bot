@@ -46,8 +46,27 @@ class Version(TT.Base):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a'))
         self.assertEqual(self.pm("[方案] 整改\n换了做法\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 丙 | src/c |\n- 收口 | | 甲\n- 丁 | src/d |\n[/方案]\n"), '')
         p = self.b.team.plan_of('proj', '整改'); self.assertNotIn('先定底座', p['text']); self.assertEqual((p['items'], p['version']), (['甲', '乙', '丙', '收口', '丁'], '1.0'))
-        self.pm("[方案] 整改\n去掉: 乙、甲\n任务:\n- 戊 | src/e |\n[/方案]\n")
-        self.assertEqual(self.b.team.plan_of('proj', '整改')['items'], ['甲', '丙', '收口', '丁', '戊'])   # 甲已经派出去，去不掉
+        its = lambda: self.b.team.plan_of('proj', '整改')['items']
+        self.assertEqual(self.pm("[方案] 整改\n去掉: 乙\n任务:\n- 戊 | src/e |\n[/方案]\n"), ''); self.assertEqual(its(), ['甲', '丙', '收口', '丁', '戊'])
+        self.assertIn('[取消任务]', self.pm("[方案] 整改\n去掉: 甲、丙\n[/方案]\n", '[不回]')); self.assertEqual(its(), ['甲', '丙', '收口', '丁', '戊'])   # 甲派出去了：退回，不是悄悄留着
+        self.assertIn('“没有的”不在方案', self.pm("[方案] 整改\n去掉: 丙、没有的\n[/方案]\n", '[不回]')); self.assertIn('丙', its())
+        self.assertEqual(self.pm("[方案] 整改\n去掉: 丙\n[/方案]\n"), ''); self.assertEqual(its(), ['甲', '收口', '丁', '戊'])   # 只写去掉、不列任务也行
+
+    def test_drop_long_lists_odd_titles_and_waited_ones(self):
+        T = self.b.team; T.save_plan('proj', '大', '版本: 1.0\n任务:\n- 登录页、注册页的表单 | a |\n- 登录页 | b |\n- ' + '很长的任务名' * 6 + ' | c |\n- ' + '另一个长任务名' * 6 + ' | d |\n- 底座 | e |\n- 收口 | | 底座\n', self.t, self.b.TEAM)
+        e = T.save_plan('proj', '大', '去掉：登录页、注册页的表单，' + '很长的任务名' * 6 + '、' + '另一个长任务名' * 6, self.t, self.b.TEAM)
+        self.assertEqual((e, T.plan_of('proj', '大')['items']), ('', ['登录页', '底座', '收口']))   # 超过 60 个字、标题里带顿号的也认
+        T.save_plan('proj', '大', '任务:\n- 甲 | f | 底座\n- 去掉: 登录页\n', self.t, self.b.TEAM); self.assertEqual(T.plan_of('proj', '大')['items'], ['底座', '收口', '甲'])   # 写在任务单里当成一条也不会登记成任务
+        self.e.task(title='甲', thing='甲', project='proj', plan='大', deps=['底座'], status='approved')
+        self.assertIn('等着它', T.save_plan('proj', '大', '去掉: 底座', self.t, self.b.TEAM)); self.assertIn('底座', T.plan_of('proj', '大')['items'])
+
+    def test_filling_in_does_not_vouch_for_what_others_added(self):
+        """主人交代过的只认那一轮亲自登记的：同事那一轮加进方案的，不因为主人后来补了一条就算交代过。"""
+        T = self.b.team; T.save_plan('proj', '整', '版本: 1.0\n任务:\n- 甲 | a |\n', self.t, self.b.TEAM); T.vouch_plan('proj', '整', '任务:\n- 甲 | a |\n')
+        T.save_plan('proj', '整', '任务:\n- 同事要的 | b |\n', self.t, self.b.TEAM)
+        T.save_plan('proj', '整', '任务:\n- 乙 | c |\n', self.t, self.b.TEAM); T.vouch_plan('proj', '整', '任务:\n- 乙 | c |\n')
+        self.assertEqual((T.vouched('proj', '整'), T.plan_of('proj', '整')['items']), (['甲', '乙'], ['甲', '同事要的', '乙']))
+        self.pm(self.plan('官网', ['丁'], '2.0', '另开: 试\n')); self.assertEqual(T.vouched('proj', '官网'), ['丁'])   # 真走一遍主人的一轮
 
     def test_supplements_stay_inside_the_text_limit(self):
         T = self.b.team; T.save_plan('proj', '长', '版本: 1.0\n定性' + '长' * 5980 + '\n任务:\n- 甲 | a |\n', self.t, self.b.TEAM)
@@ -57,6 +76,19 @@ class Version(TT.Base):
     def test_closed_plan_name_is_not_reused_for_a_new_version(self):
         self.pm(self.plan('官网', ['甲'], '1.0') + block(self.e.repo, '甲', 'src/a', plan='官网')); self.put('甲', status='done')
         self.assertIn('换个方案名', self.pm(self.plan('官网', ['乙', '收口'], '1.1') + block(self.e.repo, '乙', 'src/b', plan='官网'), '[不回]')); self.assertEqual(len(self.new()), 1)
+
+    def test_adhoc_and_version_plans_do_not_turn_into_each_other(self):
+        add = lambda name, body, more='': self.pm(f"[方案] {name}\n{body}任务:\n{more or '- 乙 | src/b |'}\n[/方案]\n", '[不回]')
+        its = lambda n: self.b.team.plan_of('proj', n)['items']
+        self.assertEqual(self.pm(self.plan('小活', ['甲'], '临时') + block(self.e.repo, '甲', 'src/a', plan='小活')), '')
+        self.assertIn('只装一个任务', add('小活', '')); self.assertIn('只装一个任务', add('小活', '版本: 临时\n')); self.assertIn('只装一个任务', add('小活', '版本: 1.0\n', '- 甲 | src/a |'))
+        self.assertEqual(add('小活', '', '- 评审 | | 甲'), ''); self.assertEqual(its('小活'), ['甲', '评审'])   # 补一个评审可以
+        self.put('甲', status='done'); self.e.task(title='评审', thing='评审', project='proj', plan='小活', status='done')
+        self.assertIn('做完的临时活', add('小活', '版本: 临时\n')); self.assertEqual(its('小活'), ['甲', '评审'])   # 换着名字往做完的里塞，躲每天 3 个的数
+        self.assertEqual(self.pm(self.plan('整改', ['丙', '收口'], '1.0') + block(self.e.repo, '丙', 'src/c')), '')
+        self.assertIn('不能改成', add('整改', '版本: 临时\n')); self.assertEqual(self.b.team.plan_of('proj', '整改')['version'], '1.0')
+        self.assertEqual(self.pm(self.plan('急修', ['丁', '收口'], '1.0.1', '另开: ' + '线上登录挂了，' * 12 + '\n')), '')   # 理由写长了也认
+        self.assertIn('一个版本只用一个方案', add('急修', '版本: 1.0\n')); self.assertEqual(self.b.team.plan_of('proj', '急修')['version'], '1.0.1')
 
     def test_next_version_opens_when_closing_starts(self):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '收口', deps='甲', closing=True))

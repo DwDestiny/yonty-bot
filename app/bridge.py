@@ -1962,7 +1962,7 @@ def pm_notes(project, key, text, vouch=False):
     for a, b in ps:
         e = team.plan_check(tasks._me(), project, a, b) or team.save_plan(project, a, b, tasks._me(), TEAM)
         if e: errs.append(e)
-        elif vouch: team.vouch_plan(project, a.strip())
+        elif vouch: team.vouch_plan(project, a.strip(), b)
     return text, errs
 
 def pm_marks(project, key, owner, text, hop=0, about=None, idem=None, src=None, follow=False):

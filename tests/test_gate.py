@@ -161,7 +161,7 @@ class RelayTest(Base):
         out = []
         th = threading.Thread(target=lambda: out.append(self.t.run_verify(self.t.load(t['id'])))); th.start()
         end = time.time() + 20
-        while time.time() < end and not self.t.overdue_open(self.t.load(t['id'])): time.sleep(0.1)
+        while time.time() < end and 'overdue' not in self.kinds(t): time.sleep(0.1)   # 先写等处置的标记、后写事件：等事件，机器忙时不抢跑
         self.e.tick(); th.join(20)
         s = self.e.streams[0]
         self.assertEqual(s['env'].get('FCB_LAYER'), 'pm'); self.assertIn(f"[处置] {self.t.ref(t)} 继续等", s['prompt']); self.assertIn('sleep 60', s['prompt'])
