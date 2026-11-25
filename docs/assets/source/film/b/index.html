@@ -1,107 +1,153 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
-<!-- 宣传片方向 B「划掉」样片（0–8 秒，1280×720，30 fps，无声）。
+<!-- 宣传片方向 B「划掉」样片 v2（自然时间 0–8 秒，1280×720，30 fps，无声）。
+     为了真运动模糊：时间线整体放慢 K 倍（K=24），渲 K 倍帧数后用 ffmpeg 每 K 帧叠一帧（见 build.sh）。
      Input: assets/gsap.min.js、fonts/JetBrainsMono-700.woff2（build.sh 从依赖里拷入，均不进 Git）
-     Output: HyperFrames 逐帧渲染的合成；时间线 window.__timelines.main
+     Output: HyperFrames 合成；时间线 window.__timelines.main
      Pos: docs/assets/source/film/b；字体 Noto Sans CJK SC 与 JetBrains Mono 均为 OFL；数据全部虚构（示意） -->
 <style>
 @font-face{font-family:"JBM";src:url("fonts/JetBrainsMono-700.woff2");font-weight:700}
 html,body{margin:0;background:#0E0F12}
 #root{position:relative;width:1280px;height:720px;overflow:hidden;background:#0E0F12;font-family:"Noto Sans CJK SC","JBM",sans-serif}
-.scene{position:absolute;inset:0}
-.light{background:radial-gradient(ellipse 75% 70% at 50% 42%,#FAF8F2 0%,#F4F1EA 55%,#EDEAE1 100%)}
-.light::after{content:"";position:absolute;inset:0;opacity:.04;mix-blend-mode:multiply;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' seed='4'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.2 0'/></filter><rect width='240' height='240' filter='url(%23n)'/></svg>")}
-.mono{font-family:"JBM",monospace;font-weight:700}
-.tag{position:absolute;font-size:19px;letter-spacing:.04em;white-space:nowrap}
+#shake{position:absolute;inset:0}
+#pivot{position:absolute;inset:0;transform-origin:640px 360px}
+#world{position:absolute;left:0;top:0;width:0;height:0;transform-origin:0 0}
+.abs{position:absolute}
+.paper{background-color:#F4F1EA;background-image:radial-gradient(ellipse 900px 700px at 640px 360px,#FBF9F3,rgba(251,249,243,0) 100%)}
+.dark{background:#0E0F12}
+.fib{position:absolute;inset:0;opacity:.06;mix-blend-mode:multiply;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='400' height='400'><filter id='f'><feTurbulence type='fractalNoise' baseFrequency='.015 .45' numOctaves='3' seed='8'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1.4 -.1'/></filter><rect width='400' height='400' filter='url(%23f)'/></svg>")}
+.spkP{position:absolute;inset:0;z-index:5;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.65' numOctaves='1' seed='3'/><feColorMatrix values='0 0 0 0 .957  0 0 0 0 .945  0 0 0 0 .918  10 0 0 0 -7.3'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>")}
+.spkD{position:absolute;inset:0;z-index:5;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.65' numOctaves='1' seed='5'/><feColorMatrix values='0 0 0 0 .055  0 0 0 0 .06  0 0 0 0 .07  10 0 0 0 -7.3'/></filter><rect width='300' height='300' filter='url(%23n)'/></svg>")}
+.big{position:absolute;text-align:center;white-space:nowrap;font-weight:700;z-index:3}
+.c{display:inline-block}
 .ink{color:#111;-webkit-text-stroke:3px #111}
-#strike{position:absolute;left:0;top:0;width:1280px;height:720px;transform-origin:640px 360px}
-#strike .t{position:absolute;left:0;width:1280px;top:262px;text-align:center;font-size:173px;line-height:196px;font-weight:700;letter-spacing:.02em}
-#red{position:absolute;left:300px;top:352px;width:680px;height:13px;background:#FF3B1F;border-radius:2px;transform-origin:0 50%;transform:rotate(-2deg) scaleX(0)}
-#main{position:absolute;left:0;width:1280px;top:366px;text-align:center;font-size:83px;line-height:104px;font-weight:700;letter-spacing:.02em;color:#111;white-space:nowrap}
-#main .c,#pass .c{display:inline-block}
-#main .b{color:#2340FF}
-.dark{background:radial-gradient(ellipse 60% 55% at 38% 50%,#14161B 0%,#0E0F12 60%,#090A0C 100%)}
-.ln{position:absolute;left:154px;top:329px;font-size:50px;line-height:62px;color:#F4F3EF;white-space:nowrap;font-weight:400}
-.ln.mono{font-size:46px}
-#cur{position:absolute;background:#fff}
-#pass{position:absolute;left:0;width:1280px;top:206px;text-align:center;font-size:187px;line-height:220px;color:#111;letter-spacing:.02em;white-space:nowrap}
-#bar{position:absolute;left:400px;top:452px;width:480px;height:9px;background:#2340FF;transform-origin:0 50%;transform:scaleX(0)}
-#sub{position:absolute;left:0;width:1280px;top:482px;text-align:center;font-size:30px;line-height:40px;color:#444;font-weight:400}
+.blue{color:#2340FF;-webkit-text-stroke:3px #2340FF}
+.mono{font-family:"JBM",monospace;font-weight:700}
+#red{position:absolute;left:-60px;top:408px;width:1420px;height:26px;background:#FF3B1F;border-radius:3px;transform-origin:0 50%;transform:rotate(-5deg) scaleX(0);z-index:4}
+#cur{position:absolute;background:#fff;z-index:20;display:none}
+#P{position:absolute;inset:0;visibility:hidden;z-index:30}
+#sweep{position:absolute;left:0;top:-100px;width:700px;height:920px;z-index:10;opacity:0;mix-blend-mode:screen;background:linear-gradient(100deg,rgba(255,255,255,0) 30%,rgba(255,255,255,.17) 50%,rgba(255,255,255,0) 70%)}
+#lab{position:absolute;right:40px;bottom:26px;font-size:19px;letter-spacing:.04em;color:#9a9a9a;mix-blend-mode:difference;z-index:50;white-space:nowrap}
 </style></head><body>
-<div id="root" data-composition-id="main" data-start="0" data-duration="8" data-width="1280" data-height="720">
+<div id="root" data-composition-id="main" data-start="0" data-duration="192" data-width="1280" data-height="720">
+<div id="shake">
+ <div id="pivot"><div id="world">
+  <div class="abs paper" style="left:-3200px;top:-2200px;width:5000px;height:5200px"><div class="fib"></div></div>
+  <div class="abs dark" style="left:1800px;top:-2200px;width:6200px;height:5200px"></div>
 
-<div id="L" class="scene light">
-  <div class="tag mono" style="left:44px;top:34px;color:#555">agent · 示意</div>
-  <div class="tag mono" style="right:44px;bottom:30px;color:#777">示意 · 数据均为虚构</div>
-  <div id="strike"><div class="t ink" id="done">做完了</div><div id="red"></div></div>
-  <div id="main"></div>
-</div>
-
-<div id="D" class="scene dark" style="visibility:hidden">
-  <div class="tag mono" style="left:44px;top:34px;color:#6d6f75">agent · 示意</div>
-  <div class="tag mono" style="right:44px;bottom:30px;color:#5a5c62">示意 · 数据均为虚构</div>
-  <div class="ln" id="l1" style="color:#8d8f95">做完了 <span style="font-family:'Noto Sans CJK SC'">✔</span></div>
-  <div class="ln mono" id="l2"></div>
-  <div class="ln" id="l3" style="color:#FF3B1F;font-weight:700">没过 · 3 项</div>
-  <div class="ln" id="l4" style="font-weight:700">退回，后台返工</div>
-  <div id="cur"></div>
-</div>
-
-<div id="P" class="scene light" style="visibility:hidden">
-  <div class="tag mono" style="left:44px;top:34px;color:#555">agent · 示意</div>
-  <div class="tag mono" style="right:44px;bottom:30px;color:#777">示意 · 数据均为虚构</div>
-  <div id="pwrap" style="position:absolute;inset:0;transform-origin:640px 380px">
-    <div id="pass" class="mono"></div><div id="bar"></div><div id="sub">复跑通过 · 示意#3</div>
+  <!-- 浅色：做完了 + 红线 + 主句 -->
+  <div id="sent"></div>
+  <div id="w1" class="abs" style="left:0;top:130px;width:1280px;height:460px;z-index:3">
+    <div id="wt" class="big ink" style="inset:0;font-size:400px;line-height:460px;letter-spacing:-.02em;clip-path:polygon(0 0,100% 0,100% 37.8%,0 62.2%)">做完了</div>
+    <div id="wb" class="big ink" style="inset:0;font-size:400px;line-height:460px;letter-spacing:-.02em;clip-path:polygon(0 62.2%,100% 37.8%,100% 100%,0 100%)">做完了</div>
   </div>
-</div>
+  <div id="red"></div>
+  <div class="spkP" style="left:-400px;top:-300px;width:2100px;height:1300px;inset:auto"></div>
 
+  <!-- 暗色：四行 -->
+  <div class="big" id="d1" style="left:1790px;top:150px;width:1500px;text-align:left;font-size:300px;line-height:340px;color:#8d8f95">做完了 <span style="font-family:'Noto Sans CJK SC'">✓</span></div>
+  <div class="big" id="d2a" style="left:3090px;top:10px;width:900px;text-align:left;font-size:330px;line-height:370px;color:#F4F3EF;transform:rotate(-3deg)">复跑</div>
+  <div class="big mono" id="d2b" style="left:3070px;top:400px;width:1100px;text-align:left;font-size:150px;line-height:180px;color:#F4F3EF;transform:rotate(-3deg)"></div>
+  <div class="big" id="d3" style="left:4360px;top:-100px;width:1280px;font-size:520px;line-height:560px;color:#FF3B1F"></div>
+  <div class="big mono" id="d3b" style="left:4800px;top:470px;width:800px;text-align:right;font-size:110px;line-height:130px;color:#F4F3EF">· 3 项</div>
+  <div class="big" id="d4" style="left:3660px;top:1010px;width:1280px;font-size:172px;line-height:200px;color:#F4F3EF;transform:rotate(-4deg)"></div>
+  <div class="spkD" style="left:1700px;top:-250px;width:1800px;height:1200px;inset:auto"></div><div class="spkD" style="left:3050px;top:-250px;width:1800px;height:1200px;inset:auto"></div><div class="spkD" style="left:4300px;top:-300px;width:1800px;height:1200px;inset:auto"></div><div class="spkD" style="left:3500px;top:550px;width:1800px;height:1200px;inset:auto"></div><div class="spkD" style="left:4300px;top:550px;width:1800px;height:1200px;inset:auto"></div>
+ </div></div>
+ <div id="cur"></div>
+ <div id="sweep"></div>
+ <div id="P" class="paper"><div class="fib"></div>
+  <div id="pwrap" class="abs" style="inset:0;transform-origin:640px 360px">
+   <div id="pass" class="big mono ink" style="left:60px;top:90px;width:1040px;text-align:left;font-size:420px;line-height:480px;letter-spacing:-.01em;-webkit-text-stroke:0"></div>
+   <div id="blk" class="abs" style="left:1130px;top:140px;width:78px;height:370px;background:#111"></div>
+   <div id="bar" class="abs" style="left:92px;top:580px;width:1010px;height:12px;background:#2340FF;transform-origin:0 50%;transform:scaleX(0)"></div>
+   <div id="sub" class="abs" style="left:92px;top:612px;font-size:32px;line-height:44px;color:#333;font-weight:400">复跑通过 · 示意#3</div>
+  </div>
+  <div class="spkP"></div>
+ </div>
+</div>
+<div id="lab">示意 · 数据均为虚构</div>
 </div>
 <script src="assets/gsap.min.js"></script>
 <script>
 window.__timelines = window.__timelines || {};
-const tl = gsap.timeline({ paused: true });
-const split = (el, text, blue) => { text.split("").forEach((ch,i)=>{ const s=document.createElement("span"); s.className="c"+(blue&&blue.includes(i)?" b":""); s.textContent=ch; el.appendChild(s); }); return el.querySelectorAll(".c"); };
-const mainC = split(document.getElementById("main"), "说做完，不算数。", [4,5,6]);
-const passC = split(document.getElementById("pass"), "PASS");
-const l2 = document.getElementById("l2");
-const l2txt = "复跑 make check…";
-const l2C = l2txt.split("").map(ch=>{const s=document.createElement("span");s.textContent=ch;s.style.opacity=0;l2.appendChild(s);return s;});
-const [W,H]=[1280,720];
+const K = 24;
+const wrap = gsap.timeline({ paused: true });
+const tl = gsap.timeline();
+const split = (el, text, cls) => { el.innerHTML=""; return text.split("").map(ch=>{const s=document.createElement("span");s.className="c "+(cls||"");s.textContent=ch;el.appendChild(s);return s;}); };
+// 主句：两行
+const sent = document.getElementById("sent");
+const mk = (id,text,top,cls,idx) => { const d=document.createElement("div"); d.className="big"; d.style.cssText=`left:0;top:${top}px;width:1280px;font-size:245px;line-height:260px;letter-spacing:-.01em`; sent.appendChild(d); return split(d,text,cls); };
+const s1 = mk("s1","说做完，",110,"ink"), s2 = mk("s2","不算数。",390,"blue");
+s2[3].classList.remove("blue"); s2[3].classList.add("ink");
+const cA = split(document.getElementById("d3"),"没过","");
+const cB = split(document.getElementById("d4"),"退回，后台返工","");
+const mono = document.getElementById("d2b"); const mC = "make check…".split("").map(ch=>{const s=document.createElement("span");s.textContent=ch;s.style.opacity=0;mono.appendChild(s);return s;});
+const pC = split(document.getElementById("pass"),"PASS","");
+gsap.set(".c",{display:"inline-block"});
+const cam=(t,d,o,ease)=>{ const s=o.s, x=640-o.cx*s, y=360-o.cy*s;
+  tl.to("#world",{x,y,scale:s,duration:d,ease},t);
+  tl.to("#pivot",{rotationZ:o.rz||0,rotationY:o.ry||0,rotationX:o.rx||0,duration:d,ease},t); };
+gsap.set("#pivot",{transformPerspective:1100,transformOrigin:"640px 360px"});
+gsap.set("#world",{x:0,y:0,scale:1});
+const shake=(t0,dur,amp)=>{ const n=Math.round(dur*120); for(let k=0;k<n;k++){ const dc=1-k/n; tl.set("#shake",{x:amp*dc*Math.sin(k*5.3),y:amp*dc*.8*Math.cos(k*3.7)},t0+k/120);} tl.set("#shake",{x:0,y:0},t0+dur); };
 
-// 0.0–0.5 静；0.5 红线划过
-gsap.set("#strike",{transformOrigin:"640px 360px"});
-tl.to("#red",{scaleX:1,duration:.35,ease:"power2.out"},.5);
-// 0.85–1.25 缩小上移变灰
-tl.to("#strike",{scale:.333,y:-144,duration:.4,ease:"power3.inOut"},.85);
-tl.to("#done",{color:"#8A8A84",webkitTextStrokeColor:"#8A8A84",duration:.4,ease:"power3.inOut"},.85);
-// 1.2 起逐字落字，模糊 6→0、下移 24→0
-gsap.set(mainC,{opacity:0,y:24,filter:"blur(6px)"});
-tl.to(mainC,{opacity:1,y:0,filter:"blur(0px)",duration:.25,ease:"expo.out",stagger:.045},1.2);
-// 2.5–2.77 退出，硬切到暗底
-tl.to(["#main","#strike"],{y:"-=34",opacity:0,filter:"blur(8px)",duration:.27,ease:"power3.in"},2.5);
-tl.set("#L",{visibility:"hidden"},2.77).set("#D",{visibility:"visible"},2.77);
-// 光标块（品牌形状）固定在行首
-const CX=118,CY=360;
-const setCur=(w,h,t)=>tl.set("#cur",{left:CX-w/2,top:CY-h/2,width:w,height:h},t);
-setCur(14,58,0);
-const lineIn=(sel,t)=>tl.fromTo(sel,{opacity:0,y:36,filter:"blur(8px)"},{opacity:1,y:0,filter:"blur(0px)",duration:.25,ease:"power4.out"},t);
-const lineOut=(sel,t)=>tl.to(sel,{opacity:0,y:-24,duration:.14,ease:"power3.in"},t);
-gsap.set(["#l1","#l2","#l3","#l4"],{opacity:0});
-lineIn("#l1",2.77);
-lineOut("#l1",3.66); tl.set("#l2",{opacity:1},3.7);
-l2C.forEach((s,i)=>tl.set(s,{opacity:1},3.7+i/20));
-lineOut("#l2",4.56); lineIn("#l3",4.6);
-tl.fromTo("#cur",{backgroundColor:"#FF3B1F"},{backgroundColor:"#ffffff",duration:.4,ease:"power2.out"},4.6);
-lineOut("#l3",5.46); lineIn("#l4",5.5);
-// 6.5 起方块每帧 ×1.8，只加速不减速，6.8 切亮底
-for(let i=0;i<10;i++) setCur(14*Math.pow(1.8,i),58*Math.pow(1.8,i),6.5+i/30);
-tl.set("#D",{visibility:"hidden"},6.8).set("#P",{visibility:"visible"},6.8);
-// PASS 逐字砸入，蓝线，小字，轻推
-gsap.set(passC,{opacity:0,y:-46,scale:1.3,filter:"blur(8px)"});
-tl.to(passC,{opacity:1,y:0,scale:1,filter:"blur(0px)",duration:.3,ease:"expo.out",stagger:.04},6.8);
-tl.to("#bar",{scaleX:1,duration:.3,ease:"power3.out"},7.1);
+// —— 浅色段 ——
+cam(0,.8,{cx:640,cy:360,s:1.06,rz:-.8},"power1.out");
+tl.to("#red",{scaleX:1,duration:.3,ease:"power3.in"},.5);
+tl.to("#wt",{x:-1750,y:-110,rotation:-6,duration:.6,ease:"power3.in"},.8);
+tl.to("#wb",{x:900,y:720,rotation:9,duration:.55,ease:"power3.in"},.82);
+tl.to("#red",{scaleX:0,transformOrigin:"100% 50%",duration:.2,ease:"power3.in"},.95);
+shake(.8,.25,9);
+gsap.set([s1,s2],{opacity:0,y:-160,scale:1.25,filter:"blur(12px)"});
+tl.to(s1,{opacity:1,y:0,scale:1,filter:"blur(0px)",duration:.3,ease:"expo.out",stagger:.06},1.05);
+tl.to(s2,{opacity:1,y:0,scale:1,filter:"blur(0px)",duration:.3,ease:"expo.out",stagger:.06},1.3);
+cam(.8,1.45,{cx:640,cy:360,s:1.0,rz:1.2,ry:-3},"none");
+// 甩到暗墙 ①
+cam(2.25,.4,{cx:2500,cy:360,s:1.0,rz:-1,ry:0},"power3.inOut");
+tl.to("#pivot",{rotationY:-18,duration:.2,ease:"power2.in"},2.25).to("#pivot",{rotationY:0,duration:.2,ease:"power2.out"},2.45);
+gsap.set("#d1",{opacity:1});
+cam(2.65,.35,{cx:2580,cy:360,s:1.08,rz:0},"none");
+// 甩到 ② 复跑
+cam(3.0,.35,{cx:3700,cy:360,s:1.0,rz:0},"power3.inOut");
+tl.to("#pivot",{rotationY:14,duration:.17,ease:"power2.in"},3.0).to("#pivot",{rotationY:0,duration:.18,ease:"power2.out"},3.17);
+gsap.set("#d2a",{opacity:0,x:260,filter:"blur(10px)"});
+tl.to("#d2a",{opacity:1,x:0,filter:"blur(0px)",duration:.25,ease:"expo.out"},3.25);
+mC.forEach((s,i)=>tl.set(s,{opacity:1},3.4+i/20));
+cam(3.35,.6,{cx:3700,cy:430,s:1.3,rz:0},"power2.in");
+// 撞停 ③
+cam(3.95,.45,{cx:5000,cy:360,s:1.0,rz:0,ry:-10},"power4.in");
+tl.set("#pivot",{rotationY:0},4.4);
+gsap.set(cA,{opacity:0,y:-420,scale:1.45});
+tl.to(cA,{opacity:1,y:0,scale:1,duration:.22,ease:"power4.in",stagger:.04},4.2);
+gsap.set("#d3b",{opacity:0}); tl.set("#d3b",{opacity:1},4.42);
+shake(4.4,.38,30);
+cam(4.4,.35,{cx:5010,cy:366,s:1.03},"none");
+// 弹回 ④
+cam(4.75,.55,{cx:4300,cy:1100,s:1.0,rz:0,ry:0},"back.out(1.5)");
+gsap.set(cB,{opacity:0,x:300,filter:"blur(12px)"});
+tl.to(cB,{opacity:1,x:0,filter:"blur(0px)",duration:.3,ease:"expo.out",stagger:.035},4.95);
+cam(5.3,1.1,{cx:4380,cy:1100,s:1.06},"none");
+// 反向推出
+tl.to(cB,{x:-1500,opacity:0,filter:"blur(14px)",duration:.28,ease:"power3.in",stagger:.02},6.0);
+// 光扫
+[[2.55,.5],[3.4,.6],[5.2,.8]].forEach(([t,d],i)=>{ tl.set("#sweep",{opacity:1,x:-800},t).to("#sweep",{x:1400,duration:d,ease:"power1.inOut"},t).set("#sweep",{opacity:0},t+d); });
+// 光标块居中放大，只加速
+tl.set("#cur",{display:"block"},6.5);
+const N=Math.round(.3*720);
+for(let k=0;k<=N;k++){ const f=k/24; const w=14*Math.pow(1.8,f), h=58*Math.pow(1.8,f); tl.set("#cur",{left:640-w/2,top:360-h/2,width:w,height:h},6.5+k/720); }
+tl.set("#P",{visibility:"visible"},6.8).set("#cur",{display:"none"},6.8);
+// PASS：光标块砸出来
+gsap.set(pC,{opacity:0}); gsap.set("#blk",{y:-700});
+tl.to("#blk",{y:0,duration:.12,ease:"power3.in"},6.86);
+shake(6.98,.32,24);
+tl.set(pC,{opacity:1},6.98);
+gsap.set(pC,{x:240,scale:1.2,filter:"blur(14px)"});
+tl.to([...pC].reverse(),{x:0,scale:1,filter:"blur(0px)",duration:.22,ease:"expo.out",stagger:.035},6.98);
+tl.to("#bar",{scaleX:1,duration:.25,ease:"power3.out"},7.15);
 gsap.set("#sub",{opacity:0,y:14,filter:"blur(6px)"});
-tl.to("#sub",{opacity:1,y:0,filter:"blur(0px)",duration:.3,ease:"power4.out"},7.2);
-tl.to("#pwrap",{scale:1.06,duration:.6,ease:"power2.inOut"},7.2);
+tl.to("#sub",{opacity:1,y:0,filter:"blur(0px)",duration:.3,ease:"power4.out"},7.25);
+tl.to("#pwrap",{scale:1.05,duration:1.0,ease:"none"},7.0);
 tl.set({}, {}, 8);
-window.__timelines["main"] = tl;
+tl.timeScale(1/K);
+wrap.add(tl,0); wrap.set({},{},8*K);
+window.__timelines["main"] = wrap;
 </script></body></html>
