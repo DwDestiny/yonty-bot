@@ -9,27 +9,172 @@ Pos:    Yonty Bot 的生成器
         已有 rules.md 时，把模板的改动逐处合进去，实例改过的那一处不动并列出来；加 --rules 按模板整份重写；手工合完后加 --rules-done 记下已合。
         config.json 打开 cross_im_read 时，第一次生成要加 --confirm-cross-im（先把提醒给主人看、主人同意后再加）
 """
-import difflib, json, os, platform, re, shutil, subprocess, sys, datetime
+import datetime, difflib, fcntl, json, os, platform, re, shlex, shutil, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = os.path.join(ROOT, "app")
 VERSION = open(os.path.join(ROOT, "VERSION"), encoding="utf-8").read().strip()
 if len(sys.argv) < 2: sys.exit(__doc__)
 INST = os.path.abspath(os.path.expanduser(sys.argv[1]))
-CFG = json.load(open(os.path.join(INST, "config.json")))
 HOME = os.path.expanduser("~")
 X = lambda p: HOME + p[1:] if p.startswith("~") else p
-CH = CFG.get("channels", {})
-FEISHU_ON = CH.get("feishu", {}).get("enabled", True)
-WECOM_ON = CH.get("wecom", {}).get("enabled", False)
-need = ["name", "owner_name"] + (["owner_open_id", "bot_open_id"] if FEISHU_ON else [])
-for k in need:
-    if not CFG.get(k) or "（" in str(CFG[k]):
-        sys.exit(f"config.json 的 {k} 还没填")
-if WECOM_ON and (not CH["wecom"].get("owner_userid") or "（" in CH["wecom"]["owner_userid"]):
-    sys.exit("config.json 的 channels.wecom.owner_userid 还没填（主人私聊机器人一句，在 logs/bridge.log 的 recv 行里看）")
-if not (FEISHU_ON or WECOM_ON):
-    sys.exit("config.json 的 channels 里至少启用一个渠道")
+CFG_FILE = os.path.join(INST, "config.json")
+IS_MAC = platform.system() == "Darwin"
+
+# 0. 检查：全部放在写盘之前，没过就退出，实例一个字不动。
+def die(*errs): sys.exit("没有生成，实例没动：\n" + "\n".join("  - " + e for e in errs))
+
+def load_object(path, hint):
+    try:
+        with open(path, encoding="utf-8") as f: text = f.read()
+    except FileNotFoundError: die(f"找不到 {path}：{hint}")
+    except (OSError, UnicodeDecodeError) as e: die(f"{path} 读不了（{e}）：检查权限，存成 UTF-8")
+    if not text.strip(): die(f"{path} 是空的：{hint}")
+    try: d = json.loads(text)
+    except json.JSONDecodeError as e: die(f"{path} 第 {e.lineno} 行第 {e.colno} 列不是合法 JSON（{e.msg}）：常见的是多了或少了逗号、引号")
+    except RecursionError: die(f"{path} 嵌套太深，不是合法的配置")
+    if not isinstance(d, dict): die(f"{path} 最外层要是一个对象（花括号）：{hint}")
+    return d
+
+CFG_HINT = f"照 {os.path.join(T, 'config.example.json')} 写一份"
+load_object(CFG_FILE, CFG_HINT)
+# 同一个实例一次只跑一个：锁实例目录本身，不多留文件；进程退出自动放开
+_lock = os.open(INST, os.O_RDONLY)
+try: fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except BlockingIOError:
+    print("这个实例有另一个 scaffold 在跑，等它做完", flush=True); fcntl.flock(_lock, fcntl.LOCK_EX)
+except OSError: pass   # 这种文件系统不支持锁
+CFG = load_object(CFG_FILE, CFG_HINT)   # 等锁时可能改过
+META_FILE = os.path.join(INST, "yonty-bot.json")
+META = load_object(META_FILE, "这是生成记录，从备份恢复；没有备份就删掉它重跑") if os.path.lexists(META_FILE) else {}
+INSTALLED = bool(META)   # 装好过的实例：/upgrade 也走这里，以前放得过去的问题只警告，不让升级失败
+ERRORS, NOTES = [], []   # 必须先改的；只提醒的，最后的“完成”会带上
+
+def soft(msg): (NOTES if INSTALLED else ERRORS).append(msg)
+def bad(key, how): ERRORS.append(f"{CFG_FILE} 的 {key} {how}")
+def sub(d, key, name):
+    v = d.get(key, {})
+    if not isinstance(v, dict): bad(name, "要写成对象（花括号）"); return {}
+    return v
+
+CH = sub(CFG, "channels", "channels")
+_fs, _wx = sub(CH, "feishu", "channels.feishu"), sub(CH, "wecom", "channels.wecom")
+FEISHU_ON, WECOM_ON = _fs.get("enabled", True), _wx.get("enabled", False)
+FILL = {"name": "机器人的名字", "owner_name": "主人的名字", "owner_open_id": "主人的 open_id，scripts/ids.sh 能查", "bot_open_id": "机器人的 open_id，scripts/ids.sh 能查"}
+for k in ["name", "owner_name"] + (["owner_open_id", "bot_open_id"] if FEISHU_ON else []):
+    if not CFG.get(k) or "（" in str(CFG[k]): bad(k, f"还没填：填{FILL[k]}")
+    elif not isinstance(CFG[k], str): soft(f"{CFG_FILE} 的 {k} 要写成字符串（加引号）")
+if WECOM_ON:
+    u = _wx.get("owner_userid")
+    if not u or "（" in str(u): bad("channels.wecom.owner_userid", "还没填（主人私聊机器人一句，在 logs/bridge.log 的 recv 行里看）")
+    elif not isinstance(u, str): bad("channels.wecom.owner_userid", "要写成字符串（加引号）")
+if not (FEISHU_ON or WECOM_ON): bad("channels", "里至少启用一个渠道")
+for k, d in (("workdir", "~"), ("rules_file", "rules.md")):
+    if not isinstance(CFG.get(k, d), str) or not CFG.get(k, d): bad(k, "要写成非空的字符串"); CFG[k] = d
+if "/" in str(CFG.get("service_name") or ""): bad("service_name", "不能有 /：只写服务名")
+for k in ("credential_paths", "deny_extra", "allow_extra"):
+    v = CFG.get(k, [])
+    if not isinstance(v, list) or not all(isinstance(x, str) for x in v): bad(k, '要写成字符串列表，例如 ["…"]'); CFG[k] = []
+_pv = sub(CFG, "private", "private").get("paths", [])
+if not isinstance(_pv, list) or not all(isinstance(x, str) for x in _pv): bad("private.paths", '要写成字符串列表，例如 ["…"]')
+# 额外放行：auto 模式下命中放行规则的命令不再交给自动判断。只接受窄规则（* 前至少 8 个字符），拒绝规则仍然优先；
+# 放行对所有会话生效，按人限制靠钩子（例如 git_guard 不让同事删 Release、删远端分支）
+for r in CFG.get("allow_extra", []):
+    m = re.match(r"^(\w+)\((.*)\)$", r)
+    if not m or len(m.group(2).split("*")[0].strip()) < 8:
+        bad("allow_extra", f"里的 {r!r} 太宽：括号里 * 前至少写 8 个字符，例如 Bash(gh release delete build-*)")
+STYLE_BAD = []   # 人设、风格认不出：守则没法按模板渲染
+for k, d in (("persona", "work"), ("style", "veteran")):
+    names = sorted(f[len(k) + 1:-3] for f in os.listdir(os.path.join(T, "rules")) if f.startswith(k + "-") and f.endswith(".md"))
+    if CFG.get(k, d) not in names: STYLE_BAD.append(f"{CFG_FILE} 的 {k} 写了 {CFG.get(k, d)!r}，没有这一种：改成 {'、'.join(names)} 里的一个")
+
+# 守则现在是什么样：没有、空的（只有空白也算）、有内容；能不能写
+rules = os.path.join(INST, CFG.get("rules_file", "rules.md"))
+def rules_now():
+    """返回 (内容或 None, 不能写的原因)。"""
+    d = os.path.dirname(rules)
+    if os.path.islink(rules): why = f"守则 {rules} 是软链，不替你改：换成普通文件，或直接改它指向的文件"
+    elif os.path.lexists(rules) and not os.path.isfile(rules): die(f"守则 {rules} 不是普通文件：挪开它再跑，或改 {CFG_FILE} 的 rules_file")
+    elif os.path.exists(rules) and not os.access(rules, os.W_OK): why = f"守则 {rules} 没有写权限：chmod u+w 后再跑"
+    elif not os.path.isdir(d): why = f"守则要放的目录 {d} 不存在：先建好，或改 {CFG_FILE} 的 rules_file"
+    elif not os.access(d, os.W_OK | os.X_OK): why = f"目录 {d} 没有写权限，守则写不进去：chmod u+wx 后再跑"
+    else: why = ""
+    try:
+        with open(rules, encoding="utf-8") as f: return f.read(), why
+    except FileNotFoundError: return None, why
+    except (OSError, UnicodeDecodeError) as e: die(f"守则 {rules} 读不了（{e}）：检查权限，存成 UTF-8")
+RULES_TEXT, RULES_RO = rules_now()
+RULES_BLANK = RULES_TEXT is not None and not RULES_TEXT.replace("﻿", "").strip()
+RULES_WRITE = RULES_TEXT is None or RULES_BLANK or "--rules" in sys.argv   # 要按模板整份写
+if RULES_WRITE: ERRORS += STYLE_BAD   # 守则要重写，人设又认不出：装好过的也不放过
+else:
+    for e in STYLE_BAD: soft(e)
+if RULES_WRITE and RULES_RO:
+    (NOTES if INSTALLED and "--rules" not in sys.argv else ERRORS).append(RULES_RO + ("（守则现在是空的）" if RULES_BLANK else ""))
+
+# 环境：缺了机器人跑不起来，但可能后装，只提醒；企微的 npm 现在就要用，没有就停下
+WORKDIR = X(CFG.get("workdir", "~"))
+if os.path.realpath(WORKDIR) == os.path.realpath(INST): bad("workdir", "不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
+elif not os.path.isdir(WORKDIR): NOTES.append(f"{CFG_FILE} 的 workdir 指向的目录 {WORKDIR} 不存在：先建好，或改成存在的目录")
+_again = "装好后重跑 scaffold，服务的 PATH 才会带上它"
+if not shutil.which("claude"): NOTES.append("没找到 claude（Claude Code）：装好并登录，" + _again)
+if FEISHU_ON and not shutil.which("lark-cli"): NOTES.append("没找到 lark-cli：装好并登录，" + _again)
+NPM = ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"]
+NPM_HINT = f"cd {shlex.quote(INST)} && {' '.join(NPM)}"
+DO_NPM = WECOM_ON and "--no-npm" not in sys.argv
+if DO_NPM and not shutil.which("npm"):
+    if INSTALLED and os.path.isdir(os.path.join(INST, "node_modules", "@wecom", "aibot-node-sdk")):   # 以前装好过，升级不因此失败
+        DO_NPM = False; NOTES.append(f"没找到 npm，企微的依赖沿用已装的。装好 Node 18+ 后补：{NPM_HINT}")
+    else: ERRORS.append("启用了企微，但没找到 npm：装好 Node 18+ 再跑；或加 --no-npm 先生成，之后自己装依赖")
+if not os.access(INST, os.W_OK | os.X_OK): ERRORS.append(f"实例目录 {INST} 没有写权限")
+if ERRORS: die(*dict.fromkeys(ERRORS))
+
+def write_atomic(path, text):
+    """先写同目录的临时文件再一步换上；写到一半出错，原来的文件不动，也不留临时文件。"""
+    fd, tmp = tempfile.mkstemp(prefix=".scaffold-", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f: f.write(text)
+        try: mode = os.stat(path).st_mode & 0o777
+        except OSError: um = os.umask(0); os.umask(um); mode = 0o666 & ~um
+        os.chmod(tmp, mode); os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp): os.remove(tmp)
+        raise
+
+HEAD = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+
+def render(read, version):
+    persona = open(os.path.join(T, "rules", f"persona-{CFG.get('persona', 'work')}.md"), encoding="utf-8").read()
+    style_raw = open(os.path.join(T, "rules", f"style-{CFG.get('style', 'veteran')}.md"), encoding="utf-8").read()
+    label = style_raw.split("label:", 1)[1].split("-->", 1)[0].strip()
+    style = style_raw.split("-->", 1)[1].strip()
+    body = read("base.md")
+    body = body.replace("{{PERSONA}}", persona.strip()).replace("{{STYLE}}", style)
+    names = [n for n, on in (("飞书", FEISHU_ON), ("企业微信", WECOM_ON)) if on]
+    heads = [h for h, on in (("`[飞书消息]`", FEISHU_ON), ("`[企微消息]`", WECOM_ON)) if on]
+    wecom_sec = read("channel-wecom.md") if WECOM_ON else ""
+    if FEISHU_ON:
+        dm = f"`lark-cli im +messages-send --as bot --user-id {CFG['owner_open_id']} --text ...`"
+    else:
+        dm = "先用 `wecom-cli message aibot sessions list` 找到和主人的单聊，再 `wecom-cli message aibot send`"
+    body = (body.replace("{{CHANNELS}}", "和".join(names)).replace("{{HEADS}}", "、".join(heads))
+                .replace("{{WECOM_SECTION}}", wecom_sec).replace("{{OWNER_DM}}", dm.replace("主人", CFG["owner_name"]))
+                )
+    body = "\n".join(l.replace("{{FEISHU_ONLY}}", "") for l in body.split("\n") if FEISHU_ON or "{{FEISHU_ONLY}}" not in l)
+    body = body.replace("{{PERSONA_LABEL}}", {"work": "工作分身", "personal": "私人助理"}[CFG.get("persona", "work")])
+    body = body.replace("{{STYLE_LABEL}}", label).replace("{{DATE}}", datetime.date.today().isoformat()).replace("{{VERSION}}", VERSION)
+    body = body.replace("{{NAME}}", CFG["name"]).replace("{{OWNER}}", CFG["owner_name"]).replace("{{OWNER_OPEN_ID}}", CFG.get("owner_open_id", "")).replace("{{INSTANCE}}", INST)
+    return body
+
+def tpl_now(n):
+    with open(os.path.join(T, "rules", n), encoding="utf-8") as f: return f.read()
+
+# 守则要整份写的，先在内存里渲染好；渲染不出来就什么都不写
+RULES_NEW = None
+if RULES_WRITE and not RULES_RO:
+    try: RULES_NEW = render(tpl_now, VERSION)
+    except Exception as e: die(f"守则渲染失败（{type(e).__name__}: {e}）：检查 {CFG_FILE} 的 persona、style、name、owner_name")
+    if not RULES_NEW.strip(): die(f"守则模板渲染出来是空的：检查 {os.path.join(T, 'rules')}")
 CROSS_WARN = """跨 IM 读取（cross_im_read）要打开：
   - 飞书里的会话能读主人的企微聊天记录，企微里的会话能用主人身份读飞书聊天记录。
   - 同事触发时也能读（identity.others = "bot_read_im" 时）。读到的内容会不会被转述到另一边，只靠守则和 Claude 自己把关，钩子不拦。
@@ -41,8 +186,6 @@ if CFG.get("cross_im_read") and FEISHU_ON and WECOM_ON and not os.path.exists(CR
     os.makedirs(os.path.dirname(CROSS_MARK), exist_ok=True)
     open(CROSS_MARK, "w").write(datetime.datetime.now().isoformat(timespec="seconds") + " 主人已确认\n")
     print(CROSS_WARN + "\n已记录主人确认。")
-if os.path.realpath(X(CFG.get("workdir", "~"))) == os.path.realpath(INST):
-    sys.exit("workdir 不能是实例目录本身，否则会加载实例目录的 CLAUDE.md")
 
 # 1. 代码和钩子：整份放进 releases/<序号>-<提交>/，current 指向它；实例里的 bridge.py、hooks 等是指向 current/… 的软链。
 #    换版本只换 current 一个链接，一步到位：在跑的任务不会读到半新半旧的文件，路径也不变（提示词、缓存前缀不动）。
@@ -96,9 +239,6 @@ if WECOM_ON:
     if not os.path.exists(pkg):
         json.dump({"private": True, "type": "module", "dependencies": {"@wecom/aibot-node-sdk": "1.0.7"}},
                   open(pkg, "w"), indent=2)
-    if "--no-npm" not in sys.argv:
-        r = subprocess.run(["npm", "install", "--omit=dev", "--no-audit", "--no-fund"], cwd=INST, capture_output=True, text=True)
-        print("npm install:", "成功" if r.returncode == 0 else "失败\n" + r.stdout[-800:] + r.stderr[-800:])
 
 def role_stock(f):
     """实例里的角色文件是不是某一版模板原样（没被主人改过）：跟仓库历史里的每一版比。"""
@@ -120,35 +260,7 @@ for f in sorted(os.listdir(os.path.join(T, "roles"))):
         else: print("角色模板改了，实例的这份你改过，没动，请手工合：", f)
 
 # 2. 守则：没有或带 --rules 就按模板写；已有就把模板的改动逐处合进去，实例自己改过的那一处不动并列出来
-rules = os.path.join(INST, CFG.get("rules_file", "rules.md"))
-META = json.load(open(os.path.join(INST, "yonty-bot.json"))) if os.path.exists(os.path.join(INST, "yonty-bot.json")) else {}
-HEAD = subprocess.run(["git", "-C", ROOT, "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
 
-def render(read, version):
-    persona = open(os.path.join(T, "rules", f"persona-{CFG.get('persona', 'work')}.md")).read()
-    style_raw = open(os.path.join(T, "rules", f"style-{CFG.get('style', 'veteran')}.md")).read()
-    label = style_raw.split("label:", 1)[1].split("-->", 1)[0].strip()
-    style = style_raw.split("-->", 1)[1].strip()
-    body = read("base.md")
-    body = body.replace("{{PERSONA}}", persona.strip()).replace("{{STYLE}}", style)
-    names = [n for n, on in (("飞书", FEISHU_ON), ("企业微信", WECOM_ON)) if on]
-    heads = [h for h, on in (("`[飞书消息]`", FEISHU_ON), ("`[企微消息]`", WECOM_ON)) if on]
-    wecom_sec = read("channel-wecom.md") if WECOM_ON else ""
-    if FEISHU_ON:
-        dm = f"`lark-cli im +messages-send --as bot --user-id {CFG['owner_open_id']} --text ...`"
-    else:
-        dm = "先用 `wecom-cli message aibot sessions list` 找到和主人的单聊，再 `wecom-cli message aibot send`"
-    body = (body.replace("{{CHANNELS}}", "和".join(names)).replace("{{HEADS}}", "、".join(heads))
-                .replace("{{WECOM_SECTION}}", wecom_sec).replace("{{OWNER_DM}}", dm.replace("主人", CFG["owner_name"]))
-                )
-    body = "\n".join(l.replace("{{FEISHU_ONLY}}", "") for l in body.split("\n") if FEISHU_ON or "{{FEISHU_ONLY}}" not in l)
-    body = body.replace("{{PERSONA_LABEL}}", {"work": "工作分身", "personal": "私人助理"}[CFG.get("persona", "work")])
-    body = body.replace("{{STYLE_LABEL}}", label).replace("{{DATE}}", datetime.date.today().isoformat()).replace("{{VERSION}}", VERSION)
-    body = body.replace("{{NAME}}", CFG["name"]).replace("{{OWNER}}", CFG["owner_name"]).replace("{{OWNER_OPEN_ID}}", CFG.get("owner_open_id", "")).replace("{{INSTANCE}}", INST)
-    return body
-
-def tpl_now(n):
-    with open(os.path.join(T, "rules", n), encoding="utf-8") as f: return f.read()
 
 def tpl_at(commit):
     return lambda n: subprocess.run(["git", "-C", ROOT, "show", f"{commit}:app/rules/{n}"], capture_output=True, text=True, check=True).stdout
@@ -192,17 +304,19 @@ def merge_rules(base_commit):
 
 # rules_commit：守则已经合到哪个提交的模板。有没合进的就不前移，下次升级还会再试，改动不会漏；已合的认得出，不会合两遍
 rules_commit, rules_left = HEAD, []
-if not os.path.exists(rules) or "--rules" in sys.argv:
-    with open(rules, "w", encoding="utf-8") as f: f.write(render(tpl_now, VERSION))
-    print("写了", rules)
+if RULES_NEW is not None:
+    write_atomic(rules, RULES_NEW)
+    print("守则是空的，已按模板补回" if RULES_BLANK else "写了", rules)
+elif RULES_WRITE:   # 只会是装好过的实例：守则没有或空着，又写不进去，不让升级失败，但记下来
+    rules_commit, rules_left = META.get("rules_commit", META.get("commit")) or "", ["（" + RULES_RO + "）"]
+    print("守则没写：", RULES_RO)
 elif "--rules-done" in sys.argv: print("守则记为已合", rules)
 else:
     base_commit = META.get("rules_commit", META.get("commit"))
     merged, left = merge_rules(base_commit)
-    if merged is not None:
-        tmp = rules + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f: f.write(merged)
-        shutil.copymode(rules, tmp); os.replace(tmp, rules)
+    if merged is not None and RULES_RO: left = ["（" + RULES_RO + "）"]
+    elif merged is not None:
+        write_atomic(rules, merged)
         print("守则模板的改动已合并进", rules)
     if left is None or left: rules_commit = base_commit or ""
     if left is None: rules_left = ["（取不到上次的守则模板，整份没合）"]
@@ -231,14 +345,7 @@ deny += CFG.get("deny_extra", [])
 # Claude Code 权限规则里，文件路径以单个 / 开头是相对项目根，绝对路径要写成 //（实测：Read(/abs) 拦不住，Read(//abs) 能拦）
 deny = [re.sub(r"^(Read|Edit|Write)\(/(?!/)", r"\1(//", r) for r in deny]
 hook = lambda f: {"type": "command", "command": f"python3 {os.path.join(INST, 'hooks', f)}"}
-# 额外放行：auto 模式下命中放行规则的命令不再交给自动判断。只接受窄规则（* 前至少 8 个字符），拒绝规则仍然优先；
-# 放行对所有会话生效，按人限制靠钩子（例如 git_guard 不让同事删 Release、删远端分支）
-allow = []
-for r in CFG.get("allow_extra", []):
-    m = re.match(r"^(\w+)\((.*)\)$", r)
-    if not m or len(m.group(2).split("*")[0].strip()) < 8:
-        sys.exit(f"allow_extra 里的 {r!r} 太宽：括号里 * 前至少写 8 个字符，例如 Bash(gh release delete build-*)")
-    allow.append(r)
+allow = CFG.get("allow_extra", [])   # 宽窄在开头查过
 settings = {"permissions": {"deny": list(dict.fromkeys(deny)), **({"allow": list(dict.fromkeys(allow))} if allow else {})},
             "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook("lark_identity.py"), hook("wecom_guard.py"),
                                                                   hook("git_guard.py")]},
@@ -259,13 +366,28 @@ path_env = ":".join(dict.fromkeys([os.path.dirname(shutil.which("lark-cli") or "
                                    os.path.dirname(shutil.which("node") or "/usr/local/bin/node"),
                                    os.path.dirname(shutil.which("claude") or "/usr/local/bin/claude"),
                                    "/usr/local/bin", "/usr/bin", "/bin"]))
-if platform.system() == "Darwin":
-    svc = os.path.join(INST, f"com.{slug}.plist")
+svc = os.path.join(INST, f"com.{slug}.plist" if IS_MAC else f"{slug}.service")
+
+def service_python():
+    """服务用哪个 Python：装过的沿用服务文件里那个（重跑不换解释器），它没了或低于 3.9 就换成现在这个；新装用现在这个。"""
+    now = sys.executable or shutil.which("python3") or "/usr/bin/python3"
+    try:
+        with open(svc, encoding="utf-8") as f: text = f.read()
+    except (OSError, UnicodeDecodeError): return now
+    m = re.search(r"<array><string>(.+?)</string>" if IS_MAC else r"(?m)^ExecStart=(\S+) ", text)
+    if not m or m.group(1) == now: return now
+    try: ok = subprocess.run([m.group(1), "-c", "import sys; sys.exit(sys.version_info < (3, 9))"], capture_output=True, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError): ok = False
+    if ok: return m.group(1)
+    print(f"服务原来的 Python {m.group(1)} 不能用了，换成 {now}")
+    return now
+PY = service_python()
+if IS_MAC:
     open(svc, "w").write(f"""<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
   <key>Label</key><string>com.{slug}</string>
-  <key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>{INST}/bridge.py</string></array>
+  <key>ProgramArguments</key><array><string>{PY}</string><string>{INST}/bridge.py</string></array>
   <key>WorkingDirectory</key><string>{INST}</string>
   <key>EnvironmentVariables</key><dict><key>PATH</key><string>{path_env}</string></dict>
   <key>RunAtLoad</key><true/>
@@ -273,16 +395,15 @@ if platform.system() == "Darwin":
   <key>StandardErrorPath</key><string>{INST}/logs/launchd.err</string>
 </dict></plist>
 """)
-    print(f"服务文件：{svc}\n安装：ln -sf {svc} ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.{slug}.plist")
+    print(f"服务文件：{svc}\n安装：mkdir -p ~/Library/LaunchAgents && ln -sf {shlex.quote(svc)} ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.{slug}.plist")
 else:
-    svc = os.path.join(INST, f"{slug}.service")
     open(svc, "w").write(f"""[Unit]
 Description=Feishu Claude bot {CFG['name']}
 After=network-online.target
 
 [Service]
 WorkingDirectory={INST}
-ExecStart=/usr/bin/python3 {INST}/bridge.py
+ExecStart={PY} {INST}/bridge.py
 Environment=PATH={path_env}
 Restart=always
 RestartSec=5
@@ -292,7 +413,7 @@ TimeoutStopSec=20
 [Install]
 WantedBy=default.target
 """)
-    print(f"服务文件：{svc}\n安装：ln -sf {svc} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now {slug}"
+    print(f"服务文件：{svc}\n安装：mkdir -p ~/.config/systemd/user && ln -sf {shlex.quote(svc)} ~/.config/systemd/user/ && systemctl --user daemon-reload && systemctl --user enable --now {slug}"
           f"\n服务器上还要：sudo loginctl enable-linger $USER")
 # 服务的 /upgrade 靠这份记录：从哪个仓库、哪个提交生成的，下次用同样的参数重新生成（不带 --rules，守则只合并不重写）
 # 动作目录：每个动作一个 json，以 _ 开头的是示例（方案第 8 节）
@@ -303,14 +424,22 @@ if not os.path.exists(_ex):
         json.dump({"script": "echo 清理 $ACT_TARGET", "params": {"target": "[\\w./-]{1,80}"}, "category": "修补", "coworker_ok": False,
                    "undo": "", "why": "示例：复制成 名字.json 才算登记"}, f, ensure_ascii=False, indent=1)
 # 看门狗：用户级 systemd 定时器每 2 分钟看一眼 state/heartbeat，超过 300 秒（5 分钟）没更新就私聊主人（不靠 bridge 活着）。
-# 只写文件不启用：systemctl --user link 这两个文件再 enable --now 定时器，见 docs/guide.md
-with open(os.path.join(INST, f"{SLUG}-yb-watchdog.service"), "w") as f:
-    f.write(f"[Unit]\nDescription={SLUG} 看门狗：heartbeat 超过 300 秒没更新就私聊主人\n\n[Service]\nType=oneshot\n"
-            f"WorkingDirectory={INST}\nExecStart={sys.executable} {os.path.join(INST, 'scheduler.py')} watchdog\n")
-with open(os.path.join(INST, f"{SLUG}-yb-watchdog.timer"), "w") as f:
-    f.write(f"[Unit]\nDescription={SLUG} 看门狗定时器（每 2 分钟）\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n\n[Install]\nWantedBy=timers.target\n")
-json.dump({"version": VERSION, "release": RELEASE, "source": ROOT, "commit": HEAD, "rules_commit": rules_commit, "rules_left": rules_left, "service": SLUG,
-           "flags": [a for a in sys.argv[2:] if a in ("--no-npm",)]},
-          open(os.path.join(INST, "yonty-bot.json"), "w"), ensure_ascii=False, indent=1)
+# 只写文件不启用（Mac 没有 systemd，不写）：systemctl --user link 这两个文件再 enable --now 定时器，见 docs/guide.md
+if not IS_MAC:
+    with open(os.path.join(INST, f"{SLUG}-yb-watchdog.service"), "w") as f:
+        f.write(f"[Unit]\nDescription={SLUG} 看门狗：heartbeat 超过 300 秒没更新就私聊主人\n\n[Service]\nType=oneshot\n"
+                f"WorkingDirectory={INST}\nEnvironment=PATH={path_env}\nExecStart={PY} {os.path.join(INST, 'scheduler.py')} watchdog\n")
+    with open(os.path.join(INST, f"{SLUG}-yb-watchdog.timer"), "w") as f:
+        f.write(f"[Unit]\nDescription={SLUG} 看门狗定时器（每 2 分钟）\n\n[Timer]\nOnBootSec=2min\nOnUnitActiveSec=2min\n\n[Install]\nWantedBy=timers.target\n")
+write_atomic(META_FILE, json.dumps({"version": VERSION, "release": RELEASE, "source": ROOT, "commit": HEAD, "rules_commit": rules_commit, "rules_left": rules_left, "service": SLUG,
+                                    "flags": [a for a in sys.argv[2:] if a in ("--no-npm",)]}, ensure_ascii=False, indent=1))
 open(os.path.join(INST, ".gitignore"), "w").write("releases/\ncurrent\nstate/\nlogs/\ninbox/\nnode_modules/\n_tmp/\n__pycache__/\n")
-print(f"完成（Yonty Bot v{VERSION}）。下一步：python3 bridge.py --cache-check 3")
+if DO_NPM:   # 放最后：装不上也不留半成品
+    try:
+        r = subprocess.run(NPM, cwd=INST, capture_output=True, text=True)
+        err = "" if r.returncode == 0 else r.stdout[-800:] + r.stderr[-800:] or f"退出码 {r.returncode}"
+    except OSError as e: err = str(e)
+    print("npm install:", "失败\n" + err if err else "成功")
+    if err: NOTES.append(f"企微的依赖没装上，连不了企微。补：{NPM_HINT}")
+if not NOTES: print(f"完成（Yonty Bot v{VERSION}）。下一步：python3 bridge.py --cache-check 3")
+else: print(f"完成（Yonty Bot v{VERSION}），还差 {len(NOTES)} 样：\n" + "\n".join("  - " + n for n in NOTES) + "\n补齐后下一步：python3 bridge.py --cache-check 3")
