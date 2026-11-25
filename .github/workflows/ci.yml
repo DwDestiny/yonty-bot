@@ -53,10 +53,12 @@ jobs:
 
       - name: 打开沙箱和 systemd 用户总线
         run: |
-          # Ubuntu 24.04 默认不许普通用户建用户命名空间，bwrap 起不来。机器用完即删，只在这里放开。
-          if ! bwrap --ro-bind / / --unshare-all true; then
-            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-            bwrap --ro-bind / / --unshare-all true
+          # /proc 里有别的挂载盖着时，内核不许普通用户在新命名空间里挂 /proc，bwrap 起不来。
+          # 机器用完即删，只在这里卸掉。先卸的是最里层；binfmt_misc 盖了两层，所以按挂载表逐条卸。
+          box() { bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent true; }
+          if ! box; then
+            awk '$5 ~ "^/proc/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do sudo umount "$m"; done
+            box
           fi
           sudo loginctl enable-linger "$(id -un)" || true
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
