@@ -126,7 +126,8 @@ class VerifyTest(Base):
     def test_queues_behind_other_heavy_gate(self):
         t = self.run_task(verify='true # npm test')
         held = self.t.gate.lock(self.t.HEAVY_LOCK); out = []
-        th = threading.Thread(target=lambda: out.append(self.t.run_verify(t))); th.start(); time.sleep(0.8)
+        th = threading.Thread(target=lambda: out.append(self.t.run_verify(t))); th.start(); end = time.time() + 20
+        while time.time() < end and '排队' not in self.t.gate_text(self.t.load(t['id'])): time.sleep(0.1)   # 负载高时 0.8 秒还没排上
         self.assertIn('排队', self.t.gate_text(self.t.load(t['id']))); self.assertFalse(out)
         held.close(); th.join(10); self.assertTrue(out[0][0])
 
