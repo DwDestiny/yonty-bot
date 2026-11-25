@@ -86,6 +86,9 @@ for _s in sessions.values(): _s.pop("compacting", None)   # 上次退出时排�
 seen = load(SEEN_FILE, [])
 names = {OWNER_OPEN_ID: OWNER_NAME}
 sem = threading.Semaphore(MAX_PARALLEL)
+
+class QuotaOut(Exception):
+    """订阅额度用完了，这一轮没跑成。调用方留着原样，恢复后再跑，不当失败。"""
 workers = {}
 following = {}                    # 会话 key -> 排着、正在处理的“短名#N 内容”消息 ID
 
@@ -402,7 +405,10 @@ def stream_claude(cmd, prompt, env, on_extra=None):
             tail = (tail + [line])[-20:]
             try: o = json.loads(line)
             except ValueError: continue
-            if o.get("type") == "system" and o.get("subtype") == "background_tasks_changed":
+            if o.get("type") == "rate_limit_event": tasks.quota_note(o.get("rate_limit_info"))
+            elif o.get("type") == "result" and tasks.quota_hit(o):
+                flush(); st["last"] = o   # 报错文字不当回复发
+            elif o.get("type") == "system" and o.get("subtype") == "background_tasks_changed":
                 st["bg"] = len(o.get("tasks") or [])
             elif o.get("type") == "result":
                 flush(); st["held"] = st["last"] = o
@@ -520,6 +526,7 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
         try:
             text = run_claude_once(key, s, f"[服务命令结果]\n{res}\n\n（接着回。前面写过的话已经留着，会跟这一段拼在一起发出去，别重复。）",
                                    owner, private, chat_id, True, extra if on_extra else None, layer, hop)
+        except QuotaOut: text = None
         except Exception as e:
             log.exception("service command follow-up failed"); text = None
             if isinstance(e, subprocess.TimeoutExpired):
@@ -528,6 +535,7 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
         service_told(used)
 
 def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
+    if any(x[2] for x in tasks.quota_over()): raise QuotaOut()
     with lock: sid, started = s["id"], s["started"]
     if not started and PRIME_ON:
         pr = prime(sid)
@@ -546,6 +554,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     if STOPPING.is_set() and (not out or rc):   # 服务在停，Claude 被一起停了：不当成失败、不丢会话，重启后接着做
         time.sleep(600)   # 等进程退出（线程是守护线程）：不返回，就不会回半截话，也不会被记成处理完
         raise RuntimeError("服务停了")
+    if tasks.quota_hit(out): raise QuotaOut()
     if out and out.get("subtype") == "error_max_turns" and not quiet:
         log.warning("claude %s hit max turns, asking it to hand off", key)
         out, text, rc, tail = stream_claude(base_cmd(stream=True) + ["--max-turns", "4", "--resume", out.get("session_id") or sid],
@@ -564,6 +573,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     it = (u.get("iterations") or [{}])[-1]
     with lock:
         s["started"] = True; s["last"] = time.time(); s["id"] = out.get("session_id", sid)
+        if s.get("pm_next"): s["pm_intro"] = s.pop("pm_next")   # 带角色说明的那一轮跑成了
         s["ctx"] = sum(it.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))
         s["cost"] = round((u.get("input_tokens") or 0) + 0.1 * (u.get("cache_read_input_tokens") or 0) + 2 * (u.get("cache_creation_input_tokens") or 0) + 5 * (u.get("output_tokens") or 0))   # 这一轮折成输入 token 当量
         s["env"] = [owner, private, chat_id, channel]   # 压缩时用同一套环境：自动记忆开关会改系统提示，换了就命中不了缓存
@@ -572,6 +582,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
 
 def compact_sweep(now):
     """聊天会话快过期时排一次压缩。走会话自己的队列，不会和消息、任务回报同时 --resume 同一个会话。"""
+    if tasks.quota_paused(): return
     for key, s in list(sessions.items()):
         if not s.get("started") or s.get("compacting"): continue
         idle = idle_limit(key)
@@ -628,8 +639,9 @@ def handle(ev):
         if cmd in (c, c + " on", c + " off", c + " status"):
             reply(ev, ambient_cmd(ev["chat_id"], cmd), in_thread); return
     rid = wecom_send({"op": "thinking", "msgid": ev["message_id"]}) if ev.get("channel") == "wecom" else react(ev["message_id"])
-    sent = []   # 这条消息已经回了几次：每次用不同的幂等键，免得被飞书当重复丢掉
+    sent, stuck = [], False   # sent：这条消息已经回了几次：每次用不同的幂等键，免得被飞书当重复丢掉
     try:
+        if any(x[2] for x in tasks.quota_over()): raise QuotaOut()   # 额度用完：先不取前文，恢复后整条重来
         with sem:
             owner = is_owner(ev)
             s = get_session(key)
@@ -642,9 +654,8 @@ def handle(ev):
             prompt = build_prompt(ev, name, ctx, quoted)
             if ev.get("resumed"): prompt += "\n\n（服务刚重启，你上一轮处理这条消息做到一半断了。接着做完再回，已经做过的动作别重复。）"
             if pm:
-                prompt = (pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "") + prompt
+                prompt = pm_head(pm, key, s) + prompt
                 if ev.get("handover_note"): prompt += f"\n\n[主控转交] 备注：{ev['handover_note']}（上面是主人的原话，原样带过来的）"
-                with lock: s["pm_intro"] = True; s["team"] = 3
             extras = []   # 项目经理中途的结果并进最后一条一起办，里面的 [方案]、[派活] 不丢
             if STRICT: prompt = with_board(s, prompt, pm, owner and ev.get("chat_type") == "p2p" or bool(pm and owner))
             result = run_claude(key, s, prompt, owner, owner and ev.get("chat_type") == "p2p", ev.get("chat_id", ""),
@@ -666,6 +677,7 @@ def handle(ev):
             elif pm and result:
                 result = pm_marks(pm, key, owner, result)
                 if result.strip(): result = f"【{pm}】" + result
+    except QuotaOut: result, stuck = None, True
     except subprocess.TimeoutExpired:
         with lock: sessions.pop(key, None); save(SESS_FILE, sessions)
         result = "这活儿超时了，我先停了。太大的活儿请回终端开个会话来做。"
@@ -673,9 +685,16 @@ def handle(ev):
         log.exception("handle failed")
         result = f"出岔子了：{type(e).__name__}，请看日志。"
     if ev.get("chat_type") == "p2p": devices.release_holder("chat:" + ev.get("chat_id", ""))   # 聊天一轮结束就还设备
+    if stuck:
+        if ev.get("channel") != "wecom": unreact(ev["message_id"], rid)
+        if not ev.get("quota_told"):
+            end = max([x[1] for x in tasks.quota_over() if x[2]] or [0])
+            reply(ev, "Claude 额度用完了" + (f"，{tasks.bjtime('%m-%d %H:%M', end)} 恢复" if end else "") + "。这条我记下了，恢复后自动回你。", in_thread, key="quota")
+        raise QuotaOut()
     if result or (not sent and not ev.get("pm") and not ev.get("no_route")):
         redo = None if ev.get("pm") else lambda note: run_claude(key, get_session(key), note, is_owner(ev), is_owner(ev) and ev.get("chat_type") == "p2p", ev.get("chat_id", ""), quiet=True)
-        deliver(ev, key, result, in_thread, sent, redo)
+        try: deliver(ev, key, result, in_thread, sent, redo)
+        except QuotaOut: log.warning("redo skipped: quota out")
     if ev.get("channel") != "wecom": unreact(ev["message_id"], rid)
 
 def run_marks(ev, result, steps):
@@ -772,13 +791,45 @@ def hold_marks(ev, result):
 def worker(key, q):
     while True:
         ev = q.get()
-        pend_mark(key, ev)
-        try: handle(ev)
+        done = True
+        try:
+            if quota_skip(ev): continue
+            pend_mark(key, ev)
+            handle(ev)
+        except QuotaOut: done = not quota_wait(key, ev)
         except Exception: log.exception("worker error")
         finally:
-            pend_mark(key, ev, True)
+            if done: pend_mark(key, ev, True)
             with lock: following.get(key, set()).discard(ev.get("message_id"))
             q.task_done()
+
+quota_queue = []   # 额度用完时人发来的消息：恢复后接着处理（盘上的 pending.json 也留着，重启不丢）
+
+def quota_skip(ev):
+    """暂停时排在队里的自动轮次（任务回报、投递、压缩）：不跑，放回原处，恢复后自己再来。"""
+    if not (ev.get("relay") or ev.get("compact") or ev.get("deliver")) or not tasks.quota_paused(): return False
+    if ev.get("relay"): relaying.discard((ev["task"], ev["idx"]))
+    elif ev.get("compact"):
+        with lock: (sessions.get(ev["key"]) or {}).pop("compacting", None)
+    else:
+        batch = ev.get("batch") or [ev["deliver"]]
+        if any(human_made(x) for x in batch) and not any(x[2] for x in tasks.quota_over()): return False
+        for x in batch: tasks.dl.update(tasks._me(), x["id"], status="new")
+        DL_INFLIGHT.difference_update(x["id"] for x in batch)
+    return True
+
+def human_made(r): return bool(r.get("im") or r.get("src_im"))   # 人说的话带起来的投递
+
+def quota_wait(key, ev):
+    """人发的消息撞上额度用完：留着等恢复。返回 True 是留下了。"""
+    if not ev.get("message_id") or ev.get("relay") or ev.get("deliver"): return False
+    ev = dict(ev, quota_told=True)
+    with lock:
+        i = pend_id(key, ev)
+        if i in pending:
+            pending[i].update(ev=ev, tries=0, started=False, quota=True); save(PEND_FILE, pending)
+        quota_queue.append((key, ev))
+    return True
 
 def should_handle(ev):
     """私聊全收；群聊只收明确 @ 了机器人的（@所有人 不算）。其他机器人的消息不收。
@@ -848,7 +899,7 @@ def pend_resume():
     """启动时：上次没处理完的重新排队。开了头的带上说明接着原会话做；重来过一次还没成的不再试，告诉发的人。"""
     for i, p in list(pending.items()):
         ev = p["ev"]
-        if time.time() - p["at"] > 6 * 3600 or p["tries"] >= 2:
+        if (time.time() - p["at"] > 6 * 3600 and not p.get("quota")) or p["tries"] >= 2:
             with lock: pending.pop(i, None); save(PEND_FILE, pending)
             if p["tries"] >= 2:
                 try: reply(ev, "这条我处理到一半服务断了两次，没再接着试，请重新发一下。", in_topic(ev))
@@ -962,6 +1013,8 @@ def status_text(ev):
     out.append("在跑的任务：" + (f"{len(run)} 个" if run else "没有")); out += ["· " + task_line(t) for t in run]
     held = sorted(team.load().get("held") or {})
     if held: out.append("停工中：" + "、".join(held) + f"，{BT}/resume{BT} 复工")
+    p = tasks.quota_paused()
+    if p: out.append(f"额度暂停中，{tasks.bjtime('%m-%d %H:%M', p['until'])} 恢复，{BT}/quota{BT} 看能不能换人干")
     out.append(tasks.quota_text() or "额度：还没有数据（任务跑起来后才有）。")
     n = tasks.recent_errors(3600)
     out.append(f"最近一小时服务报错 {n} 条，{BT}/status log{BT} 看原文" if n else "服务正常。")
@@ -1020,7 +1073,7 @@ def help_text(ev, owner):
         if ls: h.extend([name] + ls)
     group("看进度", ("/status", "要我处理的、在干的、额度", owner and p2p), ("/tasks", "任务列表", TASKS_ON), ("/task 短名#N", "一个任务做到哪了", TASKS_ON),
           ("/schedules", "定时任务", TASKS_ON))
-    group("管任务", ("短名#N 内容", "给任务补一句", TASKS_ON), ("/stop", "全部停工，加短名只停一个项目", owner and TASKS_ON), ("/resume", "复工", owner and TASKS_ON),
+    group("管任务", ("短名#N 内容", "给任务补一句", TASKS_ON), ("/stop", "全部停工，加短名只停一个项目", owner and TASKS_ON), ("/quota", "额度；暂停时换人干或用完剩下的", owner and p2p), ("/resume", "复工", owner and TASKS_ON),
           ("/approve 短名#N", "批，/reject 是不批", owner and TASKS_ON), ("/task cancel 短名#N", "取消", TASKS_ON), ("/task brief 短名#N", "看任务书", TASKS_ON),
           ("/task clean 短名#N", "删工作树", owner and TASKS_ON), ("/why 短名#N", "为什么排队、改投", owner and TASKS_ON), ("/team", "角色和各项目的事", owner and TASKS_ON))
     group("聊天", ("/new", "开新会话", p2p), (f"{c} on", f"这个群开旁听，{c} off 关（在群里 @我 发）", owner and AMB["enabled"]),
@@ -1033,6 +1086,8 @@ def service_command(ev):
     text, owner = plain(ev), is_owner(ev)
     private = ev.get("chat_type") == "p2p"
     if text == "/help": return help_text(ev, owner)
+    qr = quota_command(ev, text)
+    if qr is not None: return qr
     if re.match(r"^/(updates|decide|retro)(\s|$)", text):
         if not owner: return f"这条只有{OWNER_NAME}能用。"
         if ev.get("chat_type") != "p2p": return "请在私聊里发。"
@@ -1120,7 +1175,7 @@ def auto_upgrade():
 upd_run = threading.Lock()
 def updates_kick():
     """查更新、装更新在单独线程里，不挡任务检查。"""
-    if not upd_run.acquire(blocking=False): return
+    if tasks.quota_paused() or not upd_run.acquire(blocking=False): return
     def go():
         try: updates.tick(dict(CFG.get("updates") or {}), META, idle_now, owner_say, auto_upgrade)
         except Exception: log.exception("updates tick failed")
@@ -1332,7 +1387,8 @@ def dispatch_one(ev, d):
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
                      status="approved" if owner else "pending", **({"idem": idem} if idem else {}),
-                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "draft": d.get("draft", False), "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:3000]}
+                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "draft": d.get("draft", False), "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:team.PLAN_TEXT],
+                         **({"adhoc": True} if (team.plan_of(ev["pm"], d["plan"]) or {}).get("version") == team.ADHOC else {})}
                         if STRICT and ev.get("pm") else {}),
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
@@ -1417,19 +1473,154 @@ QUOTA_SENT = os.path.join(STATE, "quota_alerts.json")
 quota_last = [0]
 
 def quota_check(now):
-    """订阅额度用得快：私聊提醒主人（每个窗口每涨一成提醒一次），不停任何活。"""
-    if now - quota_last[0] < 300: return
+    """订阅额度用得快：私聊提醒主人（5 小时快满了一次，5 小时用得太快每涨两成一次，7 天窗口每涨一成一次）。真要停由 quota_tick 管，停了就不再提醒。"""
+    if now - quota_last[0] < 300 or tasks.quota_paused(): return
     quota_last[0] = now
     sent = load(QUOTA_SENT, {})
     for k, u, reset, why in tasks.quota_alerts():
-        key = f"{k}:{reset}:{int(u * 10)}"
+        key = f"{k}:{round(reset / 600)}:{int(u * 5 + 1e-9)}" if k == "five_hour_pace" else f"{k}:{reset}" + ("" if k == "five_hour" else f":{int(u * 10)}")
         if key in sent: continue
         run = [t for t in tasks.all_tasks() if t["status"] == "running"]
         lines = [f"额度提醒：{why}，{tasks.left_text(max(0, reset - now))}后刷新。"]
-        if run: lines += ["活照常干。在跑的："] + [f"· {tasks.ref(t)} {short(t['title'])}（已用 {t.get('cost') or 0}）" for t in run] + [f"要省着用：{BT}/stop{BT} 停工，或 {BT}/task cancel 短名#N{BT} 取消一个"]
+        if run: lines += [f"活先照常干，剩 {round((1 - float(tasks.T.get('quota_pause', 0.95))) * 100)}% 时自动暂停。在跑的：" if tasks.T.get("quota_pause", 0.95) else "活照常干。在跑的："] + [f"· {tasks.ref(t)} {short(t['title'])}（已用 {t.get('cost') or 0}）" for t in run] + [f"要省着用：{BT}/stop{BT} 停工，或 {BT}/task cancel 短名#N{BT} 取消一个"]
+        if k != "seven_day" and (top := quota_top(reset - tasks.WINDOW_S["five_hour"])): lines.insert(1, top)
         owner_dm("feishu" if FEISHU_ON else "wecom", "\n".join(lines))
         sent[key] = now
         save(QUOTA_SENT, dict(list(sent.items())[-50:]))
+
+def quota_top(since):
+    """这段时间里花得最多的几个任务，没有就是空串。一轮跑完才入账。"""
+    top = sorted(((v, t) for i, v in tasks.spent_since(since).items() if v >= 0.5 for t in [tasks.load(i)] if t), key=lambda x: -x[0])[:5]
+    return "这个窗口里花得最多的（一轮跑完才入账，美元当量）：" + "、".join(f"{tasks.ref(t)} {v:.1f}" for v, t in top) if top else ""
+
+PLAN_SENT = os.path.join(STATE, "plan_alerts.json")
+PLAN_STEPS = (1, 1.5, 2, 3, 4, 6, 8)
+plan_watched = [0]
+
+def plan_watch(now):
+    """方案花超了：私聊提醒主人，到预警线的 1、1.5、2、3 倍……各一次。只提醒，不停活（2026-11-25 主人定：方案预算不做硬限制）。
+    预警线是方案里写的“预算: N”，没写用 quota_alert.plan_usd（0 就不提醒）。升级后第一次只记下现状，不补发。"""
+    if now - plan_watched[0] < 300: return
+    plan_watched[0] = now
+    first, sent, by = not os.path.exists(PLAN_SENT), load(PLAN_SENT, {}), {}
+    for t in tasks.all_tasks():
+        if t.get("plan") and t.get("project"): by.setdefault((t["project"], t["plan"]), []).append(t)
+    new = dict(sent)
+    for (proj, name), ts in by.items():
+        live = [t for t in ts if t["status"] in tasks.ACTIVE]
+        said = (team.plan_of(proj, name) or {}).get("budget")
+        base = (tasks.T.get("quota_alert") or {}).get("plan_usd", 30)
+        line = min(said, 2 * base) if said and base else said or base   # 预算是项目经理写的，写多高都不能把提醒调没
+        if not live or not line: continue
+        cost = sum(t.get("cost") or 0 for t in ts)
+        step, key = max([s for s in PLAN_STEPS if cost >= s * line], default=0), f"{proj}/{name}"
+        if step <= (sent.get(key) or 0): continue
+        if not first:
+            top = "、".join(f"{tasks.ref(t)} {t.get('cost') or 0:.1f}" for t in sorted(ts, key=lambda t: -(t.get("cost") or 0))[:3])
+            owner_dm("feishu" if FEISHU_ON else "wecom", f"花费提醒：{proj} 的方案“{name}”已花 {cost:.1f}（美元当量，只算任务），超过{'估的' if said == line else '预警线'} {line:g}" + (f" 的 {step:g} 倍" if step > 1 else "")
+                     + f"。花得最多：{top}。还有 {len(live)} 个没完：{'、'.join(tasks.ref(t) for t in live[:8])}。\n只提醒，不会停；要停发 {BT}/stop {proj}{BT}。")
+        new[key] = step
+    if first or new != sent: save(PLAN_SENT, dict(list(new.items())[-200:]))
+
+QUOTA_NAME = {"five_hour": "5 小时", "seven_day": "7 天"}
+
+def quota_targets():
+    """暂停着、要用 Claude 的任务：(退回排队的, 能换给别的智能体的)。"""
+    ts = [t for t in tasks.all_tasks() if t["status"] == "approved" and tasks.agent_of(t).name == "claude" and not team.held(t.get("project")) and t.get("exec") != "cloud"]
+    return [t for t in ts if t.get("quota_hold")], [t for t in ts if not tasks.agents.movable(tasks._me(), t)]
+
+def quota_stop(now):
+    """在跑的 Claude 任务退回排队。正在跑验证命令的不停：验证不花额度，跑完要返工时它自己会停。"""
+    for t in tasks.all_tasks():
+        if t["status"] != "running" or t.get("exec") == "cloud" or t.get("gate") or tasks.agent_of(t).name != "claude": continue
+        if not tasks.quota_park(t["id"], **({"started": None} if t.get("schedule") else {})): continue   # 定时运行的总时长从恢复后重新算
+        tasks.decide("额度暂停", task=tasks.ref(t), why="额度不够，退回排队")
+        def go(t=t):
+            if t.get("frozen"): tasks._freezer(t, False); tasks.update(t["id"], _touch=False, frozen=None, frozen_why="")
+            tasks.stop(t)
+        threading.Thread(target=go, daemon=True).start()
+
+def quota_text(p, now):
+    end, names = p["until"], "、".join(QUOTA_NAME.get(k, k) for k in p["keys"])
+    parked, mov = quota_targets()
+    cloud = [t for t in tasks.all_tasks() if t["status"] == "running" and t.get("exec") == "cloud"]
+    out = [f"Claude {names}额度" + ("用完了" if p.get("out") else f"只剩 {max(0, round((1 - p['used']) * 100))}%") + f"，任务都暂停了，{tasks.bjtime('%m-%d %H:%M', end)} 恢复（还有 {tasks.left_text(max(0, end - now))}）。"]
+    if parked: out.append(f"停下 {len(parked)} 个：" + "、".join(f"{tasks.ref(t)} {short(t['title'], 14)}" for t in parked[:10]) + (" 等" if len(parked) > 10 else ""))
+    if cloud: out.append(f"云端的 {len(cloud)} 个停不了，照跑：" + "、".join(tasks.ref(t) for t in cloud))
+    if mov:
+        out.append(f"要换 ZCode 接着干吗？能换的 {len(mov)} 个：" + "、".join(f"{tasks.ref(t)} {short(t['title'], 14)}" for t in mov))
+        out.append(f"全换回“换 ZCode”，只换一个发 {BT}/quota zcode {tasks.ref(mov[0])}{BT}。不换不用回，到点自动接着干。")
+    else: out.append("这些任务没有能换给别的智能体的，到点自动接着干，不用回。")
+    if not p.get("out"): out.append(f"要把剩下的额度用完，发 {BT}/quota go{BT}。")
+    return "\n".join(out)
+
+def quota_tick(now):
+    """额度剩得不够（tasks.quota_pause）或已经用完：暂停要用 Claude 的任务和自动轮次，只问主人一次；刷新后自动接着干。"""
+    p = load(tasks.PAUSE, {})
+    over = tasks.quota_over(now=now, on=p.get("keys") or () if p.get("on") else ())
+    go = p.get("go") or {}
+    need = [x for x in over if x[2] or abs((go.get(x[0]) or 0) - x[1]) > 600]
+    if need:
+        until, keys, out = max(x[1] for x in need), sorted(x[0] for x in need), any(x[2] for x in need)
+        new = not p.get("on")
+        if new: p, quota_try[0] = {"on": True, "since": now, "go": go, "told": False}, 0
+        elif until - (p.get("until") or 0) > 600: p["told"] = False   # 又有一个更晚恢复的窗口不够了：再说一次
+        was = dict(p)
+        p.update(until=until, keys=keys, out=out, used=max(x[3] for x in need))
+        if new or p != was: save(tasks.PAUSE, p)   # 先落盘再停：任务自己看得到，不会又开一轮
+        if new: log.info("quota pause: %s until %s", keys, until)
+        quota_stop(now)
+        if not p["told"] and now - quota_try[0] > 30:
+            quota_try[0] = now
+            if owner_say(quota_text(p, now)): p["told"] = True; save(tasks.PAUSE, p)
+    elif p.get("on"):
+        save(tasks.PAUSE, {"on": False, "go": go})
+        back = quota_targets()[0]
+        for t in back: tasks.update(t["id"], _touch=False, wait_why="")
+        with lock: msgs = list(quota_queue); quota_queue.clear()
+        for k, ev in msgs: enqueue(k, ev)
+        log.info("quota resume: %s tasks, %s messages", len(back), len(msgs))
+        if p.get("told"): owner_say("额度恢复了" + (f"，{len(back)} 个任务自动接着干：" + "、".join(tasks.ref(t) for t in back) if back else "，没有停着的任务") + "。")
+    elif quota_queue:
+        with lock: msgs = list(quota_queue); quota_queue.clear()
+        for k, ev in msgs: enqueue(k, ev)
+quota_try = [0]
+
+def quota_command(ev, text):
+    """/quota 和暂停时主人的回答：服务自己办，不花额度。不是就返回 None。"""
+    m, p = re.match(r"^/quota(?:\s+(.+))?$", text, re.S), tasks.quota_paused()
+    arg = (m.group(1) or "").strip() if m else None
+    if not m:
+        if not p or not is_owner(ev) or ev.get("chat_type") != "p2p": return None
+        if re.match(r"^(?:都|全)?(?:换|换成|改用|用)\s*zcode[吧了。.!！]*$", text, re.I): arg = "zcode"
+        elif re.match(r"^(?:不换|不用换|先不换|等恢复)[吧了。.!！]*$", text): return f"好，不换。{tasks.bjtime('%m-%d %H:%M', p['until'])} 恢复后自动接着干。"
+        else: return None
+    if not is_owner(ev): return f"/quota 只有{OWNER_NAME}能用。"
+    if ev.get("chat_type") != "p2p": return "请在私聊里发。"
+    if not arg: return quota_text(p, time.time()) if p else (tasks.quota_text() or "额度：还没有数据。")
+    if arg == "go":
+        if not p: return "现在没有因为额度暂停。"
+        if p.get("out"): return f"额度已经用完，接不了。{tasks.bjtime('%m-%d %H:%M', p['until'])} 恢复后自动接着干。"
+        save(tasks.PAUSE, {"on": False, "go": dict(p.get("go") or {}, **{x[0]: x[1] for x in tasks.quota_over(on=p["keys"])})})
+        return "好，接着干，用完了再停。"
+    w = arg.split()
+    if w[0].lower() not in ("zcode", "glm"): return "用法：/quota 看状态；/quota zcode [短名#N] 换 ZCode；/quota go 把剩下的用完"
+    if not p: return "现在没有因为额度暂停，不用换。"
+    mov = quota_targets()[1]
+    if len(w) > 1:
+        pick = []
+        for x in w[1:]:
+            t, cands = tasks.resolve(x, tasks.all_tasks())
+            if not t: return ambiguous(x, cands)
+            pick.append(t)
+    else: pick = mov
+    if not pick: return "没有能换的任务。"
+    ok, bad = [], []
+    for t in pick:
+        try: why = tasks.to_agent(t["id"])
+        except Exception as e: log.exception("switch agent failed"); why = f"出错 {type(e).__name__}"
+        (bad if why else ok).append(tasks.ref(t) + (f"（{why}）" if why else ""))
+    return "\n".join((["换好了，ZCode 接着干：" + "、".join(ok) + "。它的结果等额度恢复后由项目经理收。"] if ok else []) + (["没换成：" + "、".join(bad)] if bad else []))
 
 def stuck_step(t, now):
     """进程还在，但很久没有任何动作：先叫项目经理看，再叫主控，一直没人处置才停。"""
@@ -1492,7 +1683,7 @@ def plan_sync(now):
         n, st, lines = tasks.ref(t), t["status"], []
         for e in evs[seen["n"]:]:
             if e["kind"] == "progress": lines.append(f"{n} 进展：{short(e['text'], 150)}")
-        if sig != seen["sig"] and st in ("running", "waiting", "done", "failed", "lost", "cancelled"):
+        if sig != seen["sig"] and not (st == "running" and t.get("quota_turn") == t.get("turn")) and st in ("running", "waiting", "done", "failed", "lost", "cancelled"):
             mates = [x for x in every if x.get("plan") == t["plan"] and x.get("project") == t.get("project") and x["status"] not in team.DEAD]
             word = {"running": "开工" if (t.get("turn") or 0) <= 1 else "接着干", "waiting": "停工" if t.get("held") else "等答复"}.get(st) or tasks.LABEL.get(st, st)
             lines.append(f"{n} {word}：{t['title']}" + (f"（{t['plan']} {sum(x['status'] == 'done' for x in mates)}/{len(mates)}）" if st == "done" else ""))
@@ -1516,6 +1707,9 @@ def plan_sync(now):
 def task_tick():
     now = time.time()
     cands = []
+    try: quota_tick(now)
+    except Exception: log.exception("quota tick failed")
+    paused = tasks.quota_paused()
     for t in tasks.all_tasks():
         n = t["id"]
         for e in tasks.events(n, t.get("posted", 0)):
@@ -1524,8 +1718,10 @@ def task_tick():
             if (e["kind"] in OVERDUE and not tasks.overdue_open(t)) or (e["kind"] == "blocked" and t["status"] != "approved"):   # 等到处理时已经过去了
                 if (n, idx) in relaying: break
                 t = tasks.update(n, posted=idx + 1); continue
+            if e["kind"] == "failed" and t["status"] == "failed" and tasks.agent_of(t).name == "claude" and t.get("exec") != "cloud" and tasks.LIMIT_RE.match(e["text"]):   # 升级前开的单元撞了额度报的失败：当成暂停
+                t = tasks.update(n, posted=idx + 1, status="approved", quota_hold=now, quota_turn=(t.get("turn") or 0) + 1); continue
             if RELAY_ON and e["kind"] in RELAY_KINDS:   # 完成、提问、失败先交给项目经理（2.0）或主控会话，收尾后再对人说
-                if (n, idx) not in relaying:
+                if (n, idx) not in relaying and not paused:
                     relaying.add((n, idx))
                     pm = t.get("project") if t.get("v2") and t.get("project") and e["kind"] != "overdue2" else None
                     enqueue(pm_key(pm, origin_key(t)) if pm else origin_key(t),
@@ -1570,10 +1766,12 @@ def task_tick():
     except Exception: log.exception("plan sync failed")
     running = sum(1 for t in tasks.all_tasks() if t["status"] == "running" and t.get("exec") != "cloud")   # 云端的不占本机名额
     quota_check(now)
+    try: plan_watch(now)
+    except Exception: log.exception("plan watch failed")
     for t in tasks.all_tasks():
         if t.get("compacting") and now - t["compacting"] < 1200: continue   # 正在压缩：压完再开工（超 20 分钟当它没了）
         try:
-            if (t["status"] in ("waiting", "failed") and t.get("exec") != "cloud"
+            if (t["status"] in ("waiting", "failed") and t.get("exec") != "cloud" and not paused
                     and tasks.compact_due(t.get("ctx"), t.get("idle_since"), t.get("compacted"), now)):
                 tasks.update(t["id"], compacting=now)
                 try: threading.Thread(target=tasks.compact_task, args=(t["id"],), daemon=True).start()
@@ -1581,14 +1779,18 @@ def task_tick():
                 continue
         except Exception: log.exception("task #%s compact check failed", t["id"])
         if t["status"] == "approved" and t.get("exec") != "cloud" and upgrading(): continue   # 升级要等本机任务单元都停下：先不开新的
-        if t["status"] == "approved" and not tasks.thing_busy(t):
+        if t["status"] == "approved" and paused and tasks.agent_of(t).name == "claude":
+            if t.get("wait_why") != "等额度恢复": tasks.update(t["id"], _touch=False, wait_why="等额度恢复")
+        elif t["status"] == "approved" and t.get("quota_hold") and tasks.alive(t): pass   # 上一轮还没停干净
+        elif t["status"] == "approved" and not tasks.thing_busy(t):
             why = team.waits(tasks._me(), t, TEAM) if STRICT else ""
             if not why: cands.append(t)
             elif t.get("wait_why") != why: tasks.update(t["id"], _touch=False, wait_why=why)
             if why and t.get("plan") and not team.held(t.get("project")):
                 try: blocked_watch(tasks.load(t["id"]), tasks.all_tasks())
                 except Exception: log.exception("task #%s blocked check failed", t["id"])
-        if t.get("hold") and t["status"] in ("waiting", "approved"):
+        if paused: pass   # 上级这时候也跑不了，不催
+        elif t.get("hold") and t["status"] in ("waiting", "approved"):
             try: hold_watch(tasks.load(t["id"]), now)
             except Exception: log.exception("task #%s hold check failed", t["id"])
         elif t["status"] == "waiting":
@@ -1599,8 +1801,10 @@ def task_tick():
             done = [e["text"] for e in tasks.events(t["id"]) if e["kind"] in ("done", "failed")]
             alert = sch.after_run(tasks._me(), tasks.load(t["id"]), done[-1] if done else "")
             if alert: owner_dm(t["origin"].get("channel", "feishu"), alert)
+    cands.sort(key=lambda t: not t.get("quota_hold"))   # 额度停下的先接着干
     for t in tasks.admit(cands):   # 按资源放行（方案第 5 节），不再按固定并发数
         if tasks.thing_busy(tasks.load(t["id"])) or (STRICT and team.waits(tasks._me(), tasks.load(t["id"]), TEAM)): continue
+        if t.get("quota_hold"): tasks.update(t["id"], _touch=False, quota_hold=None)
         log.info("task #%s launch turn %s", t["id"], t.get("turn", 0) + 1)
         tasks.launch(t["id"])
     v2_tick()
@@ -1738,6 +1942,14 @@ def pm_intro(project, key=""):
     if ts: rec += f"\n仓库：{ts[-1]['repo']}"
     return (f"[项目经理 {project}] 你是项目 {project} 的项目经理。\n{r.get('body', '')}\n" + (f"\n项目档案：\n{rec}\n" if rec else "") + "\n---\n")
 
+def pm_head(project, key, s):
+    """项目经理这一轮开头带的角色说明：新会话带整份；说明改过的（升级），老会话再带一次，免得照旧规矩办。跑成了才算带过。"""
+    sig = hashlib.sha1(((tasks.roles().get("项目经理") or {}).get("body") or "").encode()).hexdigest()[:10]
+    with lock: s["team"] = 3
+    if s["started"] and s.get("pm_intro") == sig: return ""
+    with lock: s["pm_next"] = sig
+    return "（你的角色说明更新了，以这份为准，前面的作废。）\n" + pm_intro(project) if s["started"] and s.get("pm_intro") else pm_intro(project, key)
+
 def pm_notes(project, key, text, vouch=False):
     """[交接]、[看板]、[方案] 由服务收下，不露给人。返回 (剩下的文字, 出错说明)。"""
     errs = []
@@ -1748,9 +1960,9 @@ def pm_notes(project, key, text, vouch=False):
     text = "\n".join([text] + [b for a, b in bs if a and b]).strip()   # [看板] 只占一行，后面的话不吞
     text, ps = team.blocks(text, "方案")
     for a, b in ps:
-        e = team.save_plan(project, a, b)
+        e = team.plan_check(tasks._me(), project, a, b) or team.save_plan(project, a, b, tasks._me(), TEAM)
         if e: errs.append(e)
-        elif vouch: team.vouch_plan(project, a.strip())
+        elif vouch: team.vouch_plan(project, a.strip(), b)
     return text, errs
 
 def pm_marks(project, key, owner, text, hop=0, about=None, idem=None, src=None, follow=False):
@@ -1817,9 +2029,10 @@ DL_INFLIGHT = set()   # 这个进程交给会话、还没处理完的投递；�
 
 def delivery_turn(ev):
     """投递排进主控或项目经理的会话：一轮处理完才标“已送”；中途服务重启或出错，记录停在 handing，下一拍重新送。"""
-    batch, ok = ev.get("batch") or [ev["deliver"]], False
+    batch, ok, out = ev.get("batch") or [ev["deliver"]], False, False
     try:
         ok = _delivery_turn(ev) is not False
+    except QuotaOut: out = True
     finally:
         tk = tasks._me()
         for x in batch:
@@ -1828,6 +2041,7 @@ def delivery_turn(ev):
             if ok:
                 if x.get("sig"): tasks.dl.USED.add(x["sig"])
                 tasks.dl.update(tk, x["id"], status="sent"); continue
+            if out: tasks.dl.update(tk, x["id"], status="new"); continue   # 额度用完：不算一次重送
             n = (r.get("retried") or 0) + 1   # 这一轮没成（Claude 报错、出异常）：退回 new 重送，最多 3 次；不留在 handing，免得下一拍再加一次
             if n > 3:
                 tasks.dl.update(tk, x["id"], status="dropped", retried=n)
@@ -1853,7 +2067,7 @@ def _delivery_turn(ev):
     fol = bool(pm and all(r.get("follow") and tasks.dl.follows(r) and r["from"].get("type") == "ctrl" and r["to"].get("project") == pm and follow_ok(r.get("src_im")) for r in batch))
     if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活、给已有任务追加要求：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
     else: tip = ""
-    prompt = (pm_intro(pm, key) if pm and not s["started"] else "") + "\n\n".join(
+    prompt = (pm_head(pm, key, s) if pm else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
         for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
         + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
@@ -2198,6 +2412,7 @@ def delivery_tick():
                     if FT and t: FT.note(t, x["full"])
                 tasks.decide("进展直送", sender=fr["ref"], why=short(say[0]["full"], 120))
             elif g[0] == "sess":
+                if tasks.quota_paused() and not (any(human_made(x) for x in rs) and not any(x[2] for x in tasks.quota_over())): continue
                 for x in rs: dl.update(tk, x["id"], status="handing")   # 先落盘：会话那一轮处理完才标已送
                 DL_INFLIGHT.update(x["id"] for x in rs)
                 enqueue(g[2], {"deliver": r, "batch": rs, "key": g[2]})
@@ -2349,7 +2564,7 @@ def retro_go(days, key):
 def retro_tick(now=None):
     """每周到点复盘一次；任务太少不跑。先记再跑，重启不重发。"""
     c = retro.conf(CFG)
-    if not c["enabled"]: return
+    if not c["enabled"] or tasks.quota_paused(): return
     d = datetime.fromtimestamp(now or time.time(), ZoneInfo(CFG.get("timezone") or "Asia/Shanghai"))
     if d.weekday() != c["weekday"] or d.hour < c["hour"]: return
     day = d.strftime("%Y-%m-%d")
@@ -2362,7 +2577,7 @@ SCH_BUSY = threading.Lock()
 def schedules_tick():
     """定时任务的到点处理放在单独线程：探针、开运行慢的时候不挡任务线程。最多等 tick_wait_s 秒，快的当拍做完；
     上一拍还没做完就跳过这一拍。"""
-    if not SCH_BUSY.acquire(blocking=False): return
+    if tasks.quota_paused() or not SCH_BUSY.acquire(blocking=False): return
     def go():
         try: [owner_dm("feishu", a) for a in sch.tick(tasks._me(), upgrading=upgrading())]
         except Exception: log.exception("schedules tick failed")
@@ -2667,6 +2882,7 @@ def task_relay(ev):
                 briefed = n in (s.get("briefed") or [])
                 result = run_claude(key, s, relay_prompt(t, e, briefed), owner, owner and t["origin"]["chat_type"] == "p2p",
                                     t["origin"]["chat_id"], quiet=True, on_extra=more, idem=f"t{n}e{idx}")
+        except QuotaOut: return   # 没办，留着；恢复后再回报
         except Exception:
             log.exception("task #%s relay claude failed", n)
         log.info("task #%s relay %s -> %s", n, e["kind"], "raw" if result is None else "orchestrated")
@@ -2682,7 +2898,7 @@ def task_relay(ev):
 
 PM_RELAY_TAIL = ("--- 你是这个项目的项目经理，这条回报先到你这里。能自己收尾的先办（[任务指令] 回答提问或让它接着干；做完了又叫它接着干的，正文加一行“原因: X”，X 从 " + "、".join(retro.CAUSES) + " 里选，复盘用；"
                  "补建合并请求、修补动作）。然后二选一：要让主控知道，单独一行 [投递 主控 完成]（提问你定不了就 [投递 主控 问题]），"
-                 "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把下一阶段的 [方案] 登记好，主控办完转回来时只能派登记过的；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
+                 "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把后面的任务写进这个版本的 [方案]（重发同名的），主控办完转回来时只能派登记过的；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
                  "其余文字只进运行记录，不发给任何人 ---")
 ABSORB_RE = re.compile(r"^\s*\[处理掉\]\s*(.*)$", re.M)
 MR_RE = re.compile(r"https?://\S+?/(?:pull|merge_requests|change)s?/\d+")
@@ -2704,12 +2920,11 @@ def pm_relay(ev):
         try:
             with sem:
                 s = get_session(key)
-                prompt = ((pm_intro(pm, key) if not s["started"] or not s.get("pm_intro") else "")
-                          + relay_prompt(t, e, n in (s.get("briefed") or []), PM_RELAY_TAIL))
+                prompt = pm_head(pm, key, s) + relay_prompt(t, e, n in (s.get("briefed") or []), PM_RELAY_TAIL)
                 if STRICT: prompt = with_board(s, prompt, pm, owner)
-                with lock: s["pm_intro"] = True; s["team"] = 3
                 result = run_claude(key, s, prompt, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"],
                                     quiet=True, layer=pm, hop=hop)
+        except QuotaOut: return
         except Exception:
             log.exception("task #%s pm relay failed", n)
         if result is None:   # 项目经理没跑成：原样交给派活的聊天会话，保证至少送到一次
@@ -2818,7 +3033,7 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
         bump = {}
         if redo:
             bump["redone"] = (x.get("redone") or 0) + 1
-            if bump["redone"] >= 2 and x.get("auto_model") and tasks.next_tier(x) and not x.get("agent"): bump["bump"] = f"上级看过结果退回 {bump['redone']} 次"
+            if bump["redone"] >= 2 and (x.get("auto_model") or x.get("auto_up")) and tasks.next_tier(x) and not x.get("agent"): bump["bump"] = f"上级看过结果退回 {bump['redone']} 次"
         again = team.opened_on(tasks._me(), x, tasks.all_tasks()) if x["status"] == "done" and not cli else []
         raise_budget = bool(tasks.BUDGET_RE.search(body))
         tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", owner, body, upper=True, idem=key)
@@ -2935,6 +3150,7 @@ def ambient_poll_once():
 
 def ambient_flush(chat_id, msgs):
     """一批消息交给会话 amb:<chat_id>。输出 [不回] 就不发；出错不往群里发任何东西。"""
+    if tasks.quota_paused(): return   # 额度暂停时不旁听，过后也不补：隔几小时再插话没意义
     key = "amb:" + chat_id
     st = amb.setdefault(chat_id, {"seen": [], "init": True})
     old = sessions.get(key)

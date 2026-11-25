@@ -1202,11 +1202,14 @@ class TaskTest(unittest.TestCase):
     def test_pick_model(self):
         pm = self.t.pick_model
         self.assertEqual(pm('开发', 'npm test', '', 'opus', 'xhigh'), {'model': 'sonnet', 'effort': 'medium', 'auto_model': True})
-        self.assertEqual([pm('评审', 'x', '', m, e)['model'] + pm('评审', 'x', '', m, e)['effort'] for m, e in (('sonnet', 'high'), ('opus', 'high'), ('opus', 'xhigh'), ('sonnet', 'medium'))], ['opusmedium', 'opusmedium', 'opusxhigh', 'sonnetmedium'])
+        self.assertEqual([pm('评审', 'x', '', m, e)['model'] + pm('评审', 'x', '', m, e)['effort'] for m, e in (('sonnet', 'high'), ('opus', 'high'), ('opus', 'xhigh'), ('sonnet', 'medium'))], ['sonnethigh', 'opusmedium', 'opusxhigh', 'sonnetmedium'])   # 只有评审能从 opus 起步
         self.assertEqual(pm('开发', 'x', '', 'sonnet', 'high', True)['effort'], 'high')   # 主人点名的不动
         self.assertEqual(self.t.next_tier({'model': 'sonnet', 'effort': 'medium'})['effort'], 'medium'); self.assertEqual(self.t.next_tier({'model': 'opus', 'effort': 'medium'})['effort'], 'xhigh'); self.assertIsNone(self.t.next_tier({'model': 'opus', 'effort': 'xhigh'}))
         self.assertEqual(pm('', 'npm test', '')['model'], 'sonnet')
-        self.assertEqual(pm('开发', '', '', 'opus')['model'], 'opus'); self.assertEqual(pm('开发', 'x', 'cloud')['model'], '')   # 照原来的
+        for role, v, ex, up in (('开发', '', '', True), ('产品', '', '', True), ('排查', 'x', '', True), ('开发', 'x', 'cloud', None)):   # 除评审外写 opus 的改成 sonnet high；能升档的记 auto_up，云端没有自动换人
+            r = pm(role, v, ex, 'opus', 'medium'); self.assertEqual((r['model'], r['effort'], r['auto_model'], r.get('auto_up')), ('sonnet', 'high', False, up), role)
+        self.assertEqual(pm('开发', 'x', 'cloud')['model'], ''); self.assertNotIn('auto_up', pm('评审', 'x', '', 'opus'))
+        self.assertEqual(self.t.next_tier({'model': 'haiku', 'effort': 'low'}), {'model': 'sonnet', 'effort': 'medium'})
         self.assertEqual(pm('评审', 'x', '')['model'], '')                 # 角色模板的默认
         self.assertEqual(pm('开发', 'x', '', 'opus', 'max', True), {'model': 'opus', 'effort': 'max', 'auto_model': False})
         d = self.t.parse_directive("x\n[派活]\n仓库: ~/w\n标题: t\n模型: opus（主人指定）\n任务书:\nb\n")[1]
@@ -1239,6 +1242,14 @@ class TaskTest(unittest.TestCase):
         self.assertEqual((t['model'], t['verify_fails'], t['cost']), ('opus', 2, 1.0))       # 两个会话的花费都算上
         self.assertNotIn('sonnet', self.t.sibling(t).get('heads', {}))
 
+    def test_other_roles_escalate_too_unless_owner_pinned(self):
+        """产品、排查这类也从 sonnet 起步：验证没过两次照样升；主人点名的模型不升。"""
+        for up, want in (({'auto_up': True}, ['sonnet', 'sonnet', 'opus']), ({}, ['sonnet'] * 3)):
+            n = self.new_task(verify='test -f ok.txt', role='排查', model='sonnet', effort='high', thing='排查' + str(len(up)), **up)
+            self.run_with(self.fake_bin(self.FAKE_UP), n); t = self.t.load(n)
+            self.assertEqual([json.loads(l)[0] for l in (Path(t['worktree']) / 'calls').read_text().splitlines()], want)
+            self.assertEqual(t['status'], 'done' if up else 'failed')
+
     def test_opus_medium_escalates_to_xhigh_once(self):
         fake = ('import os, sys, json\nopen("calls", "a").write(json.dumps(sys.argv[sys.argv.index("--effort") + 1]) + "\\n")\nsys.stdin.read()\n'
                 'if %r in sys.argv: open("ok.txt", "w").write("1")\n'
@@ -1249,14 +1260,14 @@ class TaskTest(unittest.TestCase):
             got = [json.loads(l) for l in (Path(t['worktree']) / 'calls').read_text().splitlines()]
             self.assertEqual(t['status'], st, self.t.events(n)); self.assertEqual(got[:3], want[:3]); self.assertNotIn('medium', got[2:])
 
-    def test_advisor_off_for_sonnet_dev_only(self):
-        """开发用 sonnet 跑的轮次（含续跑、压缩）不带顾问，换 opus 那一轮带上；别的角色不受影响。"""
+    def test_advisor_off_on_sonnet(self):
+        """用 sonnet 跑的轮次（含续跑、压缩）不带顾问，换 opus 那一轮带上；评审不受影响。"""
         rec = 'open(os.path.join(%r, "adv"), "a").write(os.environ.get("CLAUDE_CODE_DISABLE_ADVISOR_TOOL", "0"))\n' % self.tmp.name
         adv = Path(self.tmp.name) / 'adv'; adv.unlink(missing_ok=True)
         n = self.new_task(verify='test -f ok.txt', role='开发', auto_model=True, model='sonnet', effort='high', thing='顾问')
         self.run_with(self.fake_bin(rec + self.FAKE_UP), n)
         self.assertEqual((adv.read_text(), self.t.load(n)['model']), ('110', 'opus'))
-        for role, model, want in (('开发', 'sonnet', '1'), ('开发', 'opus', '0'), ('评审', 'sonnet', '0'), ('', 'sonnet', '0')):
+        for role, model, want in (('开发', 'sonnet', '1'), ('开发', 'opus', '0'), ('评审', 'sonnet', '0'), ('', 'sonnet', '1'), ('产品', 'sonnet', '1')):
             adv.unlink()
             self.assertEqual(self.t.roles()['开发']['deny'], [])   # 空的“禁用工具”不把下一行当成值
             k = self.new_task(status='waiting', session_started=True, role=role, model=model, thing='顾问')
@@ -1326,7 +1337,8 @@ class TaskTest(unittest.TestCase):
         d = self.t.parse_directive("x\n[派活]\n仓库: ~/w\n标题: t\n角色: 从下面的角色里选一个\n预算: 估这个活要多少\n任务书:\nb\n")[1]
         self.assertEqual((d['role'], d['budget']), ('', 0))
         t = self.t.load(self.new_task(role='产品'))                    # 角色带默认模型
-        self.assertEqual((t['model'], t['effort']), ('opus', 'medium'))
+        self.assertEqual((t['model'], t['effort']), ('sonnet', 'high'))
+        rs = self.t.roles(); self.assertEqual({n: rs[n]['model'] for n in ('产品', '需求', '开发', '排查', '验收', '评审')}, {'产品': 'sonnet', '需求': 'sonnet', '开发': 'sonnet', '排查': 'sonnet', '验收': 'sonnet', '评审': 'opus'})   # 2026-11-25 主人定
 
     def test_sibling_forks_warm_session_and_keeps_notes(self):
         body = ('sys.stdin.read()\nopen("args", "a").write(json.dumps(sys.argv[1:]) + "\\n")\n'

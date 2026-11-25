@@ -1,0 +1,16 @@
+#!/bin/sh
+# git 钩子转发：除 pre-push 外的钩子只转给仓库原来的钩子（.git/hooks 或仓库、全局自己配的 core.hooksPath）。
+# 不起 python：一次提交要过 4 个钩子，测试里一提交就是几百次。pre-push 走 fcb-githook。
+n=${0##*/}
+o=
+while IFS='	' read -r s v; do [ "$s" = command ] || o=$v; done <<EOF
+$(git config --show-scope --type=path --get-all core.hooksPath 2>/dev/null)
+EOF
+case $o in
+  "") o=$(git rev-parse --path-format=absolute --git-common-dir)/hooks ;;
+  /*) ;;
+  *) o=$(git rev-parse --show-toplevel)/$o ;;
+esac
+[ -x "$o/$n" ] || exit 0
+[ "$o" -ef "$(dirname "$0")" ] && exit 0
+exec "$o/$n" "$@"
