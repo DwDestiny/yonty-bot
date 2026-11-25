@@ -1073,7 +1073,7 @@ def help_text(ev, owner):
         if ls: h.extend([name] + ls)
     group("看进度", ("/status", "要我处理的、在干的、额度", owner and p2p), ("/tasks", "任务列表", TASKS_ON), ("/task 短名#N", "一个任务做到哪了", TASKS_ON),
           ("/schedules", "定时任务", TASKS_ON))
-    group("管任务", ("短名#N 内容", "给任务补一句", TASKS_ON), ("/stop", "全部停工，加短名只停一个项目", owner and TASKS_ON), ("/quota", "额度；暂停时 /quota zcode 换人干，/quota go 用完剩下的", owner and p2p), ("/resume", "复工", owner and TASKS_ON),
+    group("管任务", ("短名#N 内容", "给任务补一句", TASKS_ON), ("/stop", "全部停工，加短名只停一个项目", owner and TASKS_ON), ("/quota", "额度；暂停时换人干或用完剩下的", owner and p2p), ("/resume", "复工", owner and TASKS_ON),
           ("/approve 短名#N", "批，/reject 是不批", owner and TASKS_ON), ("/task cancel 短名#N", "取消", TASKS_ON), ("/task brief 短名#N", "看任务书", TASKS_ON),
           ("/task clean 短名#N", "删工作树", owner and TASKS_ON), ("/why 短名#N", "为什么排队、改投", owner and TASKS_ON), ("/team", "角色和各项目的事", owner and TASKS_ON))
     group("聊天", ("/new", "开新会话", p2p), (f"{c} on", f"这个群开旁听，{c} off 关（在群里 @我 发）", owner and AMB["enabled"]),
