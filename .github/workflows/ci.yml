@@ -70,10 +70,12 @@ jobs:
         timeout-minutes: 45
         run: |
           out="$RUNNER_TEMP/test-out"; mkdir -p "$out"; bad=0
+          # 作业进程在系统服务里，不在用户会话里；有用户总线就放进用户级 scope 跑，跟平时登录后跑一样
+          scope=(); if systemctl --user show -p Version > /dev/null 2>&1; then scope=(systemd-run --user --scope -q --); fi
           : > "$out/time.txt"; : > "$out/skip.txt"
           for f in tests/test_*.py; do
             n="$(basename "$f" .py)"; s=$SECONDS; rc=0
-            timeout -k 10 900 python3 -m unittest discover -v -s tests -p "$n.py" > "$out/$n.log" 2>&1 || rc=$?
+            "${scope[@]}" timeout -k 10 900 python3 -m unittest discover -v -s tests -p "$n.py" > "$out/$n.log" 2>&1 || rc=$?
             # 一条测试也没收到时也算失败
             grep -qE '^Ran [1-9][0-9]* test' "$out/$n.log" || { [ "$rc" -ne 0 ] || rc=1; }
             printf '%5ss  rc=%s  %s  %s\n' "$((SECONDS - s))" "$rc" "$n" "$(grep -E '^(Ran |OK|FAILED)' "$out/$n.log" | tr '\n' ' ')" | tee -a "$out/time.txt"
