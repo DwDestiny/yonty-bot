@@ -124,14 +124,14 @@ def flow(f, t):
         cy = y + i * pitch
         if cy < last:
             f.add(f'<path d="M{x},{cy + (8 if i == 5 else 20)} L {x},{cy + pitch - (8 if i == 4 else 20)}" fill="none" stroke="{f.c["fg"]}" stroke-width="4"/>')
-        if i == 5:      # 闸门：红条横在线上
+        if i == 5:      # 复跑验证：红条横在线上
             f.rect(x - 24, cy - 8, 48, 16, "red", None, rx=2)
         else:
             f.add(f'<circle cx="{x}" cy="{cy}" r="17" fill="{f.c["bg"]}" stroke="{f.c["red" if i == 3 else "fg"]}" stroke-width="4"/>')
             f.text(str(i + 1 if i < 5 else i), x, cy + 5.3, 15, True, "red" if i == 3 else "fg", "middle")
         f.text(a, x + 38, cy - 5, 16, True, "red" if i in (3, 5) else "fg")
         f.text(b, x + 38, cy + 16, 12.5, col="sub")
-    g, b = y + 5 * pitch, y + 4 * pitch     # 没过：从闸门退回开工
+    g, b = y + 5 * pitch, y + 4 * pitch     # 没过：从复跑验证退回开工
     f.arrow(f"M{x - 29},{g} C {M + 4},{g} {M + 4},{b} {x - 33},{b}", "red", True)
     foot(f, t["foot"], last + 52)
 
@@ -143,7 +143,7 @@ def layers(f, t):
     for i, (a, lines) in enumerate(t["cards"]):
         b = card(f, x, y, w, a, lines, sw=3 if i else 2)
         ys.append((y, b)); y = b + 30
-    gy = y          # 执行层：虚线框住三种任务
+    gy = y          # 开发：虚线框住三种任务
     cw, gap, pad = 106, 25, 10
     f.rect(x, gy, w, 144, "bg", "fg", 2, True, 8)
     f.text(t["group"], x + w / 2, gy + 23, 15, True, anchor="middle")
@@ -210,52 +210,52 @@ def boundary(f, t):
 
 
 T = {}
-T["flow.zh"] = dict(title="派活流程：从一句话到合并请求", desc="聊天里说一件事，主控接话，项目经理拆任务，同事派的等主人批，后台开工，服务跑验证，没过在后台退回，收口建草稿合并请求，再过一次闸门；PASS 交回，合并由主人决定。", steps=[
+T["flow.zh"] = dict(title="派活流程：从一句话到合并请求", desc="聊天里说一件事，主控接话，项目经理拆任务，同事派的等主人批，后台开工，服务跑验证，没过在后台退回，合并检查建草稿合并请求，再复跑一次验证；PASS 交回，合并由主人决定。", steps=[
     ("聊天里说一件事", "你或者同事，在飞书、企业微信里说"),
     ("主控接话", "小事当场回答；大活聊清楚，转给项目经理"),
-    ("项目经理拆任务", "读代码、出方案，拆成各改各文件的小任务"),
+    ("项目经理拆任务", "读代码、出方案，拆成各改各文件的任务"),
     ("同事派的，等你批", "你自己派的直接排队"),
     ("后台开工", "内存够、依赖做完才开；各在各的分支上改"),
-    ("闸门：服务自己跑验证命令", "没过就在后台退回给任务改，不往群里发"),
-    ("收口", "合分支、跑全量测试、建草稿合并请求，再过一次闸门"),
+    ("服务复跑验证命令", "没过就在后台退回给任务改，不往群里发"),
+    ("合并检查", "合分支、跑全量测试、建草稿合并请求，再复跑验证"),
     ("PASS 交回，合并由你决定", "项目经理验收，主控告诉你结果和要你定的事")],
-    foot=["同事的活，主控也能直接派成单个任务：同样等你批，", "由那个任务自己建草稿合并请求，再过闸门。"])
-T["flow.en"] = dict(title="From one message to a pull request", desc="A chat message goes to the coordinator, then the project manager, who splits it. Teammates' jobs wait for the owner's approval. Work runs in the background; the service runs the check and sends failures back silently. An integration task opens one draft pull request, which faces the gate again. PASS comes back and the owner decides on merging.", steps=[
+    foot=["同事的活，主控也能直接派成单个任务：同样等你批，", "由那个任务自己建草稿合并请求，再复跑验证。"])
+T["flow.en"] = dict(title="From one message to a pull request", desc="A chat message goes to the coordinator, then the project manager, who splits it. Teammates' jobs wait for the owner's approval. Work runs in the background; the service runs the check and sends failures back silently. A merge check opens one draft pull request, which has its check re-run. PASS comes back and the owner decides on merging.", steps=[
     ("Someone asks in chat", "You or a teammate, in Feishu/Lark or WeCom"),
     ("The coordinator picks it up", "Quick answers now; big jobs are scoped, handed on"),
     ("The project manager plans", "Reads code, splits work so files never collide"),
     ("Teammate's job? You approve", "Your own jobs go straight into the queue"),
     ("Work starts in the background", "When memory and dependencies allow; own branch"),
-    ("Gate: the service runs the check", "Failures go back to the task, not to your chat"),
-    ("Integration task", "Merge, full tests, one draft PR, gate again"),
+    ("The service re-runs the check", "Failures go back to the task, not to your chat"),
+    ("Merge check", "Merge, full tests, one draft PR, check re-run"),
     ("PASS comes back; merging is your call", "The manager reviews; the coordinator briefs you")],
-    foot=["For a teammate, the coordinator may queue one task:", "you still approve it. It opens its own draft PR,", "then faces the same gate."])
-T["layers.zh"] = dict(title="三层分工", desc="主控跟人对话，项目经理出方案、派活、验收，执行层在后台做任务。授权、花钱、方向直接问主人。服务是普通程序，负责认身份、排队、验证、停工。", cards=[
+    foot=["For a teammate, the coordinator may queue one task:", "you still approve it. It opens its own draft PR,", "then the check is re-run."])
+T["layers.zh"] = dict(title="主控、项目经理、开发", desc="主控跟人对话、做几分钟的小改动，项目经理出方案、派活、验收，开发在后台做任务。授权、花钱、方向直接问主人。服务是普通程序，负责认身份、排队、验证、停工。", cards=[
     ("你和同事", ["在群里或私聊里说话"]),
-    ("主控 · 每个聊天一个", ["跟人对话，记住你的决定", "你的大活转给项目经理，自己不写代码"]),
+    ("主控 · 每个聊天一个", ["答问题，做几分钟的小改动", "记住你的决定，大活转出去"]),
     ("项目经理 · 每个项目按聊天分开", ["读代码、出方案、派活、验收", "不写代码"])],
     links=[("说事", "结果"), ("转交", "完成、问题"), ("派活", "回报、提问")],
-    group="执行层 · 后台任务，各有各的分支",
-    workers=[("开发", ["并行做小任务", "各改各的文件"]), ("收口", ["合分支、测全量", "建合并请求"]), ("评审", ["只看改动", "只提意见"])],
+    group="开发 · 后台任务，各有各的分支",
+    workers=[("写代码", ["并行做任务", "各改各的文件"]), ("合并检查", ["合分支、测全量", "建合并请求"]), ("评审", ["只看改动", "只提意见"])],
     ask="红虚线：要授权、花钱、定方向时，任务直接问你",
     svc=["服务是普通程序，不是模型", "认身份、排队、跑验证、停工，都由它执行"])
-T["layers.en"] = dict(title="Who does what", desc="The coordinator talks to people, the project manager plans, assigns and reviews, and background tasks do the work. Approvals, spending and direction go straight to the owner. The service is ordinary code that handles identity, queueing, checks and stops.", cards=[
+T["layers.en"] = dict(title="Who does what", desc="The coordinator talks to people and makes few-minute edits, the project manager plans, assigns and reviews, and background tasks do the work. Approvals, spending and direction go straight to the owner. The service is ordinary code that handles identity, queueing, checks and stops.", cards=[
     ("You and your teammates", ["In a group or a direct message"]),
-    ("Coordinator · one per chat", ["Does the talking and remembers what you decided", "Passes your bigger jobs on; writes no code"]),
+    ("Coordinator · one per chat", ["Answers questions, makes few-minute edits", "Remembers decisions, hands big jobs on"]),
     ("Project manager · per project and chat", ["Reads code, plans, assigns, reviews", "Writes no code"])],
     links=[("request", "result"), ("handover", "done / problem"), ("task", "report / question")],
-    group="Background tasks, each on its own branch",
-    workers=[("Developer", ["Small tasks,", "own files"]), ("Integrator", ["Full tests,", "one PR"]), ("Reviewer", ["Reads diffs,", "comments"])],
+    group="Developers · each task on its own branch",
+    workers=[("Coding", ["In parallel,", "own files"]), ("Merging", ["Full tests,", "one PR"]), ("Review", ["Reads diffs,", "comments"])],
     ask="Red: approvals, spending, direction come to you",
     svc=["The service is ordinary code, not a model", "It handles identity, queueing, checks and stops"])
-T["gate.zh"] = dict(title="验证闸门：说做完，不算数", desc="任务说做完后，服务在后台自己跑验证命令。过了写 PASS 交项目经理。没过连同输出退回任务。还是没过就换更强的模型或按 BLOCKED 上交。没跑完不退回，直接上交。",
+T["gate.zh"] = dict(title="复跑验证：说做完，不算数", desc="任务说做完后，服务在后台自己跑验证命令。过了写 PASS 交项目经理。没过连同输出退回任务。还是没过就换更强的模型或按 BLOCKED 上交。没跑完不退回，直接上交。",
     said=("任务说：做完了", ["先不算，等服务自己查"]),
     run=("服务在后台自己跑验证命令", ["独立验收的测试被改过，也算没过"]),
     **{"pass": ("过了", ["结论写 PASS", "交给项目经理验收"])},
     fail=("没过", ["带着失败输出退回任务", "默认最多退 2 次"]),
     infra=("没跑完", ["被叫停、被护栏拦了等", "不返工，BLOCKED 上交"]),
     stuck=("还是没过", ["能换更强的模型就换", "不能就 BLOCKED 上交"]),
-    foot=["没定验证命令的活，服务不复核，结论里会写明。", "只读角色没有提交改动的，不跑这道闸门。"])
+    foot=["没定验证命令的活，服务不复核，结论里会写明。", "只读角色没有提交改动的，不复跑验证。"])
 T["gate.en"] = dict(title='"Done" doesn\'t count', desc="When a task says it is done, the service runs the check in the background. A pass goes to the project manager. A failure goes back to the task with its output. If it keeps failing, a stronger model takes over or it is handed up as BLOCKED. A check that could not finish is handed up without rework.",
     said=("The task says it is done", ["Nothing counts until the service looks"]),
     run=("The service runs the check itself", ["Edited acceptance tests fail it too"]),
@@ -263,18 +263,18 @@ T["gate.en"] = dict(title='"Done" doesn\'t count', desc="When a task says it is 
     fail=("Failed", ["Sent back with output", "Twice at most, default"]),
     infra=("Couldn't finish", ["Stopped, or blocked", "No rework: BLOCKED"]),
     stuck=("Still failing", ["Stronger model if any,", "otherwise BLOCKED"]),
-    foot=["No check command set? The report says so.", "Read-only roles that commit nothing skip this gate."])
+    foot=["No check command set? The report says so.", "Read-only roles that commit nothing skip this check."])
 T["boundary.zh"] = dict(title="权限边界：哪些拦得住，哪些拦不住", desc="钩子直接拦的、要主人批的、没有硬拦的、定时运行沙箱里仍然读得到的，分四块列出。",
     who=("先认人", ["看飞书、企业微信给的账号，不看消息里怎么自称"]), panels=[
-    ("钩子当场拦下（看命令和参数）", ["以你的名义在飞书、企业微信发消息（默认设置）", "不在你的私聊里，却要读你标成私密的目录", "直接读代码平台凭据，直接绕过 git 钩子", "同事的活：推 bot/ 以外的分支，合并，发版", "在登记过的设备上运行 claude"]),
+    ("钩子当场拦下（看命令和参数）", ["以你的名义在飞书、企业微信发消息（默认设置）", "不在你的私聊里，却要读你标成私密的目录", "直接读代码平台凭据，直接绕过 git 钩子", "同事的活：推 bot/ 以外的分支，合并，发版", "推送的新增提交里有密钥：本机会话都查，你的也查", "在登记过的设备上运行 claude"]),
     ("要你批（服务卡着，不批不动）", ["同事派的任务，默认 24 小时没批就作废", "批了也只按同事的权限跑", "登记成“授权”类的动作"]),
-    ("没有硬拦住（靠规矩，或者拦不全）", ["你派的任务不合并、不推主干、不发版，靠规矩；\n钩子只拦强推和删除 main/master", "写成脚本再执行，钩子看不出来", "同事问话时能读到别处的聊天，不转述靠规矩", "主干要在 GitHub 上开分支保护兜底"]),
+    ("没有硬拦住（靠规矩，或者拦不全）", ["你派的任务不合并、不推主干、不发版，靠规矩；\ngit 命令只拦强推和删除 main/master，外加密钥扫描", "密钥扫描会漏报，出错放行；云端任务不过这道", "写成脚本再执行，钩子看不出来", "同事问话时能读到别处的聊天，不转述靠规矩", "主干要在 GitHub 上开分支保护兜底"]),
     ("沙箱（定时运行用，普通 Claude 任务没有）", ["能写的：自己的工作树、发件箱、会话记录，\n加上你在配置里放开的目录", "仍读得到本机的 Claude 登录凭据", "仍读得到这个仓库的全部历史", "网络没隔离：连得上本机端口和外网"])])
 T["boundary.en"] = dict(title="What is blocked, and what isn't", desc="Four groups: blocked by hooks, held for the owner's approval, not enforced, and what a scheduled run's sandbox can still read.",
     who=("First: who is asking?", ["By Feishu or WeCom account, not by what they claim"]), panels=[
-    ("Blocked by hooks (they read commands)", ["Posting as you in Feishu or WeCom (default settings)", "Reading folders you marked private, outside your DM", "Reading code-host tokens; plainly skipping git hooks", "Teammates' jobs: non-bot/ pushes, merges, releases", "Running claude on a registered device"]),
+    ("Blocked by hooks (they read commands)", ["Posting as you in Feishu or WeCom (default settings)", "Reading folders you marked private, outside your DM", "Reading code-host tokens; plainly skipping git hooks", "Teammates' jobs: non-bot/ pushes, merges, releases", "Secrets in new commits: local pushes, yours too", "Running claude on a registered device"]),
     ("Held until you approve", ["Teammates' tasks; unapproved ones lapse in 24 hours", "Once approved, they still run with teammate rights", "Actions registered as needing authorization"]),
-    ("Not enforced, or only partly", ["Your own tasks: not merging, pushing main or\nreleasing is only a rule. Hooks only stop\nforce-pushing or deleting main/master", "Writing a script and running it slips past hooks", "Not retelling other chats to a teammate is a rule", "Turn on GitHub branch protection as the backstop"]),
+    ("Not enforced, or only partly", ["Your own tasks: not merging, pushing main or\nreleasing is only a rule. Git hooks only stop\nforce-push or delete of main/master, and secrets", "Secret scan misses some, fails open, skips cloud", "Writing a script and running it slips past hooks", "Not retelling other chats to a teammate is a rule", "Turn on GitHub branch protection as the backstop"]),
     ("Sandbox (for scheduled runs)", ["Normal Claude tasks run without it", "Can write its worktree, outbox and session log,\nplus any folders you open up in the config", "Can still read this machine's Claude login", "Can still read the repository's full history", "Network is open: local ports and the internet"])])
 DRAW = dict(flow=flow, layers=layers, gate=gatefig, boundary=boundary)
 
