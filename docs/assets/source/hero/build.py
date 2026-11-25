@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Input: 系统里的 Noto Sans CJK（SIL OFL 1.1）；Output: docs/assets/hero/ 下 4 张主视觉 SVG、社交卡片 SVG 和 PNG。
+"""Input: 系统里的 Noto Sans CJK（SIL OFL 1.1）；Output: docs/assets/hero/ 下 4 张主视觉 SVG 和社交卡片 PNG。
 Pos: 主视觉和社交卡片的唯一生成脚本。文字全部转成路径，缺字直接报错。
 用法见同目录 README.md。"""
 import os, subprocess, sys, shutil, tempfile
@@ -88,6 +88,12 @@ def cross(cx, cy, k, c, sw):
     return (f'<path d="M{cx-k} {cy-k}L{cx+k} {cy+k}M{cx+k} {cy-k}L{cx-k} {cy+k}" stroke="{c["red"]}" '
             f'stroke-width="{sw}" stroke-linecap="round" fill="none"/>')
 
+def spread(labels, ls, third, after):
+    """5 个节点的圆心：首尾标签贴齐 64 和 1216 的边距，第 2 个居中，第 4 个放在 ✕ 右缘和第 5 个的正中。"""
+    first = round(64 + width(labels[0], ls, SANS) / 2)
+    last = round(1216 - width(labels[4], ls, SANS) / 2)
+    return [first, (first + third) // 2, third, (after + last) // 2, last]
+
 def hero(lang, c):
     W, H, LY = 1280, 616, 355
     zh = lang == "zh"
@@ -96,25 +102,25 @@ def hero(lang, c):
         b.append(text("说做完，", 64, 150, 104, BOLD, c["fg"], heavy=0.03))
         b.append(text("不算数。", 64 + width("说做完，", 104, BOLD), 150, 104, BOLD, c["red"], heavy=0.03))
         b.append(text("服务自己复跑一遍验证命令，没过就退回。", 66, 210, 32, SANS, c["sub"]))
-        labels = ["聊天派活", "开工", "说做完了", "PASS", "草稿合并请求"]
+        labels = ["聊天派活", "开工", "说做完了", "PASS", "你来合并"]
         head, mono = "[验证失败]", "1 failed, 11 passed  →  退回返工"
         rest = " 第 1 次退回：npm test"
         tag = "示意 · 任务与仓库均为虚构"
-        title, desc = "说做完，不算数。", "流程示意：任务说做完后，服务复跑验证命令，没过就退回，过了才开草稿合并请求。"
+        title, desc = "说做完，不算数。", "流程示意：任务说做完后，服务复跑验证命令，没过就退回；PASS 之后由你决定合并。没写验证命令时服务不复核。"
     else:
         a = "\u201cDone\u201d "
         b.append(text(a, 64, 150, 92, BOLD, c["fg"], heavy=0.03))
         b.append(text("doesn't count.", 64 + width(a, 92, BOLD), 150, 92, BOLD, c["red"], heavy=0.03))
         b.append(text("The service re-runs the check itself. Fail, and it goes back.", 66, 210, 32, SANS, c["sub"]))
-        labels = ["Chat request", "Start", "Says done", "PASS", "Draft PR"]
+        labels = ["Chat request", "Start", "Says done", "PASS", "You merge"]
         head, mono = "[Check failed]", "1 failed, 11 passed  →  sent back"
         rest = " Sent back #1: npm test"
         tag = "Illustration · fictional task and repo"
-        title, desc = "\u201cDone\u201d doesn't count.", "Flow sketch: after a task says done, the service re-runs the check. If it fails the task goes back; if it passes, a draft pull request opens."
+        title, desc = "\u201cDone\u201d doesn't count.", "Flow sketch: after a task says done, the service re-runs the check. If it fails, the task goes back; after PASS, you decide whether to merge. Without a check command, the service does not verify."
     gx = 700
     b.append(f'<path d="M64 {LY}H{gx}" stroke="{c["fg"]}" stroke-width="6"/>')
     b.append(f'<path d="M{gx} {LY}H1216" stroke="{c["dim"]}" stroke-width="6" stroke-dasharray="3 12" stroke-linecap="round"/>')
-    xs = [150, 370, 590, 960, 1128]
+    xs = spread(labels, 28, 590, gx + 116)
     for i, (x, lab) in enumerate(zip(xs, labels)):
         b += node(x, LY, 33, lab, i + 1, c, 28, dim=i >= 3)
     b.append(f'<rect x="{gx-14}" y="{LY-110}" width="28" height="200" rx="3" fill="{c["red"]}"/>')
@@ -139,9 +145,10 @@ def card():
          text("A coding agent in your team chat. It only counts as done", 66, 466, 28, SANS, c["sub"]),
          text("when the service re-runs your check and it passes.", 66, 502, 28, SANS, c["sub"])]
     gx = 700
+    labels = ["Chat", "Start", "Says done", "PASS", "You merge"]
     b.append(f'<path d="M64 {LY}H{gx}" stroke="{c["fg"]}" stroke-width="5"/>')
     b.append(f'<path d="M{gx} {LY}H1216" stroke="{c["dim"]}" stroke-width="5" stroke-dasharray="3 11" stroke-linecap="round"/>')
-    for i, (x, lab) in enumerate(zip([110, 330, 550, 960, 1150], ["Chat", "Start", "Says done", "PASS", "Draft PR"])):
+    for i, (x, lab) in enumerate(zip(spread(labels, 22, 550, gx + 95), labels)):
         col = c["dim"] if i >= 3 else c["fg"]
         dash = ' stroke-dasharray="7 6"' if i >= 3 else ""
         b.append(f'<circle cx="{x}" cy="{LY}" r="15" fill="{c["bg"]}" stroke="{col}" stroke-width="5"{dash}/>')
