@@ -3,7 +3,7 @@
 import sys, os
 from PIL import Image
 fd, rd, out = sys.argv[1:4]
-PAIRS = [(0, 'tess_01.0s_macro-strip'), (45, 'tess_08.0s_gears'), (100, 'bonsai_02.4s_scan'),
+PAIRS = [(0, 'tess_01.0s_macro-strip'), (44, 'tess_08.0s_gears'), (100, 'bonsai_02.4s_scan'),
          (135, 'bonsai_06.6s_push-in'), (219, 'tess_30.0s_nameplate'), (239, 'tess_36.0s_black-end')]
 rows = []
 for n, ref in PAIRS:
