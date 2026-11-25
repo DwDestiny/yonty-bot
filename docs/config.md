@@ -29,7 +29,8 @@
 | `tasks.budget_default` | `20` | 任务检查点的兜底值（美元当量）。主控在 `[派活]` 里没写 `预算`、又没有同类任务历史时用。到了检查点任务停下交回主控，主控可 `[任务指令] 短名#N 继续，预算加到 X` |
 | `tasks.project_alias` | `{}` | 项目短名的别名：`{"仓库路径": "短名"}`，路径可以写 `~`。没配的仓库用目录名小写。短名决定任务编号 `短名#N` 和分支名 `bot/<短名>-<N>-<月日>`，建任务时定下，之后改别名只影响新任务。见 tasks.md 2.1 |
 | `tasks.budget_factor` | `1.5` | 按历史估检查点时，同类（同角色同模型，其次同模型）最近 10 个完成任务花费中位数乘几 |
-| `tasks.quota_alert` | 见左 | 订阅额度提醒：`five_hour` 是 5 小时窗口用量到多少提醒；`seven_day_pace` 是 7 天窗口“已用比例 ÷ 已过时间比例”到多少提醒。只私聊提醒主人，不拦活 |
+| `tasks.quota_alert` | 见左 | 订阅额度提醒：`five_hour` 是 5 小时窗口用量到多少提醒（0.85）；`five_hour_pace` 是 5 小时窗口“已用比例 ÷ 已过时间比例”到多少提醒（1.5，用量到 25% 才算，0 关）；`seven_day_pace` 是 7 天窗口的同一个比（1.1）；`plan_usd` 是方案没写 `预算:` 时花到多少美元当量提醒（30，0 关）。都只私聊提醒主人，不停活 |
+| `tasks.quota_pause` | 0.95 | 任一额度窗口用到多少就暂停所有 Claude 任务，刷新后自动接着干；0 关掉 |
 | `tasks.sibling_warm_min` | `55` | 同一件事的负责人会话多少分钟内用过（提示缓存 1 小时内还热），新任务就分叉接着它 |
 | `tasks.sibling_max_ctx` | `150000` | 上个会话的上下文超过这么多 token 就不再接着，新开会话读档案 |
 | `tasks.compact` | `{"idle_min": 50}` | 缓存过期前压缩：上下文到 `min_ctx`（不写就按“省下的冷启动重写大于压缩花费”算，约 8.9 万）、闲置满 `idle_min` 分钟（不满 60）时压一次。只压等人回话的任务、还没到换新时间的聊天会话和旁听会话。`min_ctx` 写 0 关掉。别的时候交给 CLI 自己的自动压缩 |
@@ -85,8 +86,8 @@
 | `irreversible` | 见 app/config.example.json | 不可逆命令的正则。有没取的追加指令时 `irreversible_gate` 拦它们 |
 | `schedules` | 见说明 | `max_run_min` 120（一次运行从开工算起最长分钟数，续跑的轮次合起来算）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）、`tick_wait_s` 3（到点处理在单独线程，任务线程最多等它这么久）。见 schedules.md |
 | `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |
-| `team` | 见说明 | 组织规矩：`strict` true（主控唯一对话、方案闸门），`max_parallel` 4（每个项目同时几个小任务），`max_tasks` 12（每个方案的任务数，超过两倍拦下），`max_reviews` 2（每个方案的评审轮数，再多要主人同意），`brief_check` true（开发、排查活的任务书要有“已核实、边界、验收、交回”，缺了退回） |
-| `tasks.resources.default_small_gb` | `2` | 方案里的小任务没有同类历史时，开工估算按多少 G |
+| `team` | 见说明 | 组织规矩：`strict` true（主控唯一对话、方案闸门），`max_parallel` 4（每个项目同时几个任务），`max_tasks` 8（一个方案没做完的开发任务数，另加收口、评审两个，超过就退回），`max_reviews` 2（每个方案的评审轮数，再多要主人同意），`brief_check` true（开发、排查活的任务书要有“已核实、边界、验收、交回”，缺了退回） |
+| `tasks.resources.default_small_gb` | `2` | 方案里的任务没有同类历史时，开工估算按多少 G |
 | `delivery` | 见说明 | 投递：`max_hops` 3、`owner_max_chars` 300、`other_max_chars` 2000、`dedup_min` 30、`progress_gap_min` 10、`progress_max` 5、`owner_per_10min` 4、`owner_per_hour` 12、`pingpong_max` 3 和 `pingpong_min` 10（同一对智能体 10 分钟内来回 3 次后交给主控）、`merge_s` 120（同一发送方发给同一目标，离上次送不到这么多秒就等着合并）。见 architecture.md |
 
 注意：旧字段 `tasks.max_running` 和 `tasks.memory_max` 从 2.0 起不再生效：放行改按资源，内存上限随任务估计走。写了只在启动日志提醒一次，可以删掉。
