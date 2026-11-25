@@ -144,7 +144,7 @@ sg = node('ShaderNodeCombineColor'); L.new(shade, sg.inputs[0]); L.new(shade, sg
 fin = node('ShaderNodeMix', data_type='RGBA', blend_type='MULTIPLY'); fin.inputs[0].default_value = 1.0; L.new(c2.outputs[2], fin.inputs[6]); L.new(sg.outputs[0], fin.inputs[7])
 # 边缘/薄处透光：边缘 e=|u-0.5|*2 的 4 次方；中间只有少量
 uvx = node('ShaderNodeSeparateXYZ'); L.new(tc_.outputs['UV'], uvx.inputs['Vector'])
-e_ = mathn('POWER', mathn('MULTIPLY', mathn('ABSOLUTE', mathn('SUBTRACT', uvx.outputs['X'], 0.5)), 2.0), 4.0, clamp=True)
+e_ = mathn('POWER', mathn('MULTIPLY', mathn('ABSOLUTE', mathn('SUBTRACT', uvx.outputs['X'], 0.5)), 2.0), 8.0, clamp=True)
 slot_t = mathn('POWER', mathn('SUBTRACT', 1.0, mathn('DIVIDE', rigz, 0.014), clamp=True), 3.0)
 amber = node('ShaderNodeMix', data_type='RGBA', blend_type='MULTIPLY'); L.new(mathn('ADD', 0.12, mathn('MULTIPLY', e_, 0.88), clamp=True), amber.inputs[0]); L.new(fin.outputs[2], amber.inputs[6]); amber.inputs[7].default_value = (1.0, 0.62, 0.30, 1)
 bsdf = node('ShaderNodeBsdfPrincipled'); L.new(fin.outputs[2], bsdf.inputs['Base Color'])
@@ -152,8 +152,8 @@ rough = mathn('SUBTRACT', 0.66, mathn('MULTIPLY', mathn('MULTIPLY', mk, wet.outp
 L.new(rough, bsdf.inputs['Roughness']); setin(bsdf, ['Specular IOR Level', 'Specular'], 0.3); setin(bsdf, 'Sheen Weight', 0.3); L.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
 tr = node('ShaderNodeBsdfTranslucent'); L.new(amber.outputs[2], tr.inputs['Color']); L.new(bump.outputs['Normal'], tr.inputs['Normal'])
 mx = node('ShaderNodeMixShader'); L.new(mathn('ADD', 0.16, mathn('MULTIPLY', e_, 0.6)), mx.inputs['Fac']); L.new(bsdf.outputs['BSDF'], mx.inputs[1]); L.new(tr.outputs['BSDF'], mx.inputs[2])
-em = node('ShaderNodeEmission'); em.inputs['Color'].default_value = (1.0, 0.52, 0.18, 1)
-glow = mathn('MAXIMUM', mathn('MULTIPLY', e_, env('EDGE', 2.0)), mathn('MULTIPLY', slot_t, env('SLOT', 1.5)))
+em = node('ShaderNodeEmission'); em.inputs['Color'].default_value = (1.0, 0.40, 0.12, 1)
+glow = mathn('MAXIMUM', mathn('MULTIPLY', e_, env('EDGE', 1.8)), mathn('MULTIPLY', slot_t, env('SLOT', 1.5)))
 L.new(mathn('MULTIPLY', glow, mathn('SUBTRACT', 1.0, mathn('MAXIMUM', black, redk), clamp=True)), em.inputs['Strength'])
 ad = node('ShaderNodeAddShader'); L.new(mx.outputs['Shader'], ad.inputs[0]); L.new(em.outputs['Emission'], ad.inputs[1])
 o = node('ShaderNodeOutputMaterial'); L.new(ad.outputs['Shader'], o.inputs['Surface'])
@@ -217,13 +217,13 @@ for k in range(64):
 def mk_light(kind, name):
     l = bpy.data.lights.new(name, kind); ob = bpy.data.objects.new(name, l); sc.collection.objects.link(ob); return ob
 def aim(ob, tgt): ob.rotation_euler = (Vector(tgt) - ob.location).to_track_quat('-Z', 'Y').to_euler()
-back = mk_light('AREA', 'back'); back.data.shape = 'RECTANGLE'; back.data.size = 0.03; back.data.size_y = 0.06
-back.location = (0.02, 0.035, 0.03); aim(back, (0, -1, 0.03)); back.rotation_euler = (math.radians(-90), 0, 0); back.data.color = (1.0, 0.58, 0.26); adopt(back)
+back = mk_light('AREA', 'back'); back.data.shape = 'RECTANGLE'; back.data.size = 0.05; back.data.size_y = 0.08
+back.location = (0.0, 0.035, 0.03); aim(back, (0, -1, 0.03)); back.rotation_euler = (math.radians(-90), 0, 0); back.data.color = (1.0, 0.70, 0.40); adopt(back)
 key = mk_light('SPOT', 'key'); key.data.spot_size = math.radians(30); key.data.spot_blend = 0.8; key.data.shadow_soft_size = 0.02
-key.location = (-0.16, -0.12, 0.09); aim(key, (0.0, 0, 0.018)); key.data.color = (1.0, 0.9, 0.78); adopt(key)
+key.location = (-0.16, -0.12, 0.09); aim(key, (0.0, 0, 0.018)); key.data.color = (1.0, 0.95, 0.88); adopt(key)
 hl = mk_light('AREA', 'edgehl'); hl.data.shape = 'RECTANGLE'; hl.data.size = 0.09; hl.data.size_y = 0.004; hl.data.color = (1.0, 0.85, 0.65)
 hl.location = (0, -0.05, 0.03); hl.rotation_euler = (Vector((0, 0.0075, 0.0)) - hl.location).to_track_quat('-Z', 'Y').to_euler(); adopt(hl)
-back.data.energy = env('BACK', 0.022); key.data.energy = env('KEY', 1.1); hl.data.energy = 0.02
+back.data.energy = env('BACK', 0.010); key.data.energy = env('KEY', 1.9); hl.data.energy = 0.02
 
 cam = bpy.data.objects.new('cam', bpy.data.cameras.new('cam')); sc.collection.objects.link(cam); sc.camera = cam
 cd = cam.data; cd.sensor_fit = 'HORIZONTAL'; cd.sensor_width = 36; cd.lens = 85
@@ -266,7 +266,7 @@ def setframe(i):
     VAL['dent'].default_value = max(0.0, push/0.0022) if t >= TC else 0.0
     VAL['prog'].default_value = progv(t)
     # 相机：偏低偏侧，沿纸面缓缓跟、缓缓推近；跟着章落下和走纸的位置
-    tz = 0.0195 + 0.003*t/8.0
+    tz = 0.0195 + 0.003*t/8.0 - 0.0055*eio((t-3.3)/0.5) + 0.0055*eio((t-5.0)/0.5)
     tgt = rig.matrix_world @ Vector((0.0, 0.0, tz))
     zoom = 1.0 + 0.06*eio((t-1.5)/2.0) + 0.06*eio((t-6.3)/1.3)
     az = math.radians(-20 + 10*t/8.0 + 2.0*math.sin(t*0.9)); el = math.radians(-5 + 4*math.sin(t*0.55))

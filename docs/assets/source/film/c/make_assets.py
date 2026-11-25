@@ -43,6 +43,7 @@ bb = np.asarray(bar.filter(ImageFilter.GaussianBlur(2.2)), np.float32)/255
 bb = np.clip((bb + (nz-0.5)*0.30 - 0.5)*7 + 0.5, 0, 1)              # 边缘略毛
 bb = bb*np.where(nzb > 0.80, 0.55+0.45*np.clip((0.92-nzb)*8, 0, 1), 1.0)   # 局部少量断墨
 img[0] = Image.fromarray(np.maximum(np.asarray(img[0]), (bb*255).astype('uint8')))
+dr[0] = ImageDraw.Draw(img[0])     # 换了图像对象，画笔要跟着换，否则最后一行字会画丢
 mixed(0, 8.3, '说做完，不算数。', 4.4)
 # 热敏点阵：每 3 像素一个点，只轻微调制；字笔画加粗 15% 让墨近黑
 yy, xx = np.mgrid[0:H, 0:W]
