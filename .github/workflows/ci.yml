@@ -53,9 +53,9 @@ jobs:
 
       - name: 试沙箱，打开 systemd 用户总线
         run: |
-          # 跟真实沙箱一样带 --proc 试一次。起不来就只跳过确实要起沙箱的测试，名单在日志里打印。
+          # 跟真实沙箱一样带 --proc 试一次。起不来就导出变量；现在还没有测试读它，要起沙箱的测试会红。
           if ! bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent --new-session --unshare-pid true; then
-            echo "这台机器挂不了 /proc，要起沙箱的测试会跳过"
+            echo "这台机器挂不了 /proc，要起沙箱的测试在这里起不来"
             echo "YONTY_NO_PROC_SANDBOX=1" >> "$GITHUB_ENV"
           fi
           sudo loginctl enable-linger "$(id -un)" || true

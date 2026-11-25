@@ -42,7 +42,7 @@ git push origin --delete ci/<名字>    # 验完删掉
 
 有 systemd 用户总线时，测试放在用户级 scope 里跑，跟平时登录后跑一样。
 
-**沙箱测试。** 沙箱要用 bwrap 在新的命名空间里挂 `/proc`，这台 CI 机器的内核不许普通用户这么挂。工作流先用跟真实沙箱一样的参数试一次，起不来就设 `YONTY_NO_PROC_SANDBOX=1`。所以沙箱在 CI 上验不到：改了沙箱，合并前在一台 bwrap 能用的 Linux 上补跑下面这些文件。有的沙箱测试在沙箱起不来时也会过，所以整个文件一起跑，不只补跑没过的：
+**沙箱测试。** 沙箱要用 bwrap 在新的命名空间里挂 `/proc`，这台 CI 机器的内核不许普通用户这么挂。工作流先用跟真实沙箱一样的参数试一次，起不来就设 `YONTY_NO_PROC_SANDBOX=1`。现在还没有测试读这个变量，要起沙箱的 54 条用例（都在下面 10 个文件里）在 CI 上会红，“全量测试”一步过不了。沙箱在 CI 上验不到：改了沙箱，合并前在一台 bwrap 能用的 Linux 上补跑下面这些文件。有的沙箱测试在沙箱起不来时也会过，所以整个文件一起跑，不只补跑没过的：
 
 ```bash
 for n in accept_flow agents review_fixes review_round2_box review_round2_git \
