@@ -16,7 +16,7 @@ Z0 = 0.0115 + TM + P                       # 第 1 行初始居中于 z=0.0115�
 R = [0, 1, 2, 3, 4, 6.9, 7.9, 8.9]         # 各行在纸上的位置（行距 P 的倍数）；章（5.3 行）上下留空
 # (开始秒, 走纸行数, 格数)：一格一格往外走，每格 0.09 s
 EVENTS = [(0.15, 1, 5, 0.09), (1.3, 1, 5, 0.09), (2.5, 1, 5, 0.09), (3.4, 1.7, 5, 0.09), (5.0, 1.2, 5, 0.09), (6.2, 1.0, 5, 0.09), (7.35, 1.0, 5, 0.07)]
-TC = 4.28                                  # 盖章接触时刻；4.5 秒帧为章刚抬走、墨在渗开
+TC = 4.195                                  # 盖章接触时刻；4.5 秒帧为章刚抬走、墨在渗开
 MARK_ROW, MARK_DX, MARK_ROT = 5.1, 0.005, 6.0
 PROG = [(1.8, 2.4, 0.0, 0.2), (5.45, 6.15, 0.2, 0.7)]   # 复跑进度格点亮：(起, 止, 从, 到)
 YAW = float(os.environ.get('YAW', -13))
@@ -272,10 +272,10 @@ def setframe(i):
     s = 0.05; lat = Vector((0.08, 0.04)); tilt = 0.0; vis = False
     if TC-0.35 <= t < TC:
         a_ = (t-(TC-0.35))/0.35; s = 0.05*(1-a_**3)+0.0005; lat = Vector((0.08, 0.04))*(1-a_)**2; vis = True
-    elif TC <= t < TC+0.05: s = 0.0004; vis = True
-    elif TC+0.05 <= t < TC+0.22:
-        b = (t-(TC+0.05))/0.17; s = 0.05*b**1.5+0.0004; lat = Vector((0.10, 0.06))*b**1.6; tilt = 0.35*b; vis = True
-    elif t >= TC+0.22: s = 0.0504; lat = Vector((0.10, 0.06)); tilt = 0.35
+    elif TC <= t < TC+0.13: s = 0.0004; lat = Vector((0.0, 0.0)); vis = True
+    elif TC+0.13 <= t < TC+0.30:
+        b = (t-(TC+0.13))/0.17; s = 0.05*b**1.5+0.0004; lat = Vector((0.10, 0.06))*b**1.6; tilt = 0.35*b; vis = True
+    elif t >= TC+0.30: s = 0.0504; lat = Vector((0.10, 0.06)); tilt = 0.35
     for ob_ in [stamp]+list(stamp.children): ob_.hide_render = not vis
     stamp.location = (MARK_DX+lat.x, -s+push, mz+lat.y); stamp.rotation_euler = (tilt, 0, math.radians(MARK_ROT))
     VAL['zoff'].default_value = paper.location.z
