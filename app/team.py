@@ -2,14 +2,14 @@
 
 Input:  state/team3.json（方案、看板备注、停工、项目经理交接）；tasks 模块（各函数的 tk 参数，读任务状态）
 Output: 方案登记和闸门结论、看板文字、哪些任务先别开
-Pos:    bridge.py 用。结构：主控（唯一跟主人说话）→ 项目经理（出方案、拆小任务、验收）→ 开发（并行，各改各的文件）。看板按任务状态生成，不靠模型回忆
+Pos:    bridge.py 用。结构：主控（唯一跟主人说话）→ 项目经理（出方案、拆任务、验收）→ 开发（并行，各改各的文件）。项目类的活一个版本一个方案、一个合并请求。看板按任务状态生成，不靠模型回忆
 """
 import importlib.util, json, os, re, threading, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 F = os.path.join(ROOT, "state", "team3.json")
 LK = threading.RLock()
-DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 12, "max_reviews": 2, "brief_check": True}
+DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 8, "max_reviews": 2, "brief_check": True}   # max_tasks：一个方案的开发任务数，另加收口、评审两个
 def brief_part(brief, h):
     """任务书里“h:”这一段有没有内容：同一行，或者到下一个小标题之前。"""
     heads = "|".join(BRIEF_HEADS)
@@ -100,8 +100,8 @@ def follow_gate(project, d):
 
 def plan_of(project, name): return ((load().get("plans") or {}).get(project) or {}).get(name)
 
-def save_plan(project, name, body):
-    """[方案] 名称：登记任务单。一行一个小任务，写 - 标题 | 文件 | 依赖。返回出错说明，空串就是登记好了。"""
+def save_plan(project, name, body, tk=None, c=None):
+    """[方案] 名称：登记任务单。一行一个任务，写 - 标题 | 文件 | 依赖。返回出错说明，空串就是登记好了。"""
     name = name.strip()
     if not name: return "[方案] 后面没写名称"
     m = re.search(r"^\s*任务\s*[:：]\s*$", body, re.M)
@@ -109,12 +109,61 @@ def save_plan(project, name, body):
     for l in (body[m.end():] if m else "").split("\n"):
         mm = ITEM.match(l)
         if mm: items.append(mm.group(1).split("|")[0].strip())
-    if not items: return f"方案“{name}”没有任务单：写一行“任务:”，下面一行一个小任务，- 标题 | 文件 | 依赖"
-    if len(items) > DEFAULTS["max_tasks"] * 2: return f"方案“{name}”有 {len(items)} 个任务，太多，拆成几个版本"
+    if not items: return f"方案“{name}”没有任务单：写一行“任务:”，下面一行一个任务，- 标题 | 文件 | 依赖"
     if len(set(items)) != len(items): return f"方案“{name}”里有重名的任务"
+    old = plan_of(project, name) or {}
+    mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD] if tk else []
+    done = {t["title"] for t in mine if t["status"] == "done"}
+    new = [i for i in items if i not in done]
+    top = (c or DEFAULTS)["max_tasks"] + 2
+    if len(new) > top: return f"方案“{name}”没做完的有 {len(new)} 个，太多（开发任务最多 {top - 2} 个，另加收口、评审）：同一类页面、同一套文件、一个接一个的活合成一个任务；还是太多，这个版本先做最要紧的，其余放下一个版本"
+    items += [t["title"] for t in mine if t["title"] not in items]   # 已经派出去的不因为重发任务单丢掉
+    ver = version_of(body) or old.get("version") or ""
     _change(lambda st: st.setdefault("plans", {}).setdefault(project, {}).__setitem__(
-        name, {"items": items, "text": body[:6000], "at": time.time()}))
+        name, {"items": items, "text": body[:6000], "at": time.time(), "version": ver, **({"budget": b} if (b := budget_of(body) or old.get("budget")) else {})}))
     return ""
+
+# ---------- 版本：项目类的活一个版本一个方案、一个合并请求，测试、CI、评审、发版每个版本只做一次（2026-11-25 主人定）----------
+ADHOC = "临时"   # 一个任务就做完的小活：不派收口、评审，自己测、自己建合并请求
+ADHOC_DAY = 3    # 一个项目一天最多几个临时活，再多就该攒成一个版本
+
+def _line(body, name):
+    m = re.search(r"^\s*(?:[-*]\s+)?(?:\*\*)?" + name + r"(?:\*\*)?\s*[:：]\s*(?:\*\*)?\s*(\S.{0,60}?)\s*(?:\*\*)?\s*$", body or "", re.M)
+    return m.group(1) if m else ""
+
+def version_of(body):
+    v = re.split(r"[（(]", _line(body, "版本"), maxsplit=1)[0].strip(" *`")
+    return ADHOC if v.startswith(ADHOC) else v
+
+def budget_of(body):
+    m = re.match(r"\$?\s*(\d+(?:\.\d+)?)", _line(body, "预算"))
+    return float(m.group(1)) if m and float(m.group(1)) > 0 else 0
+
+def plan_open(tk, project, name):
+    """方案还能往里补活：有没做完的、收口还没开工。一天没动静又没有活的不算。"""
+    p = plan_of(project, name) or {}
+    ts = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD]
+    if any(t.get("closing") and t["status"] in ("running", "waiting", "done") for t in ts): return False
+    if not set(p.get("items") or ()) - {t["title"] for t in ts if t["status"] == "done"}: return False
+    return any(t["status"] in tk.ACTIVE + ("pending",) for t in ts) or time.time() - max([p.get("at") or 0] + [t.get("updated") or 0 for t in ts]) < 86400
+
+def plan_check(tk, project, name, body):
+    """登记新方案前：写没写版本、是不是又另起了一个。返回不放行的原因，空串放行。"""
+    name, plans = name.strip(), (load().get("plans") or {}).get(project) or {}
+    if not name or name in plans: return ""   # 重发已有的方案就是往里补
+    ver, why = version_of(body), _line(body, "另开")
+    if not ver: return f"方案“{name}”没写版本：正文里写一行“版本: x.y.z”（没有版本号写“日期-主题”）；一个任务就做完的小活写“版本: {ADHOC}”"
+    if ver == ADHOC:
+        n = sum(1 for l in body.split("\n")[next((i for i, l in enumerate(body.split("\n")) if re.match(r"\s*任务\s*[:：]\s*$", l)), 10**6):] if ITEM.match(l))
+        if n > 1: return f"“版本: {ADHOC}”的方案只装一个任务，这里有 {n} 个：按版本做，写版本号"
+        day = sum(1 for p in plans.values() if p.get("version") == ADHOC and time.time() - (p.get("at") or 0) < 86400)
+        return f"{project} 一天里已经有 {day} 个临时活：攒成一个版本做；真要单独做，写一行“另开: 理由”" if day >= ADHOC_DAY and not why else ""
+    op = sorted((p.get("at") or 0, n) for n, p in plans.items() if p.get("version") != ADHOC and plan_open(tk, project, n))
+    if not op or why: return ""
+    o = op[-1][1]
+    v = plans[o].get("version")
+    return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没收口，同一个项目一次只做一个版本：把这些需求点加进它的任务单，再发一次 [方案] {o}（已经派出去的不用重写）。"
+            f"一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
 
 def _stem(p): return re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/")
 def overlap(a, b):
@@ -137,7 +186,7 @@ def gate(tk, project, d, c):
     if d["title"] not in p["items"]: return f"“{d['title']}”不在方案“{d['plan']}”的任务单里（有：{'、'.join(p['items'])}），标题要一样；要加活先更新方案"
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
-    if len(mine) >= c["max_tasks"] * 2: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口或换一个方案"
+    if len(mine) >= c["max_tasks"] * 3: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口，剩下的放下一个版本"
     if d.get("role") == "评审" and not d.get("review_ok"):   # 一轮全面看、一轮复核必修就够；再多是花钱磨，要人定
         n = sum(t.get("role") == "评审" and t["status"] not in DEAD + ("failed", "lost") for t in mine)
         if n >= c["max_reviews"]: return f"方案“{d['plan']}”已经评审过 {n} 轮，不自动开下一轮：剩下的必修项自己核对修没修好就收，拿不准写 [投递 主控 问题] 请主人定；主人同意再审，派活里加一行“再审: 主人同意”"

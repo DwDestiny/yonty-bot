@@ -20,7 +20,7 @@ SLUG = CFG.get("service_name") or "fcb-" + os.path.basename(ROOT)
 OWNER_NAME = CFG.get("owner_name", "主人")
 T = dict({"enabled": True, "root": "~/work/.bot-tasks", "approval_hours": 24, "heartbeat_min": 30,
           # 资源：任务检查点按同类任务的实际花费估，主控可改，到了交回主控定（不是硬停）；订阅额度用得快先提醒主人，到 quota_pause 暂停
-          "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "seven_day_pace": 1.1}, "quota_pause": 0.95,
+          "budget_default": 20, "budget_factor": 1.5, "quota_alert": {"five_hour": 0.85, "five_hour_pace": 1.5, "seven_day_pace": 1.1, "plan_usd": 30}, "quota_pause": 0.95,
           # 质量：多久没动静算卡住（进程还在吃 CPU 不算）、验证没过最多返工几次
           "stuck_min": 40, "verify_retries": 2, "verify_timeout_min": 20,
           # 等回复的任务最多挡同一件事的排队多久（分钟）：过了让排队的先跑，并提醒主控一次
@@ -93,8 +93,8 @@ def hook_env(owner, private, chat_id, channel="feishu", task_id=None):
                FCB_PRIVATE="1" if private else "0", FCB_CHAT_ID=chat_id, FCB_CHANNEL=channel)
     if not private:   # 非主人私聊：不读不写自动记忆
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    if not owner and os.path.isdir(GIT_HOOKS):
-        # 非主人触发的会话：git 钩子换成实例的 hooks/git（pre-push 只放行 bot/ 分支，其余转给仓库原来的钩子）
+    if os.path.isdir(GIT_HOOKS):
+        # 机器人会话：git 钩子换成实例的 hooks/git（pre-push 查新增内容里的密钥，非主人的还只放行 bot/ 分支，其余转给仓库原来的钩子）
         env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=GIT_HOOKS)
     if task_id is not None:
         env["FCB_TASK_ID"] = str(task_id)
@@ -147,26 +147,30 @@ def update(tid, _force=False, _touch=True, _from=None, **kv):
         fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
         return t
 
-# 三档：1 sonnet medium（sonnet 不用更高的思考档，不如直接换 opus medium）；2 opus medium，大多数难活；3 opus xhigh，前两档解决不了的疑难（max 只在主人点名时用）
+# 三档：1 sonnet medium，全部从这里起步；2 opus medium，验证没过两次或被退回两次才升；3 opus xhigh，前两档解决不了的疑难（max 只在主人点名时用）。风险分只记录，不定档
 TIERS = ({"model": "sonnet", "effort": "medium"}, {"model": "opus", "effort": "medium"}, {"model": "opus", "effort": "xhigh"})
 def next_tier(t):
     """验证没过、认输之后换到哪一档；到顶了返回 None。"""
+    if t.get("model") == "haiku": return TIERS[0]
     if t.get("model") != "opus": return TIERS[1]
     return None if t.get("effort") in ("xhigh", "max") else TIERS[2]
 
 def cap_tier(model, effort):
-    """会话写的模型和思考档收进三档：sonnet 写了 high 以上改成 opus medium；opus 写 high 改成 medium。xhigh、max 是疑难档，照写的。"""
-    if model == "sonnet" and effort in ("high", "xhigh", "max"): return "opus", "medium"
+    """会话写的模型和思考档收进档位：sonnet 最高 high（产品、排查这类要多想的用）；opus 写 high 改成 medium。xhigh、max 是疑难档，照写的。
+    2026-11-25 主人定：没有一样活一定要 Opus，都从 sonnet 起步，验证不过、被退回再升，隐私和密钥靠推送前扫描和最后的评审拦。"""
+    if model == "sonnet" and effort in ("xhigh", "max"): return "sonnet", "high"
     if model == "opus" and effort == "high": return "opus", "medium"
     return model, effort
 
 AUTO_ROLES = ("", "开发")   # 这些角色的模型由服务定：有验证命令、在本机跑的先用 sonnet，验证过不了再换 opus
 def pick_model(role, verify, ex, model="", effort="", forced=False):
     """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
-    除非主人的话派的、写明“主人指定”。没有验证命令或云端跑的没有自动换人的机会，照原来的：写了听写的，没写用角色模板。"""
+    除非主人的话派的、写明“主人指定”。别的活写了听写的、没写用角色模板，但除评审外写 opus 的改成 sonnet high；auto_up 是验证不过、被退回两次可以升档。云端跑的没有自动换人的机会。"""
     if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
-        if not forced: model, effort = cap_tier(model or ((roles().get(role) or {}).get("model") or "" if effort else ""), effort)   # 只写思考档的，按角色的模型算
-        return {"model": model, "effort": effort, "auto_model": False}
+        if not forced:
+            model, effort = cap_tier(model or ((roles().get(role) or {}).get("model") or "" if effort else ""), effort)   # 只写思考档的，按角色的模型算
+            if model == "opus" and role != "评审": model, effort = "sonnet", "high"   # 除评审外不从 opus 起步；要 opus 靠验证不过升档，或主人指定
+        return {"model": model, "effort": effort, "auto_model": False, **({"auto_up": True} if not forced and role != "评审" and ex != "cloud" else {})}
     return dict(TIERS[0], auto_model=True)
 
 def sibling_drop(t, model):
@@ -245,8 +249,8 @@ def agent_publish(t, text):
     repo, b = t["repo"], t["branch"]
     if not git(repo, "remote").stdout.strip(): return f"分支 {b} 已拉回主仓库（没有远端）。"
     if not b.startswith("bot/"): return f"分支 {b} 不是 bot/ 开头，没推。"
-    r = git(repo, "push", "--quiet", "-u", "origin", f"{b}:{b}")
-    if r.returncode: return f"分支没推上去：{r.stderr.strip()[-200:]}"
+    r = git(repo, *(["-c", "core.hooksPath=" + GIT_HOOKS] if os.path.isdir(GIT_HOOKS) else []), "push", "--quiet", "-u", "origin", f"{b}:{b}")   # 带上推送钩子：查密钥
+    if r.returncode: return f"分支没推上去：{r.stderr.strip()[-400:]}"
     if part(t): return f"服务已推送分支 {b}。"
     try:
         tg = t.get("target") or (t["base"].split("/", 1)[1] if (t.get("base") or "").startswith("origin/") else "")
@@ -506,7 +510,19 @@ def spend_add(tid, usd):
     os.makedirs(STORE, exist_ok=True)
     with _Lock(os.path.join(STORE, ".lock")):
         with fsio.opened(os.path.join(STORE, "spend.jsonl")) as f:
-            f.write(json.dumps({"day": bjtime("%Y-%m-%d"), "task": tid, "usd": round(usd, 4)}) + "\n")
+            f.write(json.dumps({"day": bjtime("%Y-%m-%d"), "at": int(time.time()), "task": tid, "usd": round(usd, 4)}) + "\n")
+
+def spent_since(ts):
+    """{任务号: 从 ts 起入账的花费}。一轮跑完才入账，在跑的这一轮不在里面；2026-11-25 之前的记录没有时间，不算。"""
+    out = {}
+    try:
+        with open(os.path.join(STORE, "spend.jsonl")) as f:
+            for l in f:
+                try: r = json.loads(l)
+                except ValueError: continue
+                if (r.get("at") or 0) >= ts: out[r.get("task")] = out.get(r.get("task"), 0) + (r.get("usd") or 0)
+    except FileNotFoundError: pass
+    return out
 
 def spent_today():
     day, total = bjtime("%Y-%m-%d"), 0.0
@@ -633,12 +649,16 @@ def quota_line(q=None):
     return quota_text(q)
 
 def quota_alerts(q=None, now=None):
-    """[(窗口, 用量, 重置时间, 说明)]：5 小时窗口快满了，或 7 天窗口照现在的速度撑不到重置。"""
+    """[(窗口, 用量, 重置时间, 说明)]：5 小时窗口快满了、用得比时间快很多（five_hour_pace），或 7 天窗口照现在的速度撑不到重置。只提醒，不停。"""
     q, now, a, out = q or quota(), now or time.time(), T.get("quota_alert") or {}, []
     for k, w in (q.get("windows") or {}).items():
         u, reset = w.get("utilization") or 0, w.get("resetsAt") or 0
         if k == "five_hour" and u >= a.get("five_hour", 0.85):
             out.append((k, u, reset, f"5 小时额度只剩 {max(0, round((1 - u) * 100))}%"))
+        elif k == "five_hour" and reset > now and u >= 0.25 and a.get("five_hour_pace", 1.5):   # 2026-11-25 主人定：才过 1 小时用了 40% 这种就该提醒。回放 11-21~25 十四个窗口，1.5 响 3 次
+            sec = max(60, WINDOW_S[k] - (reset - min(q.get("at") or now, now)))   # 快照那一刻窗口开了多久
+            if u / (sec / WINDOW_S[k]) >= a.get("five_hour_pace", 1.5) - 1e-9:
+                out.append(("five_hour_pace", u, reset, f"5 小时额度才过 {left_text(sec)}，已经用了 {u:.0%}，照这个速度再过 {left_text(sec * (1 - u) / u)}就用完"))
         if k == "seven_day" and reset > now:
             elapsed = 1 - (reset - now) / WINDOW_S[k]
             if elapsed > 0.05 and u >= 0.3 and u / elapsed >= a.get("seven_day_pace", 1.1):
@@ -911,9 +931,9 @@ def session_cmd(t):
     return cmd
 
 def advisor_env(t):
-    """角色写了“不带顾问: 模型”时，这个模型跑的会话不带顾问工具。换了别的模型（如验证没过换 opus）就带上。
+    """角色写了“不带顾问: 模型”时，这个模型跑的会话不带顾问工具（没写角色的按开发）。换了别的模型（如验证没过换 opus）就带上。
     顾问是全局设置，CLI 只有这个环境变量能按会话关。续跑和压缩都要用同一套，工具变了缓存前缀就变。"""
-    off = roles().get(t.get("role") or "", {}).get("no_advisor") or []
+    off = roles().get(t.get("role") or "开发", {}).get("no_advisor") or []
     return {"CLAUDE_CODE_DISABLE_ADVISOR_TOOL": "1"} if off and (t.get("model") or "") in off else {}
 
 # ---------- 缓存过期前压缩：只给大会话、只在还会接着用时做 ----------
@@ -1831,8 +1851,8 @@ def first_prompt(t, base, forked=False):
 {t['brief']}{t.get('takeover', '')}"""
 
 def part(t):
-    """方案里的小任务（不含收口）：只推分支，不建合并请求。"""
-    return bool(t.get("plan")) and not t.get("closing")
+    """方案里的任务（不含收口、临时活）：只推分支，不建合并请求。"""
+    return bool(t.get("plan")) and not t.get("closing") and not t.get("adhoc")
 
 def mr_note(t, base):
     if agent_of(t).boxed: return "。你在沙箱里，没有远端凭据：不用推送、不用建合并请求，验证过了服务替你做。没提交的改动不算数"
@@ -1847,9 +1867,11 @@ def plan_note(t):
         own = "你做收口：合好上面的分支，解决冲突，跑一次全量测试，只建这一个合并请求。"
     elif t.get("role") == "评审":
         own = "你只评审合好的改动，不改文件，不建合并请求。"
+    elif t.get("adhoc"):
+        own = f"这件小活就你一个人做完：只改这些文件：{'、'.join(t.get('files') or [])}，跑跟改动有关的检查，自己建这一个合并请求。没有收口和评审，任务书写的验收就是全部，不另加检查。"
     else:
         own = (f"你只做“{t['title']}”这一个小任务，只改这些文件：{'、'.join(t.get('files') or [])}。别的任务同时在改别的文件；要动范围外的文件，先用 [提问] 找项目经理。"
-               "只跑跟改动有关的检查，不跑全量测试；提交并推送分支，不建合并请求，收口任务统一建。")
+               "只跑跟改动有关的检查，不跑全量测试；提交并推送分支，不建合并请求，收口任务统一建。任务书写的验收就是全部：不另加检查、评审和复核轮；别的地方有问题，写进交回。")
     return (f"\n这是方案“{t['plan']}”里的一个任务。整份方案（给你看上下文，不是都让你做）：\n{t.get('plan_text') or ''}\n"
             + (f"开工先把这些分支合进来：{'、'.join('git merge --no-edit ' + x for x in br)}。\n" if br else "") + own + "\n")
 
@@ -2034,7 +2056,7 @@ def run(tid):
             if (load(tid) or {}).get("status") == "cancelled": return   # 跑完这一轮之前被取消了
             verdict = handback_verdict(text, "Edit" in (roles().get(load(tid).get("role") or "", {}).get("deny") or []))
             cur = load(tid)
-            can_up, up = cur.get("auto_model") and bool(next_tier(cur)), escalate
+            can_up, up = (cur.get("auto_model") or cur.get("auto_up")) and bool(next_tier(cur)), escalate
             if ag.boxed: can_up, up = True, hand_over   # 便宜的智能体只给一次机会，不过就换 Claude
             if verdict == "failed" and can_up and (cur.get("verify_round") or ag.boxed):   # 便宜模型认输：换贵的再来一次
                 prompt, resume = up(tid, "验证没过、它修不了" if cur.get("verify_round") else "它按失败交回", cur.get("verify_out", ""), text), False

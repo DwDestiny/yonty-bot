@@ -28,7 +28,9 @@
     "budget_factor": 1.5,
     "quota_alert": {
       "five_hour": 0.85,
-      "seven_day_pace": 1.1
+      "five_hour_pace": 1.5,
+      "seven_day_pace": 1.1,
+      "plan_usd": 30
     },
     "quota_pause": 0.95,
     "sibling_warm_min": 55,

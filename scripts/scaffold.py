@@ -68,7 +68,7 @@ def build_release():
     os.makedirs(os.path.join(d, "hooks", "git"))
     for f in CODE: shutil.copy(os.path.join(T, f), os.path.join(d, f))
     for f in HOOKS: shutil.copy(os.path.join(T, "hooks", f), os.path.join(d, "hooks", f))
-    # git 钩子分发器：非主人触发的会话把 core.hooksPath 指到 hooks/git，pre-push 只放行 bot/ 分支
+    # git 钩子分发器：机器人会话把 core.hooksPath 指到 hooks/git，pre-push 查密钥，非主人触发的还只放行 bot/ 分支
     gh = os.path.join(d, "hooks", "git")
     shutil.copy(os.path.join(T, "hooks", "git", "fcb-githook"), os.path.join(gh, "fcb-githook"))
     os.chmod(os.path.join(gh, "fcb-githook"), 0o755)

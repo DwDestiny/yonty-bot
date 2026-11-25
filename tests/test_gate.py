@@ -373,10 +373,11 @@ class LoopTest(Base):
         self.assertEqual((len(self.t.inbox_items(a['id'])), self.t.load(a['id']).get('auto_follow', 0)), (14, 0))
 
     def test_second_quality_rework_moves_up_a_tier(self):
-        a = self.plan('样片', turn=1, model='sonnet', effort='medium', auto_model=True)
-        for i, why in enumerate(('原因: 需求变', '质感没过', '原因: 做错')):
-            self.t.update(a['id'], _force=True, status='done'); self.pm(f"[任务指令] {self.t.ref(a)} {why}\n再改", a, f'r{i}')
-            self.assertEqual(bool(self.t.load(a['id']).get('bump')), i == 2, why)
+        for n, kw in (('样片', {'auto_model': True}), ('规划', {'auto_up': True}), ('点名', {})):   # 主人点名模型的不升
+            a = self.plan(n, turn=1, model='sonnet', effort='medium', **kw)
+            for i, why in enumerate(('原因: 需求变', '质感没过', '原因: 做错')):
+                self.t.update(a['id'], _force=True, status='done'); self.pm(f"[任务指令] {self.t.ref(a)} {why}\n再改", a, f'{n}{i}')
+                self.assertEqual(bool(self.t.load(a['id']).get('bump')), i == 2 and bool(kw), n + why)
 
     def test_direction_task_is_not_polished(self):
         a = self.plan('样片', turn=1, draft=True, auto_model=False)
@@ -516,7 +517,7 @@ class LoopTest(Base):
 
     def test_effort_only_is_capped(self):
         with mock.patch.object(self.t, 'roles', lambda: {'验收': {'model': 'sonnet'}}):
-            self.assertEqual(self.t.pick_model('验收', '', '', '', 'high')['model'], 'opus')
+            m = self.t.pick_model('验收', '', '', '', 'xhigh'); self.assertEqual((m['model'], m['effort']), ('sonnet', 'high'))
 
 
 class FakeLark:
