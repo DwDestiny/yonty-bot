@@ -172,6 +172,12 @@ class GateTest(Base):
         self.layers(['[转交] proj 做'], [rv('评四'), ok]); self.say('开工')
         self.assertEqual([t['title'] for t in self.new()], ['评一', '评二', '评三', '评四'])
 
+    def test_redo_of_failed_task_keeps_written_model(self):
+        b = block(self.e.repo, '甲', 'src/a').replace('角色: 开发', '角色: 开发\n模型: opus')
+        self.layers(['[转交] proj 做'], [PLAN + b]); self.say('开工'); t = self.by('甲'); self.assertEqual(t['model'], 'sonnet')
+        self.t.update(t['id'], _force=True, status='failed')
+        self.layers(['[转交] proj 做'], [b]); self.say('重做'); self.assertEqual(self.by('甲')['model'], 'opus')
+
     def test_coworker_still_needs_approval(self):
         self.layers([block(self.e.repo, '甲', 'src/a')], [])
         self.say('帮我改', sender=A.MATE, chat='oc_mate')

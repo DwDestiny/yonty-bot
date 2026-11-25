@@ -409,13 +409,17 @@ def inbox_add(tid, who, owner, text, kind="指令", src=None, upper=False, idem=
                                      "src": (src or {}).get("ref", "")}, **({"idem": idem} if idem else {})), ensure_ascii=False) + "\n")
     return n
 
+def counts(x):
+    """这条追加要不要计数：会让任务多跑一轮的才算（没开工、排着队的补充不算）。"""
+    return 0 if x["status"] == "approved" else 1
+
 def steer_block(x, body, auto_max):
     """上级替派活人给任务转指令前的检查（bridge.relay_followups 和投递共用）。返回没转的原因，能转返回空串。"""
     n = ref(x)
     if not body: return f"给 {n} 的指令是空的，没转。"
     raise_budget = bool(BUDGET_RE.search(body))
     if x.get("checkpoint") and not raise_budget: return f"{n} 停在检查点，要接着干请写“预算加到 X”，没转。"
-    if x.get("auto_follow", 0) >= auto_max and not raise_budget: return f"{n} 已经自动追加 {auto_max} 次了，下一步请人来定：{body}"
+    if x["status"] != "approved" and x.get("auto_follow", 0) >= auto_max and not raise_budget: return f"{n} 已经自动追加 {auto_max} 次了，下一步请人来定：{body}"
     if x["status"] in ("pending", "cancelled", "rejected", "expired"): return f"{n} {LABEL.get(x['status'])}，没转。"
     return ""
 
@@ -803,6 +807,12 @@ def sibling_head(t):
     s = sibling(t)
     return (s.get("heads") or {}).get(t.get("model") or "") or {}
 
+def committed(t):
+    """分支上有自己的提交（产品、需求交文档）。看不出来的按没有。"""
+    if not os.path.isdir(t.get("worktree", "")): return False
+    if t.get("clone"): return bool(clone_git(t, "diff", "--name-only", t["base_sha"] + "...HEAD").strip())
+    return bool(git(t["worktree"], "diff", "--name-only", (t.get("base") or "HEAD") + "...HEAD").stdout.strip())
+
 def role_check(t):
     """角色禁了改文件的工具，但 Bash 还能写。干完看一眼分支：评审不该有任何改动，产品和需求只该新增文件。"""
     deny = roles().get(t.get("role") or "", {}).get("deny") or []
@@ -915,14 +925,16 @@ def parse_directive(text):
 
 DISPATCH_END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|/?方案|停|继续|不是我的|不回)(?:\s[^\]]*)?\]")
 
+SWALLOWED = re.compile(r"^\s*\[(?:任务指令|处置|改验证|取消任务|改依赖|挂起)\]\s*[^\s#:：]+#\d+")   # 没写 [/派活] 时，后面的标记会被当成任务书的字
+
 def parse_directives(text):
     """一条回复里的全部 [派活] 块。每块到下一个标记行或 [/派活] 为止。返回 (去掉块的回复, [字段 dict])。"""
-    keep, raw, cur = [], [], None
+    keep, raw, cur, ended = [], [], None, set()
     for l in (text or "").split("\n"):
         if re.match(r"^\s*\[派活\]\s*$", l): cur = []; raw.append(cur); continue
         if cur is not None and DISPATCH_END.match(l):
+            if re.match(r"^\s*\[/派活\]\s*$", l): ended.add(len(raw) - 1); cur = None; continue
             cur = None
-            if re.match(r"^\s*\[/派活\]\s*$", l): continue
         (cur if cur is not None else keep).append(l)
     if not raw: return text, []
     fence = re.compile(r"^\s*(`{3,}|~{3,})\w*\s*$")
@@ -931,7 +943,7 @@ def parse_directives(text):
         for i in range(len(hl) - 1, -1, -1):
             if fence.match(hl[i]): hl.pop(i); break
     while hl and fence.match(hl[-1]) and len(hl) > 1 and fence.match(hl[-2]): hl.pop(); hl.pop()
-    return "\n".join(hl).rstrip(), [_directive("\n".join(b)) for b in raw]
+    return "\n".join(hl).rstrip(), [dict(_directive("\n".join(b)), swallowed="" if i in ended else next((m.group(0).strip() for l in b for m in [SWALLOWED.match(l)] if m), "")) for i, b in enumerate(raw)]
 
 def _directive(block):
     block = "\n" + block
@@ -961,7 +973,7 @@ def _directive(block):
     bm2 = re.match(r"\s*(\d+(?:\.\d+)?)\s*[（(,，:：]?\s*(.*?)[）)]?\s*$", bv)
     budget = float(bm2.group(1)) if bm2 and float(bm2.group(1)) > 0 else 0
     lst = lambda v: [x.strip() for x in re.split(r"[,，、;；]+", v) if x.strip() and x.strip() not in ("无", "没有", "-")]
-    return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "closing": field("收口") == "是", "review_ok": "主人同意" in field("再审"),
+    return {"plan": field("方案"), "files": [x for v in lst(field("文件")) for x in v.split()], "deps": lst(field("依赖")), "deps_raw": field("依赖"), "draft": "看方向" in field("交付"), "closing": field("收口") == "是", "review_ok": "主人同意" in field("再审"),
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "agent": agents.ALIAS.get(field("智能体").lower(), ""), "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
@@ -974,6 +986,20 @@ def model_label(t):
     return s + ("，云端执行" if t.get("exec") == "cloud" else "")
 
 # ---------- 后台运行 ----------
+def stray_scopes():
+    """任务里起的 Chrome 会经桌面总线把主进程挪到自己的 scope，取消任务停不掉它。找出工作目录在任务工作树里、任务已经不在跑的。
+    不在任务环境里关掉总线：任务要用 systemd-run --user。返回 [(scope, 任务号)]。"""
+    root, out = os.path.realpath(TASK_ROOT), []
+    r = subprocess.run(["systemctl", "--user", "list-units", "--plain", "--no-legend", "--type=scope", "app-com.google.Chrome-*.scope", "app-chromium-*.scope"], capture_output=True, text=True, timeout=20)
+    for l in r.stdout.splitlines():
+        m = re.match(r"(app-\S+-(\d+)\.scope)\s", l + " ")
+        if not m: continue
+        try: cwd = os.readlink(f"/proc/{m.group(2)}/cwd").replace(" (deleted)", "")
+        except OSError: continue
+        n = re.match(re.escape(root) + r"/(\d+)(?:/|$)", cwd)
+        if n and (load(int(n.group(1))) or {}).get("status") not in ("running", "waiting"): out.append((m.group(1), int(n.group(1))))
+    return out
+
 def unit_name(t): return f"{SLUG}-task-{t['id']}-{t['turn']}"
 
 def launch(tid):
@@ -1805,6 +1831,11 @@ def run(tid):
         else:
             items = inbox_take(tid)
             prompt, resume = (format_inbox(items) if items else "[追加指令] 继续，把没做完的做完。"), True
+            if t.get("bump") and next_tier(t):   # 验证命令过了、上级看了还是不行：换高一档接手
+                why, fork = t["bump"], ""
+                last = next((e["text"] for e in reversed(events(tid)) if e["kind"] == "done"), "")
+                prompt, resume = escalate(tid, why, "", last) + "\n\n" + prompt, False
+                update(tid, bump=None, redone=0)
         late = 0
         while True:
             t = load(tid)
@@ -1928,7 +1959,7 @@ def run(tid):
             else:
                 t = load(tid)
                 readonly = "Edit" in (roles().get(t.get("role") or "", {}).get("deny") or [])
-                if readonly and t.get("verify"):   # 只读角色不改代码，验证命令只会在基线上跑，基线已知挂的测试会让闸门一挂到底
+                if readonly and t.get("verify") and not committed(t):   # 只读角色不改代码，验证命令只会在基线上跑，基线已知挂的测试会让闸门一挂到底
                     text = f"结论：只读角色，服务没跑验证闸门（{t['verify']}）\n\n{text}"
                 elif t.get("verify"):   # 验证闸门：服务自己跑派活时定的命令，任务说“做完了”不算数
                     bad = accept_tampered(t)

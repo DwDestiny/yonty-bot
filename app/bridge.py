@@ -1320,8 +1320,10 @@ def dispatch_one(ev, d):
     if ex == "cloud":
         why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
-    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], d.get("forced") and owner)
+    redo = bool(d.get("plan") and d["model"]) and any(x["status"] == "failed" and x.get("plan") == d["plan"] and x["title"] == d["title"] and x.get("project") == ev.get("pm") for x in tasks.all_tasks())
+    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], (d.get("forced") or redo) and owner)   # 上一个没达成、重派的：听项目经理写的模型
     if pm["auto_model"]: pm = task_judge(d, pm)
+    if d["model"] and pm["model"] != d["model"]: cloud_note += f"（写的模型是 {d['model']}，实际用 {pm['model']}：这类活由服务定，验证或返工两次没过自动升档。）"
     ag, ag_why = tasks.agents.pick(tasks._me(), dict(d, repo=repo), pm, owner, ex)
     pm = dict(pm, **ag)
     if d.get("agent") == "zcode" and not ag: cloud_note += f"（ZCode 接不了：{ag_why}，改用 Claude。）"
@@ -1330,7 +1332,7 @@ def dispatch_one(ev, d):
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
                      status="approved" if owner else "pending", **({"idem": idem} if idem else {}),
-                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:3000]}
+                     **({"plan": d["plan"], "files": d["files"], "deps": d["deps"], "closing": d["closing"], "draft": d.get("draft", False), "plan_text": ((team.plan_of(ev["pm"], d["plan"]) or {}).get("text") or "")[:3000]}
                         if STRICT and ev.get("pm") else {}),
                      requester={"channel": ev["channel"], "id": ev["sender_id"], "name": name, "owner": owner},
                      origin={"channel": ev["channel"], "chat_id": ev["chat_id"], "chat_type": ev["chat_type"],
@@ -1954,7 +1956,7 @@ def follow_cmds(ev, text, errs, made, idem):
                else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
         if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
         tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
-        tasks.update(x["id"], hop=max(x.get("hop") or 0, (ev.get("hop") or 0) + 1), auto_follow=x.get("auto_follow", 0) + 1,
+        tasks.update(x["id"], hop=max(x.get("hop") or 0, (ev.get("hop") or 0) + 1), auto_follow=x.get("auto_follow", 0) + tasks.counts(x),
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
         tasks.decide("接着派", task=n, why="追加指令：" + short(body, 200)); made.append(f"已给 {n} 追加要求")
         return ""
@@ -2168,17 +2170,34 @@ def delivery_tick():
             groups.setdefault(("chat", fr["ref"], to, dest), []).append(r)
         elif to == "主控":
             k = base_key(fr.get("key")) or ("p2p:" + OWNER_OPEN_ID)
+            if fyi(r, k): groups.setdefault(("fyi", fr["ref"], k), []).append(r); continue
             groups.setdefault(("sess", fr["ref"], k), []).append(r)
         elif to == "项目经理":
             k = pm_key(r["to"]["project"], base_key(fr.get("key")))
             groups.setdefault(("sess", fr["ref"], k), []).append(r)
+    for g in [g for g in groups if g[0] == "fyi" and ("sess",) + g[1:] in groups]: groups[("sess",) + g[1:]] += groups.pop(g)   # 反正要叫醒：一起交给主控，由它一次说完
     st = dl.limits(tk)
     for g, rs in groups.items():
         r, fr = rs[0], rs[0]["from"]
         gk = "|".join(map(str, g))
         if g[0] != "one" and now - (st.get("merge") or {}).get(gk, 0) < c["merge_s"]: continue   # 等着合并
         try:
-            if g[0] == "sess":
+            if g[0] == "fyi":   # 普通进展：服务直接发主人私聊，不叫醒主控（飞书任务由任务状态同步）
+                say = [x for x in rs if not x.get("auto")] or rs
+                for x in rs:
+                    if x not in say: dl.update(tk, x["id"], status="sent")
+                if not dl.owner_room(tk, now):
+                    for x in say: dl.digest_add(tk, x); dl.update(tk, x["id"], status="digest")
+                    continue
+                key = f"dl{r['id']}-{int(r['ts'])}"
+                if owner_post("feishu", f"{fr.get('project') or ''} 进展：" + "\n".join(x["full"] for x in say), key)[1] is False: not_sent(say, now, "发不出去"); continue
+                dl.owner_sent(tk, now)
+                for x in say: dl.update(tk, x["id"], status="sent", sent_key=key)
+                for x in say:
+                    t = tasks.load(x["about"]) if type(x.get("about")) is int else None
+                    if FT and t: FT.note(t, x["full"])
+                tasks.decide("进展直送", sender=fr["ref"], why=short(say[0]["full"], 120))
+            elif g[0] == "sess":
                 for x in rs: dl.update(tk, x["id"], status="handing")   # 先落盘：会话那一轮处理完才标已送
                 DL_INFLIGHT.update(x["id"] for x in rs)
                 enqueue(g[2], {"deliver": r, "batch": rs, "key": g[2]})
@@ -2231,12 +2250,27 @@ def delivery_tick():
             dl.digest_back(tk, dg)   # 没发出去：放回去，下一拍再发
         else: dl.owner_sent(tk, now)
 
+SCOPE_AT = [0]
+def scope_tick():
+    """任务结束后还挂着的 Chrome：每分钟收一次。"""
+    if sys.platform != "linux" or time.time() - SCOPE_AT[0] < 60: return
+    SCOPE_AT[0] = time.time()
+    for scope, n in tasks.stray_scopes():
+        subprocess.run(["systemctl", "--user", "stop", scope], capture_output=True, timeout=30)
+        tasks.decide("收掉残留进程", task=n, why=scope)
+
+FYI_ASK = re.compile(r"请|要你|要主控|[?？]|[活令]没[派转成]|没派成|等.{0,6}(?:定|拍板|答复)")
+def fyi(r, k):
+    """项目经理报给主控、不用谁办事的普通进展：主人私聊的项目才算；有一点像要人办事的照旧叫醒主控，宁可多叫。"""
+    return (STRICT and r["kind"] in ("节点", "进展") and not r.get("need") and r["from"].get("type") == "pm" and k.startswith("p2p:") and bool(r["from"].get("owner"))
+            and bool(r.get("about")) and not FYI_ASK.search(r.get("full") or ""))
+
 def v2_tick():
     try:
         os.makedirs(os.path.join(ROOT, "state"), exist_ok=True)
         tasks.fsio.write(os.path.join(ROOT, "state", "heartbeat"), str(int(time.time())))   # 看门狗读它
     except OSError: pass
-    for name, fn in (("service acts", service_unfinished), ("freeze", freeze_tick), ("delivery", delivery_tick),
+    for name, fn in (("service acts", service_unfinished), ("freeze", freeze_tick), ("scopes", scope_tick), ("delivery", delivery_tick),
                      ("devices", lambda: devices.tick(lambda tid, m: tasks.inbox_add(tid, "服务", False, m, kind="留言"))),
                      ("schedules", schedules_tick), ("stall", stall_tick), ("retro", retro_tick)):
         try: fn()
@@ -2380,9 +2414,10 @@ def v2_command(ev, text, owner):
 # ---------- 任务回报交给主控：后台任务的完成、提问、失败先进派活的那个会话，主控自己收尾，再对人汇报 ----------
 RELAY_ON = tasks.T.get("relay", True)
 OVERDUE = ("overdue", "overdue2")   # 跑太久，没停，等上级处置：先项目经理，没动静再主控
+NOT_REDO = re.compile(r"^\s*原因\s*[:：]\s*(?:任务书漏|评审必修|CI没过|环境|需求变|下一步)", re.M)   # 写了这些不算没做好；没写原因的按没做好算
 RELAY_KINDS = ("question", "done", "failed", "lost", "blocked", "nudge") + OVERDUE
 RELAY_HEAD = {"done": "完成", "question": "有提问", "failed": "失败", "lost": "中断", "blocked": "上游没成", "nudge": "要处理", "overdue": "超时，等处置", "overdue2": "超时，等处置"}
-RELAY_MAX = 3                     # 每个任务主控最多自动追加几次指令，超了交给人
+RELAY_MAX = int((CFG.get("tasks") or {}).get("relay_max") or 10)   # 防没人看着时智能体之间无限返工：每个任务最多自动多跑这么多轮，主人说句话就重新数
 # [任务指令] 短名#N 内容：从这一行起，取到下一个 [任务指令]、[派活]、[不回]、[/任务指令] 或回复结束，整段原样转。
 # 冒号后面换行也行。给人看的话写在指令前面；非要写在后面，就先单独一行 [/任务指令] 收尾。[派活] 起到结尾都是派活块，不拆。
 TASKCMD_HEAD = re.compile(r"^\s*\[任务指令\]\s*([^\s#:：]*#\d+)\s*[:：]?[ \t]*(.*)$")
@@ -2777,12 +2812,19 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm=""):
             except Exception: log.exception("cap notice failed")
         if why and "已经自动追加" in why and x["status"] == "done" and x.get("plan") and not cli: judge_unmet(x, who or "主控", "还要它接着做，自动追加到上限了：" + short(body, 150))
         if why: return f"（{why}）"
+        redo = x["status"] == "done" and not NOT_REDO.search(body) and not tasks.BUDGET_RE.search(body) and not cli
+        if pm and redo and x.get("draft") and x.get("redone"):
+            return f"（{n} 写了“交付: 看方向”，已经退过一次，不再磨：现在的样子用 [投递 主控 完成] 交给主人挑，毛病照实写。）"
+        bump = {}
+        if redo:
+            bump["redone"] = (x.get("redone") or 0) + 1
+            if bump["redone"] >= 2 and x.get("auto_model") and tasks.next_tier(x) and not x.get("agent"): bump["bump"] = f"上级看过结果退回 {bump['redone']} 次"
         again = team.opened_on(tasks._me(), x, tasks.all_tasks()) if x["status"] == "done" and not cli else []
         raise_budget = bool(tasks.BUDGET_RE.search(body))
         tasks.inbox_add(tid, who or f"主控（替{t['requester']['name']}）", owner, body, upper=True, idem=key)
         close_requests(dict(relay_ev(t), **({"sender_id": ""} if cli else {})), x)   # 命令行投递叫起来的那一轮不算人回了
         if hop is not None: tasks.update(tid, _touch=False, hop=max(x.get("hop") or 0, hop + 1))   # 投递轮里转的指令也是一跳
-        tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else 1),
+        tasks.update(tid, auto_follow=x.get("auto_follow", 0) + (0 if raise_budget else tasks.counts(x)), **bump,
                      **({} if x["status"] in ("running", "approved") else {"status": "approved"}))
         log.info("task %s auto follow-up from relay", n)
         for y in again: tasks.event(y["id"], "nudge", f"它依赖的 {n} 又叫回去接着干了，它已经{'在跑' if y['status'] == 'running' else '停在提问'}。停在提问的要它等，写 [改依赖] 或 [挂起]；在跑的先看有没有受影响。")
@@ -3194,6 +3236,20 @@ def ftask_meta(ts):
     return {"start": start, "end": end, "desc": tasks.gate.SECRET_RE.sub(r"\1***", desc),
             "custom": {"项目": t0.get("project") or "", "模型": "、".join(models), "花费（美元当量）": float(cost), "用时（分钟）": float(mins_), "任务数": f"{sum(t['status'] == 'done' for t in ts)}/{len(ts)}", "合并请求": " ".join(mrs[:5])}}
 
+def ftask_plan(ts):
+    """这一批的全部任务：[(标题, 状态, 短名#N)]。按方案的任务单来，没派的也列；同标题取最新一个。"""
+    t0 = ts[0]
+    if not t0.get("plan"): return []
+    items = list((team.plan_of(t0.get("project"), t0["plan"]) or {}).get("items") or [])
+    by = {t["title"]: t for t in sorted((x for x in tasks.all_tasks() if x.get("plan") == t0["plan"] and x.get("project") == t0.get("project")), key=lambda x: x["id"])}
+    def state(t):
+        if not t: return "未派"
+        s = t["status"]
+        if t.get("held") and s in tasks.ACTIVE: return "停工"
+        if s == "done": return "完成" if tasks.accepted(t) else "待验收"
+        return {"running": "进行中", "waiting": "等答复", "approved": "排队", "pending": "排队", "failed": "没做成", "lost": "没做成"}.get(s, "已取消")
+    return [(i, state(by.get(i)), tasks.ref(by[i]) if i in by else "") for i in items + [k for k in by if k not in items]]
+
 BOARD = None
 def board_rows():
     """仪表盘每个任务一行；已结束又没变的用缓存，不反复读事件。"""
@@ -3228,7 +3284,7 @@ def board_tick():
 def ftask_tick():
     board_tick()
     if FT: FT.tick(tasks.all_tasks(), lambda t: tasks.gate_text(t) or tasks.LABEL.get(t["status"], t["status"]), tasks.ref, ftask_result, ftask_unplanned,
-                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta)
+                   owner_dm_task, ftask_text, lambda t: [e["text"] for e in tasks.events(t["id"]) if e["kind"] == "progress"], ftask_meta, ftask_plan)
 
 def ftask_loop(stopping):
     """单独一个线程写飞书：网络慢不拖住任务调度。"""
