@@ -1,6 +1,6 @@
 # 安全政策 · Security Policy
 
-> **English summary.** Only the latest release is supported. Do not report vulnerabilities in public issues. Use GitHub's private vulnerability reporting: [Report a vulnerability](https://github.com/DwDestiny/yonty-bot/security/advisories/new). If that form is not available, open an issue that only asks for a private channel, with no details. In scope: identity checks, hooks, privacy boundary, sandbox scope and token handling. See the threat model in [docs/boundary.md](docs/boundary.md) (Chinese). Never include real tokens, IDs or chat content.
+> **English summary.** Only the latest release is supported. Do not report vulnerabilities in public issues. Use GitHub's private vulnerability reporting: [Report a vulnerability](https://github.com/DwDestiny/yonty-bot/security/advisories/new). In scope: identity checks, hooks, privacy boundary, sandbox scope and token handling. See the threat model in [docs/boundary.md](docs/boundary.md) (Chinese). Never include real tokens, IDs or chat content.
 
 ## 支持的版本
 
@@ -20,10 +20,6 @@
    - 最短的复现步骤，用占位数据
    - 造成什么后果，有没有临时的规避办法
 3. 后续在同一份报告里沟通。公开前请先和维护者商量。
-
-> **注意**：2026-11-25 查询时，本仓库的私密漏洞报告还没有打开。它只能由仓库管理员打开，位置是仓库 Settings → Advanced Security → Private vulnerability reporting → Enable。
->
-> 如果你看不到 Report a vulnerability，请开一个议题，只写“需要私下报告安全问题”，不写任何细节，等维护者给出私密渠道。
 
 请不要贴真实的令牌、密钥、用户或群 ID、聊天内容、内网地址。日志和截图要先打码。如果令牌已经泄露，先作废它。
 

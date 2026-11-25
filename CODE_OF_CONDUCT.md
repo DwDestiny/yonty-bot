@@ -1,8 +1,8 @@
-> **English summary.** This project uses the Contributor Covenant 2.1, official Simplified Chinese translation. The [English text](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html) is available online. To report privately to the maintainers, use the [GitHub private report form](https://github.com/DwDestiny/yonty-bot/security/advisories/new) and start the title with "Code of Conduct". If the form is not available, or the report is about a maintainer, use [GitHub's Report abuse](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam), which goes to GitHub.
+> **English summary.** This project uses the Contributor Covenant 2.1, official Simplified Chinese translation. The [English text](https://www.contributor-covenant.org/version/2/1/code_of_conduct.html) is available online. To report privately to the maintainers, use the [GitHub private report form](https://github.com/DwDestiny/yonty-bot/security/advisories/new) and start the title with "Code of Conduct". If the report is about a maintainer, you can use [GitHub's Report abuse](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam), which goes to GitHub.
 >
 > **来源**：[Contributor Covenant 2.1 简体中文官方译文](https://www.contributor-covenant.org/zh-cn/version/2/1/code_of_conduct/)，许可 [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)。正文只改了一处：把联系方式填成 GitHub 私密报告表单。本段说明是本仓库加的。
 >
-> **怎么举报**：用[私密报告表单](https://github.com/DwDestiny/yonty-bot/security/advisories/new)，标题以“行为准则”开头，维护者能看到，内容不公开。2026-11-25 查询时这个表单还没有打开，要由仓库管理员打开，见 [SECURITY.md](SECURITY.md)。表单用不了，或者要举报的就是维护者，请用 [GitHub 的 Report abuse](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam)，它由 GitHub 官方处理，不经过维护者。不要在公开议题里写举报内容。
+> **怎么举报**：用[私密报告表单](https://github.com/DwDestiny/yonty-bot/security/advisories/new)，标题以“行为准则”开头，维护者能看到，内容不公开。如果要举报的就是维护者，也可以用 [GitHub 的 Report abuse](https://docs.github.com/en/communities/maintaining-your-safety-on-github/reporting-abuse-or-spam)，它由 GitHub 官方处理，不经过维护者。不要在公开议题里写举报内容。
 
 # 贡献者公约
 
