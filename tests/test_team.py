@@ -16,7 +16,7 @@ def block(repo, title, files='', deps='', closing=False, plan='整改', brief='�
     return (f"[派活]\n仓库: {repo}\n方案: {plan}\n标题: {title}\n" + (f"文件: {files}\n" if files else '') + (f"依赖: {deps}\n" if deps else '')
             + ("收口: 是\n" if closing else '') + f"角色: 开发\n验证: true\n任务书:\n{brief}\n[/派活]\n")
 
-PLAN = "[方案] 整改\n先定底座\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 丙 | src/c | 甲\n- 收口 | | 甲、乙、丙\n[/方案]\n"
+PLAN = "[方案] 整改\n版本: 1.0\n先定底座\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 丙 | src/c | 甲\n- 收口 | | 甲、乙、丙\n[/方案]\n"
 
 
 class Base(unittest.TestCase):
@@ -91,7 +91,7 @@ class ReplayTest(Base):
         self.assertEqual(r.estimate(t, hist, c)[0], 7 * r.GB)
 
     def test_closing_waits_for_undeclared_and_review_after(self):
-        pl = "[方案] 整改\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 收口 | | 甲\n- 评审 | | 收口\n"
+        pl = "[方案] 整改\n版本: 1.0\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 收口 | | 甲\n- 评审 | | 收口\n"
         rv = block(self.e.repo, '评审', deps='收口').replace('角色: 开发', '角色: 评审')
         self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/b') + block(self.e.repo, '收口', deps='甲', closing=True) + rv])
         self.say('开工'); self.e.tick()
@@ -110,12 +110,12 @@ class ReplayTest(Base):
 
     def test_no_circular_wait(self):
         """甲依赖丙，丙依赖乙，乙跟甲改同一块：乙先开，不互相等。"""
-        pl = "[方案] 整改\n任务:\n- 甲 | src/a | 丙\n- 乙 | src/a |\n- 丙 | src/c | 乙\n"
+        pl = "[方案] 整改\n版本: 1.0\n任务:\n- 甲 | src/a | 丙\n- 乙 | src/a |\n- 丙 | src/c | 乙\n"
         self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a', '丙') + block(self.e.repo, '丙', 'src/c', '乙') + block(self.e.repo, '乙', 'src/a')])
         self.say('开工'); self.e.tick(); self.assertEqual(self.by('乙')['status'], 'running')
 
     def test_same_files_wait(self):
-        pl = "[方案] 整改\n任务:\n- 甲 | src/a |\n- 乙 | src/a/x.ts |\n"
+        pl = "[方案] 整改\n版本: 1.0\n任务:\n- 甲 | src/a |\n- 乙 | src/a/x.ts |\n"
         self.layers(['[转交] proj 做'], [pl + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/a/x.ts')])
         self.say('开工'); self.e.tick()
         self.assertEqual((self.by('甲')['status'], self.by('乙')['status']), ('running', 'approved'))
@@ -159,7 +159,7 @@ class GateTest(Base):
 
     def test_third_review_needs_owner(self):
         """评审一个方案最多两轮：取消的、失败的不算；第三轮退回，写了主人同意才放行。"""
-        pl = "[方案] 整改\n任务:\n- 评一 | |\n- 评二 | |\n- 评三 | |\n- 评四 | |\n"
+        pl = "[方案] 整改\n版本: 1.0\n任务:\n- 评一 | |\n- 评二 | |\n- 评三 | |\n- 评四 | |\n"
         rv = lambda x: block(self.e.repo, x).replace('角色: 开发', '角色: 评审')
         self.layers(['[转交] proj 做'], [pl + rv('评一') + rv('评二') + rv('评三'), '[不回]'])
         self.say('开工')
@@ -269,7 +269,7 @@ class BriefTest(Base):
 
 class FollowPlanTest(Base):
     """主人 2026-11-24 同意：主控办完项目经理请办的事，项目经理按主人交代过的方案接着派。三个条件：主人私聊交代、方案已登记、任务在方案里列明。"""
-    P2 = '[方案] 发版\n任务:\n- 打包 | src/p |\n- 发 stable | src/s |\n[/方案]\n'
+    P2 = '[方案] 发版\n版本: 1.1\n另开: 测试用\n任务:\n- 打包 | src/p |\n- 发 stable | src/s |\n[/方案]\n'
     def start(self, ctrl, pm, plan=None):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
         t = self.by('甲'); self.t.update(t['id'], status='done'); self.t.event(t['id'], 'done', '结论：PASS')
@@ -304,7 +304,7 @@ class FollowPlanTest(Base):
 
     def test_tonight_replay(self):
         """2026-11-24 那一晚：回报轮登记下一阶段、请主控合并；主控转回来，接着派；再请主控部署，再转回来，全程主人没说话。"""
-        pl = '[方案] 预发\n任务:\n- 打包 | src/p |\n- 实测 | src/q | 打包\n[/方案]\n'
+        pl = '[方案] 预发\n版本: 1.2\n另开: 测试\n任务:\n- 打包 | src/p |\n- 实测 | src/q | 打包\n[/方案]\n'
         rel = lambda x: self.rel(x).replace('方案: 发版', '方案: 预发').replace('src/p', 'src/p' if x == '打包' else 'src/q')
         self.start(['[转交] proj：合好了', '[转交] proj 部署好了'], [rel('打包') + '[/派活]\n[投递 主控 节点]\n请部署', rel('实测')], plan=pl)
         for _ in range(4):

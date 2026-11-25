@@ -105,7 +105,7 @@ class AgentTest(unittest.TestCase):
         self.assertEqual(f(), 'zcode')
         for k in ({'agent': 'claude'}, {'verify': ''}, {'role': '评审'}, {'accept': True}, {'repo': '/x'}, {'title': '改登录'}, {'files': ['a.vue']}):
             self.assertIsNone(f(**k), k)
-        self.assertIsNone(f(owner=False)); self.assertIsNone(f(pm=dict(pm, auto_model=False))); self.assertIsNone(f(pm=dict(pm, jev={'risk': 0.8})))
+        self.assertIsNone(f(owner=False)); self.assertIsNone(f(pm=dict(pm, auto_model=False))); self.assertIsNone(f(pm=dict(pm, jev={'risk': 0.8}))); self.assertIsNone(f(pm=dict(pm, jev={'risk': 0.35})))   # 以前 0.35 起用 opus、不给 ZCode，这条线没动
         self.assertEqual(f(title='改登录', agent='zcode'), 'zcode', '点名了就不按关键词挡')
         self.e.task(agent_first='zcode', status='cancelled'); self.e.task(agent_first='zcode', agent_out='infra', status='done')
         self.assertEqual(f(), 'zcode', '取消的、没跑成的不占名额')

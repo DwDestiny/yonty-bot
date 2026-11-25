@@ -120,8 +120,8 @@ def score(facts, cfg):
     return {k: float(r["answers"][k]["noul"]) for k in TASK_Q}
 
 def pick_task(s):
-    """按分数定起步档：风险低的 sonnet medium，其余 opus medium。疑难档（xhigh）不按分数开，前两档解决不了才升。"""
-    return {"model": "sonnet" if s["risk"] < 0.35 else "opus", "effort": "medium", "auto_model": True}
+    """起步档：一律 sonnet medium（分数只记录下来看，不定档；3.13.0 按风险分定过 opus，2026-11-25 主人定全部从 sonnet 起步）。前两档解决不了才升。"""
+    return {"model": "sonnet", "effort": "medium", "auto_model": True}
 
 def report_task(ts, cfg):
     """按起步的模型和思考档分组：做完几个、一次过几个、换 opus 几个、平均花多少。"""

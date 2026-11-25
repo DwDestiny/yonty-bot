@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-"""git 钩子分发器：非主人触发的机器人会话通过 GIT_CONFIG_* 把 core.hooksPath 指到这里。
+"""git 钩子分发器：机器人会话通过 GIT_CONFIG_* 把 core.hooksPath 指到这里。
 
-Input:  git 调用钩子时的参数和 stdin；环境变量 FCB_OWNER
-Output: pre-push 推送非 bot/ 分支时 exit 1；其余情况转给仓库原来的钩子（.git/hooks 或仓库自己配的 core.hooksPath）
-Pos:    机器人实例 hooks/git/ 下，各个钩子名都是指向本文件的软链接
+Input:  git 调用钩子时的参数和 stdin；所在目录（git-owner 是主人的会话）、环境变量 FCB_OWNER
+Output: pre-push 时：非主人会话推送非 bot/ 分支 exit 1；新增的内容里有密钥 exit 1（主人会话也查）；其余情况转给仓库原来的钩子（.git/hooks 或仓库自己配的 core.hooksPath）
+Pos:    机器人实例 hooks/git/、hooks/git-owner/ 下，pre-push 是指向本文件的软链接，别的钩子指向 fcb-forward（只转发）
 """
-import os, subprocess, sys
+import os, re, subprocess, sys
 
 name = os.path.basename(sys.argv[0])
-data = sys.stdin.buffer.read() if name in ("pre-push", "post-rewrite", "reference-transaction") else None
-if name == "pre-push" and os.environ.get("FCB_OWNER") != "1":
+data = sys.stdin.buffer.read() if name in ("pre-push", "post-rewrite", "reference-transaction") else None   # 3.17 起只有 pre-push 指到这里，别的钩子走 fcb-forward
+OWNER = os.path.basename(os.path.dirname(os.path.abspath(__file__))) == "git-owner"   # 主人的会话指到 hooks/git-owner：看目录，不看环境变量（任务里跑的测试会清掉 FCB_*）
+if name == "pre-push" and not OWNER and os.environ.get("FCB_OWNER") != "1":
     for line in data.decode(errors="ignore").splitlines():
         parts = line.split()
         if len(parts) == 4 and not parts[2].startswith("refs/heads/bot/"):
@@ -20,7 +21,92 @@ def q(*a):
     r = subprocess.run(["git", *a], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else ""
 
-orig = q("config", "--local", "--get", "core.hooksPath")
+# ---------- 密钥扫描：推送前查新增的行，命中就拦。隐私和密钥靠这一道和合并前的评审拦，不靠换更贵的模型（2026-11-25 主人定） ----------
+# 宁可少报，不误拦：只认格式确定的令牌，和“名字像密钥、值又长又乱”的写死赋值。误拦的在那一行加 secret-scan: allow
+ZERO = "0" * 40
+SCAN = (("私钥", r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY-----"),
+        ("AWS 密钥", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        ("阿里云密钥", r"\bLTAI[A-Za-z0-9]{12,30}\b"),
+        ("腾讯云密钥", r"\bAKID[A-Za-z0-9]{32}\b"),
+        ("GitHub 令牌", r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{60,})\b"),
+        ("GitLab 令牌", r"\bglpat-[A-Za-z0-9_-]{20,}"),
+        ("npm 令牌", r"\bnpm_[A-Za-z0-9]{36}\b"),
+        ("Anthropic 密钥", r"\bsk-ant-[A-Za-z0-9_-]{24,}"),
+        ("sk- 密钥", r"\bsk-(?:proj-)?[A-Za-z0-9_-]{32,}"),
+        ("Stripe 密钥", r"\b(?:sk|rk)_live_[A-Za-z0-9]{20,}"),
+        ("Slack 令牌", r"\bxox[abprs]-[A-Za-z0-9-]{10,}"),
+        ("Google API 密钥", r"\bAIza[0-9A-Za-z_-]{35}\b"),
+        ("连接串里的密码", r"\b(?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|rediss?|amqps?)://[^\s:/@\"']*:[^\s@/\"'${}<>%]{8,}@(?!localhost\b|127\.|0\.0\.0\.0)"))
+SCAN = [(k, re.compile(r)) for k, r in SCAN]
+QUICK = re.compile(r"PRIVATE KEY|AKIA|ASIA|LTAI|AKID|gh[pousr]_|github_pat_|glpat-|npm_|sk-|_live_|xox|AIza|://")   # 先粗筛一遍，大仓第一次推也快
+ASSIGN = re.compile(r"(?i)[\w-]*(?:api[_-]?key|app[_-]?secret|client[_-]?secret|corp[_-]?secret|access[_-]?key|access[_-]?token|auth[_-]?token|secret[_-]?key|secret|passwd|password)[\"']?\s*[:=]\s*(?:[\"']([A-Za-z0-9+/_=-]{24,})[\"']|([A-Za-z0-9+/_=-]{24,})\s*$)")
+BARE = re.compile(r"(^|/)[^/]*\.(env|ya?ml|toml|ini|properties|conf|sh)$|(^|/)\.env[^/]*$")   # 这些文件里不加引号也算赋值
+PLACE = re.compile(r"(?i)example|placeholder|your[_-]|dummy|fake|sample|test|change[_-]?me|xxx|\*{3}|1234|0{6,}|redacted")
+LOOSE = re.compile(r"(^|/)(tests?|__tests__|e2e|fixtures?|testdata|docs?)/|(^|[/_.-])(test|spec)s?[_.][^/]*$|[_.]test\.[a-z]+$|\.(lock|svg|map|snap|min\.js)$|(^|/)(package-lock\.json|pnpm-lock\.yaml|go\.sum)$")
+KEYFILE = re.compile(r"(^|/)(\.env|\.env\.local|\.env\.production\.local|id_rsa|id_ed25519|id_ecdsa|[^/]+\.(p12|pfx|jks|keystore))$")
+
+def messy(v):   # 像随机串：三个以上数字，有字母，不同字符够多，不是全大写的环境变量名
+    return len(re.findall(r"\d", v)) >= 3 and re.search(r"[A-Za-z]", v) and len(set(v)) >= 12 and not re.fullmatch(r"[A-Z0-9_]+", v)
+
+def added(diff):
+    """git log -p、git diff 里每一行新增的内容：(提交, 文件, 行号, 文字)；新加的文件另出一条 (提交, 文件, 0, 空)。"""
+    sha, cur, ln = "", None, 0
+    for l in diff.split("\n"):
+        if l.startswith("\x01"): sha = l[1:]
+        elif l.startswith("diff --git "): cur = l.split(" b/", 1)[1] if " b/" in l else None
+        elif l.startswith("new file mode") and cur: yield sha, cur, 0, ""
+        elif l.startswith("+++ "): cur = l[6:].strip() if l.startswith("+++ b/") else cur
+        elif l.startswith("@@"):
+            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", l)
+            ln = int(m.group(1)) if m else 0
+        elif l.startswith("+") and ln:
+            if cur: yield sha, cur, ln, l[1:]
+            ln += 1
+        elif l.startswith(" ") and ln: ln += 1
+
+def scan(diff):
+    """[(提交, 文件, 行号, 是什么, 打码的开头)]。"""
+    out, seen = [], set()
+    for sha, path, ln, text in added(diff):
+        hit = None
+        if not ln: hit = ("放密钥的文件", os.path.basename(path)) if KEYFILE.search(path) else None
+        elif "secret-scan: allow" in text or len(text) > 5000 or path.endswith((".lock", ".map", ".snap")): continue
+        else:
+            for kind, rx in SCAN if QUICK.search(text) else ():
+                m = rx.search(text)
+                if not m or PLACE.search(m.group(0)) or (kind == "sk- 密钥" and not messy(m.group(0))) or (kind == "私钥" and LOOSE.search(path)): continue
+                hit = (kind, m.group(0)[:6] + "…"); break
+            if not hit and not LOOSE.search(path):
+                m = ASSIGN.search(text)
+                v = m and (m.group(1) or (m.group(2) if BARE.search(path) else ""))
+                if v and messy(v) and not PLACE.search(v): hit = ("写死的密钥", v[:4] + "…")
+        if hit and (path, hit) not in seen: seen.add((path, hit)); out.append((sha, path, ln) + hit)
+    return out
+
+def push_diff(local, remote):
+    """这次推送新带上去的提交里的改动。加了又删的也算：历史里还在。"""
+    rm = sys.argv[1] if len(sys.argv) > 1 else ""
+    have = ["--remotes=" + rm] if rm in q("remote").split() else ["--remotes"]
+    if remote != ZERO and subprocess.run(["git", "cat-file", "-e", remote + "^{commit}"], capture_output=True).returncode == 0: have.append(remote)
+    r = subprocess.run(["git", "log", "-p", "-U0", "--no-ext-diff", "--no-color", "--no-renames", "--format=%x01%h", "--max-count=400", local, "--not", *have], capture_output=True, timeout=60)
+    if r.returncode: raise RuntimeError(r.stderr.decode(errors="replace")[-200:])
+    return r.stdout.decode(errors="replace")
+
+def push_scan(lines):
+    hits = []
+    for line in lines:
+        p = line.split()
+        if len(p) != 4 or p[1] == ZERO: continue
+        try: hits += scan(push_diff(p[1], p[3]))
+        except Exception as e: sys.stderr.write(f"密钥扫描没跑成（{type(e).__name__}），这次放行，靠评审。\n")
+    if not hits: return
+    sys.stderr.write("密钥扫描：这次推送里疑似有密钥，已拦下：\n" + "\n".join(f"- {f}" + (f":{n}" if n else "") + f"（提交 {s}）{k}（{v}）" for s, f, n, k, v in hits[:12]) +
+                     "\n把它从提交历史里去掉（后面的提交删了也不算，要改历史）；已经推过的要换掉密钥。确认是假的：在那一行末尾加注释 secret-scan: allow 再推。\n")
+    sys.exit(1)
+
+if name == "pre-push": push_scan(data.decode(errors="ignore").splitlines())
+
+orig = next((x for s in ("--local", "--global", "--system") for x in [q("config", s, "--type=path", "--get", "core.hooksPath")] if x), "")
 if orig and not os.path.isabs(orig):
     orig = os.path.join(q("rev-parse", "--show-toplevel"), orig)
 if not orig:
