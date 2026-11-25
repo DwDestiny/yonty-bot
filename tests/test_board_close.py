@@ -242,7 +242,7 @@ class FeishuCloseTest(G.FeishuTaskTest):
         t = {'id': 1, 'status': 'running', 'turn': 1, 'title': 't', 'project': 'a', 'plan': 'A', 'origin': {'channel': 'feishu', 'chat_id': 'oc1'}, 'updated': 1}
         u = dict(t, id=2); self.go([t, u]); bad = [dict(t, status='failed'), dict(u, status='done')]
         self.go(bad); self.assertEqual(self.f.st['g1']['want'][1], '没做成，等你定')
-        self.go(bad, lambda t: True); self.assertEqual(self.f.st['g1']['want'][1], '执行完成'); self.assertTrue(self.f.st['g1']['closed'])
+        self.go(bad, lambda t: t['status'] == 'failed'); self.assertEqual(self.f.st['g1']['want'][1], '执行完成'); self.assertTrue(self.f.st['g1']['closed'])
 
     def test_only_failed_then_dropped_or_cancelled(self):
         for i, (st, drop) in enumerate((('failed', True), ('cancelled', False))):
