@@ -12,8 +12,9 @@ frames = list(range(int(fr.split('-')[0]), int(fr.split('-')[1])+1)) if '-' in f
 W_M, H_M, TM, P = 0.058, 0.215, 0.075, 0.0125
 Z0 = 0.0115 + TM + P                       # 第 1 行初始居中于 z=0.0115，出纸口在 z=0
 EVENTS = {2: 0.9, 3: 1.9, 4: 3.0, 5: 5.2, 6: 6.4, 7: 7.55}   # 第 r 行被推出来的时刻（秒）
-TC = 4.3                                   # 盖章接触时刻（秒），4.5 秒帧为章刚抬起、墨在晕开
-MARK_ROW, MARK_DX, MARK_ROT = 4.45, 0.005, 6.0
+TC = 4.28                                   # 盖章接触时刻（秒），4.5 秒帧为章刚抬起、墨在晕开
+MARK_ROW, MARK_DX, MARK_ROT = 4.3, 0.0145, 6.0
+R = [0, 1, 2, 3, 4, 5.8, 6.8, 7.8]     # 各行在纸上的位置（行距 P 的倍数）；章下面留出空位
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 sc = bpy.context.scene; r = sc.render
@@ -51,7 +52,7 @@ for j in range(NY+1):
     zl = -H_M*j/NY
     for i in range(NX+1):
         x = -W_M/2 + W_M*i/NX; xn = x/(W_M/2)
-        y = 0.0150*xn*xn                                   # 横向卷曲（边缘离镜头更远）
+        y = 0.0022*xn*xn                                   # 横向卷曲（边缘离镜头更远）
         y += 0.0016*math.sin(zl*38)                         # 纵向缓波
         y += 0.0007*math.sin(zl*230 + 1.3)*abs(xn)**3       # 边缘波纹
         y += -0.0012*math.sin(zl*70+0.5)*xn                 # 轻微扭曲
@@ -81,7 +82,7 @@ stT = node('ShaderNodeTexImage', extension='CLIP'); stT.image = bpy.data.images.
 cx = 0.5*W_M + MARK_DX; cy = H_M - (TM + MARK_ROW*P)
 m1 = node('ShaderNodeMapping'); m1.inputs['Scale'].default_value = (W_M, H_M, 1); m1.inputs['Location'].default_value = (-cx, -cy, 0)
 m2 = node('ShaderNodeMapping'); m2.inputs['Rotation'].default_value = (0, 0, math.radians(MARK_ROT))
-m3 = node('ShaderNodeMapping'); m3.inputs['Scale'].default_value = (1/0.042, 1/0.020, 1); m3.inputs['Location'].default_value = (0.5, 0.5, 0)
+m3 = node('ShaderNodeMapping'); m3.inputs['Scale'].default_value = (1/0.030, 1/0.0145, 1); m3.inputs['Location'].default_value = (0.5, 0.5, 0)
 L.new(tc_.outputs['UV'], m1.inputs['Vector']); L.new(m1.outputs['Vector'], m2.inputs['Vector']); L.new(m2.outputs['Vector'], m3.inputs['Vector']); L.new(m3.outputs['Vector'], stT.inputs['Vector'])
 sep = node('ShaderNodeSeparateXYZ'); L.new(geo.outputs['Position'], sep.inputs['Vector'])
 gate = node('ShaderNodeMapRange'); gate.inputs['From Min'].default_value = 0.002; gate.inputs['From Max'].default_value = 0.007; gate.clamp = True
@@ -97,26 +98,27 @@ sepI = node('ShaderNodeSeparateColor'); L.new(inkT.outputs['Color'], sepI.inputs
 sepS = node('ShaderNodeSeparateColor'); L.new(stT.outputs['Color'], sepS.inputs['Color'])
 # 噪声：墨的浓淡、纤维
 objc = tc_.outputs['Object']
-fm = node('ShaderNodeMapping'); fm.inputs['Scale'].default_value = (1800, 90, 1800); L.new(objc, fm.inputs['Vector'])
+fm = node('ShaderNodeMapping'); fm.inputs['Scale'].default_value = (2600, 110, 2600); L.new(objc, fm.inputs['Vector'])
 fib = node('ShaderNodeTexNoise'); fib.inputs['Scale'].default_value = 1.0; fib.inputs['Detail'].default_value = 8; fib.inputs['Roughness'].default_value = 0.7; L.new(fm.outputs['Vector'], fib.inputs['Vector'])
 fm2 = node('ShaderNodeMapping'); fm2.inputs['Scale'].default_value = (500, 500, 500); L.new(objc, fm2.inputs['Vector'])
 pit = node('ShaderNodeTexNoise'); pit.inputs['Detail'].default_value = 6; L.new(fm2.outputs['Vector'], pit.inputs['Vector'])
 fm3 = node('ShaderNodeMapping'); fm3.inputs['Scale'].default_value = (90, 90, 90); L.new(objc, fm3.inputs['Vector'])
 mott = node('ShaderNodeTexNoise'); mott.inputs['Detail'].default_value = 4; L.new(fm3.outputs['Vector'], mott.inputs['Vector'])   # 大块色斑
-dens = mathn('ADD', mathn('MULTIPLY', pit.outputs['Fac'], 0.30), 0.78)           # 墨浓淡 0.78–1.08
+mr = node('ShaderNodeMapRange'); mr.inputs['From Min'].default_value = 0.30; mr.inputs['From Max'].default_value = 0.62; mr.inputs['To Min'].default_value = 0.6; mr.inputs['To Max'].default_value = 1.25; mr.clamp = True
+L.new(pit.outputs['Fac'], mr.inputs['Value']); dens = mr.outputs['Result']           # 墨浓淡带断点 0.35–1.05
 black = mathn('MULTIPLY', mathn('MULTIPLY', sepI.outputs['Red'], gate.outputs['Result']), dens, clamp=True)
 redv = node('ShaderNodeValue'); redv.name = 'presence'; bl = node('ShaderNodeValue'); bl.name = 'bleed'
 mk = mathn('MAXIMUM', sepS.outputs['Red'], mathn('MULTIPLY', mathn('MULTIPLY', sepS.outputs['Green'], 1.6, clamp=True), bl.outputs[0]))
 mk = mathn('MULTIPLY', mathn('MULTIPLY', mk, redv.outputs[0]), dens, clamp=True)
 redk = mathn('MAXIMUM', mathn('MULTIPLY', sepI.outputs['Green'], gate.outputs['Result']), mk)
 paperc = node('ShaderNodeMix', data_type='RGBA'); paperc.inputs[6].default_value = (0.92, 0.84, 0.70, 1); paperc.inputs[7].default_value = (0.84, 0.74, 0.58, 1)
-L.new(mott.outputs['Fac'], paperc.inputs[0])
+L.new(mathn('ADD', mathn('MULTIPLY', mott.outputs['Fac'], 0.7), mathn('MULTIPLY', fib.outputs['Fac'], 0.5)), paperc.inputs[0])
 c1 = node('ShaderNodeMix', data_type='RGBA'); L.new(black, c1.inputs[0]); L.new(paperc.outputs[2], c1.inputs[6]); c1.inputs[7].default_value = (0.008, 0.007, 0.006, 1)
 c2 = node('ShaderNodeMix', data_type='RGBA'); L.new(mathn('MULTIPLY', redk, 0.95, clamp=True), c2.inputs[0]); L.new(c1.outputs[2], c2.inputs[6]); c2.inputs[7].default_value = (0.42, 0.0, 0.012, 1)
-bump = node('ShaderNodeBump'); bump.inputs['Strength'].default_value = 0.35; bump.inputs['Distance'].default_value = 0.0004
+bump = node('ShaderNodeBump'); bump.inputs['Strength'].default_value = 0.5; bump.inputs['Distance'].default_value = 0.0006
 hs = mathn('ADD', mathn('MULTIPLY', fib.outputs['Fac'], 0.8), mathn('MULTIPLY', mathn('ADD', black, redk), -0.25)); L.new(hs, bump.inputs['Height'])
 lw = node('ShaderNodeLayerWeight'); lw.inputs['Blend'].default_value = 0.45
-shade = mathn('SUBTRACT', 1.0, mathn('MULTIPLY', lw.outputs['Facing'], 1.1))
+shade = mathn('SUBTRACT', 1.0, mathn('MULTIPLY', lw.outputs['Facing'], 0.9))
 fin = node('ShaderNodeMix', data_type='RGBA', blend_type='MULTIPLY'); fin.inputs[0].default_value = 1.0; L.new(c2.outputs[2], fin.inputs[6])
 L.new(shade, fin.inputs[7]) if False else None
 sg = node('ShaderNodeCombineColor'); L.new(shade, sg.inputs[0]); L.new(shade, sg.inputs[1]); L.new(shade, sg.inputs[2]); L.new(sg.outputs[0], fin.inputs[7])
@@ -130,10 +132,20 @@ nvalue = {n.name: n for n in N}
 PRES, BLEED = nvalue['presence'], nvalue['bleed']
 
 # ---- 出纸口面板（深色塑料，遮住纸的下半截） ----
-bpy.ops.mesh.primitive_cube_add(size=1); lip = bpy.context.object; lip.scale = (0.11, 0.006, 0.05); lip.location = (0, -0.0075, -0.025)
+bpy.ops.mesh.primitive_cube_add(size=1); lip = bpy.context.object; lip.scale = (0.11, 0.006, 0.0466); lip.location = (0, -0.0075, -0.0268)
 bpy.ops.object.transform_apply(scale=True)
 bv = lip.modifiers.new('b', 'BEVEL'); bv.width = 0.0012; bv.segments = 4; bpy.ops.object.shade_smooth()
 lip.data.materials.append(newmat('lip', (0.012, 0.012, 0.014, 1), 0.38))
+# 金属前沿：拉丝（沿 x 的细条纹凹凸）+ 窄高光
+bpy.ops.mesh.primitive_cube_add(size=1); edge = bpy.context.object; edge.scale = (0.11, 0.0066, 0.0034); edge.location = (0, -0.0075, -0.0017)
+bpy.ops.object.transform_apply(scale=True); eb = edge.modifiers.new('b', 'BEVEL'); eb.width = 0.0010; eb.segments = 5; bpy.ops.object.shade_smooth()
+em_ = newmat('edgemetal', (0.36, 0.36, 0.38, 1), 0.34, 1.0); en = em_.node_tree
+etc = en.nodes.new('ShaderNodeTexCoord'); emp = en.nodes.new('ShaderNodeMapping'); emp.inputs['Scale'].default_value = (3, 1, 1400)
+ens = en.nodes.new('ShaderNodeTexNoise'); ens.inputs['Detail'].default_value = 3; ebp = en.nodes.new('ShaderNodeBump'); ebp.inputs['Strength'].default_value = 0.5; ebp.inputs['Distance'].default_value = 0.0002
+en.links.new(etc.outputs['Object'], emp.inputs['Vector']); en.links.new(emp.outputs['Vector'], ens.inputs['Vector']); en.links.new(ens.outputs['Fac'], ebp.inputs['Height'])
+en.links.new(ebp.outputs['Normal'], en.nodes['Principled BSDF'].inputs['Normal']); edge.data.materials.append(em_)
+hl = bpy.data.lights.new('edgehl', 'AREA'); hl.shape = 'RECTANGLE'; hl.size = 0.09; hl.size_y = 0.004; hl.energy = 0.02; hl.color = (1.0, 0.85, 0.65)
+hlo = bpy.data.objects.new('edgehl', hl); sc.collection.objects.link(hlo); hlo.location = (0, -0.05, 0.03); hlo.rotation_euler = (Vector((0, 0.0075, -0.0)) - hlo.location).to_track_quat('-Z', 'Y').to_euler()
 
 # ---- 章：黑木块 + 红胶面 + 圆钮，原点在胶面中心，朝 +Y 是纸 ----
 stamp = bpy.data.objects.new('stamp', None); sc.collection.objects.link(stamp)
@@ -144,20 +156,28 @@ def part(kind, loc, scale, mat, rot=(0, 0, 0), bevel=0.0007):
     b = ob.modifiers.new('b', 'BEVEL'); b.width = bevel; b.segments = 4; bpy.ops.object.shade_smooth()
     ob.data.materials.append(mat); ob.parent = stamp; return ob
 rubber = newmat('rubber', (0.40, 0.03, 0.015, 1), 0.85); wood = newmat('wood', (0.03, 0.026, 0.024, 1), 0.34)
-part('cube', (0, -0.0015, 0), (0.044, 0.003, 0.021), rubber, bevel=0.0004)
-part('cube', (0, -0.0140, 0), (0.040, 0.020, 0.018), wood, bevel=0.0012)
-part('cyl', (0, -0.0340, 0), (0.017, 0.020, 0.017), wood, rot=(math.pi/2, 0, 0), bevel=0.0020)
+part('cube', (0, -0.0015, 0), (0.032, 0.003, 0.0155), rubber, bevel=0.0004)
+part('cube', (0, -0.0140, 0), (0.029, 0.020, 0.0135), wood, bevel=0.0012)
+part('cyl', (0, -0.0340, 0), (0.013, 0.020, 0.013), wood, rot=(math.pi/2, 0, 0), bevel=0.0020)
 stamp.rotation_mode = 'XYZ'
 
 # ---- 背景光斑（失焦后成金色圆盘）----
 import random; rnd = random.Random(11)
-bm = newmat('bokeh', (1, 0.6, 0.25, 1), 1.0); nb = bm.node_tree
-em = nb.nodes.new('ShaderNodeEmission'); em.inputs['Color'].default_value = (1.0, 0.56, 0.2, 1); em.inputs['Strength'].default_value = float(os.environ.get('BOKEH', 45))
-nb.links.new(em.outputs[0], nb.nodes['Material Output'].inputs['Surface'])
-for _ in range(22):
-    bpy.ops.mesh.primitive_uv_sphere_add(radius=rnd.uniform(0.0015, 0.0045), segments=16, ring_count=8)
-    ob = bpy.context.object; ob.location = (rnd.uniform(-0.2, 0.2), rnd.uniform(0.22, 0.6), rnd.uniform(-0.04, 0.16)); ob.data.materials.append(bm)
-    if abs(ob.location.x) < 0.03 and ob.location.z < 0.08: ob.location.x += 0.09
+def bokeh_mat(name, col, strength):
+    m = bpy.data.materials.new(name); m.use_nodes = True; n_ = m.node_tree; n_.nodes.clear()
+    e = n_.nodes.new('ShaderNodeEmission'); e.inputs['Color'].default_value = col
+    lw_ = n_.nodes.new('ShaderNodeLayerWeight'); lw_.inputs['Blend'].default_value = 0.5       # 中心亮、边缘衰减
+    mm = n_.nodes.new('ShaderNodeMath'); mm.operation = 'MULTIPLY_ADD'; mm.inputs[1].default_value = -0.85; mm.inputs[2].default_value = 1.0
+    ms = n_.nodes.new('ShaderNodeMath'); ms.operation = 'MULTIPLY'; ms.inputs[1].default_value = strength
+    n_.links.new(lw_.outputs['Facing'], mm.inputs[0]); n_.links.new(mm.outputs[0], ms.inputs[0]); n_.links.new(ms.outputs[0], e.inputs['Strength'])
+    o_ = n_.nodes.new('ShaderNodeOutputMaterial'); n_.links.new(e.outputs[0], o_.inputs['Surface']); return m
+BK = float(os.environ.get('BOKEH', 28))
+bms = [bokeh_mat('bk1', (1.0, 0.55, 0.18, 1), BK), bokeh_mat('bk2', (1.0, 0.72, 0.35, 1), BK*0.7), bokeh_mat('bk3', (0.85, 0.92, 1.0, 1), BK*0.5)]
+for k in range(46):
+    bpy.ops.mesh.primitive_uv_sphere_add(radius=rnd.uniform(0.0008, 0.0030), segments=24, ring_count=12)
+    ob = bpy.context.object; yv = rnd.uniform(0.25, 0.8)
+    ob.location = (rnd.uniform(-0.22, 0.22)*(0.4+yv), yv, rnd.uniform(-0.05, 0.14))
+    ob.data.materials.append(bms[0] if k % 7 else bms[2] if k % 14 == 0 else bms[1])
 
 # ---- 灯：背光（暖，隔着纸透过来）+ 一盏很弱的侧前光托出纤维 + 黑旗压暗部 ----
 def mk_light(kind, name):
@@ -168,18 +188,18 @@ back.location = (0.03, 0.03, 0.035); aim(back, (0, -1, 0.02)); back.data.color =
 back.rotation_euler = (math.radians(-90), 0, 0)
 key = mk_light('SPOT', 'key'); key.data.spot_size = math.radians(30); key.data.spot_blend = 0.8; key.data.shadow_soft_size = 0.02
 key.location = (-0.16, -0.12, 0.09); aim(key, (0.0, 0, 0.018)); key.data.color = (1.0, 0.86, 0.7)
-back.data.energy = float(os.environ.get('BACK', 0.06)); key.data.energy = float(os.environ.get('KEY', 2.5))
+back.data.energy = float(os.environ.get('BACK', 0.035)); key.data.energy = float(os.environ.get('KEY', 2.5))
 
 cam = bpy.data.objects.new('cam', bpy.data.cameras.new('cam')); sc.collection.objects.link(cam); sc.camera = cam
 cd = cam.data; cd.sensor_fit = 'HORIZONTAL'; cd.sensor_width = 36; cd.lens = 85
-cd.dof.use_dof = True; cd.dof.aperture_fstop = 2.8
+cd.dof.use_dof = True; cd.dof.aperture_fstop = 5.6
 
 def eo3(x): x = min(1, max(0, x)); return 1-(1-x)**3
 def ei3(x): x = min(1, max(0, x)); return x**3
 def eio(x): x = min(1, max(0, x)); return x*x*(3-2*x)
 def off(t):
     s = 0.0
-    for rrow, te in EVENTS.items(): s += P*eo3((t-te)/0.2)
+    for rrow, te in EVENTS.items(): s += (R[rrow]-R[rrow-1])*P*eo3((t-te)/0.2)
     return s
 def setframe(i):
     t = i/30.0
@@ -198,16 +218,16 @@ def setframe(i):
     s = 0.05; lat = Vector((0.0, 0.0)); tilt = 0.0; vis = False
     if TC-0.35 <= t < TC:
         a_ = (t-(TC-0.35))/0.35; s = 0.05*(1-a_**3)+0.0005; lat = Vector((0.08, 0.04))*(1-a_)**2; vis = True
-    elif TC <= t < TC+0.10: s = 0.0004; vis = True
-    elif TC+0.10 <= t < TC+0.55:
-        b = (t-(TC+0.10))/0.45; s = 0.05*(1-(1-b)**2)+0.0004; lat = Vector((0.07, 0.035))*b*b; tilt = 0.30*b; vis = True
+    elif TC <= t < TC+0.05: s = 0.0004; vis = True
+    elif TC+0.05 <= t < TC+0.22:                       # 接触后 0.05 s 起抬，0.17 s 斜着往右上离开画面
+        b = (t-(TC+0.05))/0.17; s = 0.05*b**1.5+0.0004; lat = Vector((0.10, 0.06))*b**1.6; tilt = 0.35*b; vis = True
     for ob_ in [stamp]+list(stamp.children): ob_.hide_render = not vis
     stamp.location = (MARK_DX+lat.x, -s+push, mz+lat.y); stamp.rotation_euler = (tilt, 0, math.radians(MARK_ROT))
     PRES.outputs[0].default_value = 1.0 if t >= TC else 0.0
-    BLEED.outputs[0].default_value = eo3((t-TC)/0.18)
+    BLEED.outputs[0].default_value = eo3((t-TC)/0.40)
     # 相机：慢漂 + 章落后微震
     sh = 0.0004*math.exp(-14*tau)*math.sin(95*tau) if 0 <= tau < 0.5 else 0.0
-    cam.location = (0.004 - 0.008*t/8.0 + sh, -d, 0.0185 - 0.0015*t/8.0 + 0.6*sh); aim(cam, (cam.location.x*0.7, 0, cam.location.z)); cd.dof.focus_distance = d
+    cam.location = (0.004 - 0.008*t/8.0 + sh, -d, 0.0185 - 0.0015*t/8.0 + 0.6*sh); aim(cam, (cam.location.x*0.7, 0, cam.location.z)); cd.dof.focus_distance = d + 0.0012
 
 def set_engine(name):
     if name == 'CYCLES':
