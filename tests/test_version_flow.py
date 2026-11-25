@@ -4,7 +4,8 @@ Input:  test_team 的临时实例（Claude、systemd、lark-cli 都是假的）
 Output: unittest 结果
 Pos:    tests/ 下的行为测试，内容全是虚构的
 """
-import os, sys, time, unittest
+import os, subprocess, sys, time, unittest
+from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_team as TT
 from test_team import block, PLAN
@@ -85,6 +86,27 @@ class Version(TT.Base):
     def test_small_task_is_told_not_to_add_checks(self):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a'))
         note = self.t.plan_note(self.by('甲')); self.assertIn('任务书写的验收就是全部', note); self.assertIn('不跑全量测试', note); self.assertIn('先定底座', note)
+
+
+class PushHooks(TT.Base):
+    def test_installed_dirs_and_a_real_push(self):
+        """scaffold 铺好两个钩子目录；主人的、同事的会话各指各的，都查密钥。"""
+        key = 'AKIA' + 'QZ7RTKX9LM4VB8NC'
+        for owner, d in ((True, 'git-owner'), (False, 'git')):
+            env = self.t.hook_env(owner, False, 'c'); p = env['GIT_CONFIG_VALUE_0']; self.assertTrue(p.endswith('/hooks/' + d), p)
+            for h in ('pre-push', 'pre-commit', 'commit-msg', 'post-checkout'): self.assertTrue(os.access(os.path.join(p, h), os.X_OK), h)
+            go = lambda *a: subprocess.run(['git', *a], cwd=self.e.repo, env=env, capture_output=True, text=True)
+            go('checkout', '-qB', 'bot/' + d)
+            for name, text, want in (('ok.py', 'x = 1', 0), ('bad.py', f'K = "{key}"', 1)):
+                (Path(self.e.repo) / name).write_text(f'{text}  # {d}\n'); go('add', '-A'); go('commit', '-qm', name)
+                r = go('push', '-q', 'origin', 'HEAD:refs/heads/bot/' + d); self.assertEqual(bool(r.returncode), bool(want), r.stderr)
+            self.assertIn('bad.py:1', r.stderr); self.assertNotIn(key, r.stderr)
+            go('checkout', '-q', 'main')
+
+    def test_boxed_agent_branch_pushed_by_service_is_checked(self):
+        t = self.e.task(thing='a'); g = lambda *a: subprocess.run(['git', *a], cwd=self.e.repo, capture_output=True, text=True)
+        g('checkout', '-qB', 'bot/x'); (Path(self.e.repo) / 'k.py').write_text('K = "AKIA' + 'QZ7RTKX9LM4VB8NC"\n'); g('add', '-A'); g('commit', '-qm', 'k'); g('checkout', '-q', 'main')
+        self.assertIn('密钥扫描', self.t.agent_publish(dict(t, branch='bot/x', plan='整改'), '做完了')); self.assertNotIn('bot/x', g('ls-remote', '--heads', 'origin').stdout)
 
 
 class Alerts(TT.Base):

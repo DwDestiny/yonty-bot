@@ -18,7 +18,7 @@
 | `hooks/mcp_guard.py` | 硬限制：MCP 工具只给主人本人触发的会话用（`mcp_open_to` 里的除外） |
 | `hooks/command_guard.py` | 硬限制：按 `command_guard` 规则限制哪些会话能跑某类 Bash 命令（例如 `mcporter`） |
 | `upgrade.py` | 主人发 `/upgrade` 后由服务起的独立升级单元：快进、跑测试、备份、装新版本、重启，起不来就回滚（不等任务，见 3.1.0） |
-| `hooks/git_guard.py` + `hooks/git/` | 硬限制：git/gh 能做什么；非主人触发的推送只能推 `bot/` 分支 |
+| `hooks/git_guard.py` + `hooks/git/` | 硬限制：git/gh 能做什么；推送前查密钥；非主人触发的推送只能推 `bot/` 分支 |
 | `claude-settings.json` | 权限拒绝表 + 挂钩子（脚本生成） |
 | `config.json` | 实例的全部可调项 |
 

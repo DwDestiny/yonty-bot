@@ -121,7 +121,7 @@
 | 代码平台凭据 | 不能直接读（`credential_paths`、凭据助手、带令牌的请求头都拦），建合并请求只走 `tasks.py mr` | 同左；`tasks.py mr` 只认 `bot/` 分支 |
 | 规则（所有任务） | 不合并、不推主干、不发版 | 同左 |
 
-`pre-push` 通过环境变量 `GIT_CONFIG_COUNT/KEY_0/VALUE_0` 把 `core.hooksPath` 指到实例的 `hooks/git/`，不改仓库配置；分发器做完检查后转给仓库原来的钩子。3.17 起主人的会话也带上这组变量，沙箱智能体由服务代推的分支同样过一遍。密钥扫描只看这次推送新带上去的提交（加了又删的也算，历史里还在），认格式确定的令牌、私钥、放密钥的文件（`.env`、`*.p12` 等）和“名字像密钥、值又长又乱”的写死赋值；确认是假的，在那一行末尾加 `secret-scan: allow`。扫描自己出错时放行并写一行提示，由评审兜底。已实测 Claude Code 的 Bash 工具保留这组变量（它只追加 `KEY_1=credential.guiPrompt`）。
+`pre-push` 通过环境变量 `GIT_CONFIG_COUNT/KEY_0/VALUE_0` 把 `core.hooksPath` 指到实例的 `hooks/git/`，不改仓库配置；分发器做完检查后转给仓库原来的钩子。3.17 起主人的会话也带上这组变量，指到 `hooks/git-owner/`（查密钥，不限分支；看目录不看 `FCB_OWNER`，任务里跑的测试会清掉它），沙箱智能体由服务代推的分支同样过一遍。除 `pre-push` 外的钩子走 `fcb-forward`，只转发，不起 python。密钥扫描只看这次推送新带上去的提交（加了又删的也算，历史里还在），认格式确定的令牌、私钥、放密钥的文件（`.env`、`*.p12` 等）和“名字像密钥、值又长又乱”的写死赋值；确认是假的，在那一行末尾加 `secret-scan: allow`。扫描自己出错时放行并写一行提示，由评审兜底。已实测 Claude Code 的 Bash 工具保留这组变量（它只追加 `KEY_1=credential.guiPrompt`）。
 
 > **警告**：这几层挡得住正常操作和直接的绕法（`--no-verify`、改 hooksPath、`env -i`、`unset GIT_CONFIG_*`、写明推到非 `bot/` 分支），挡不住所有绕法：例如先用 Write 写一个脚本，脚本里清掉环境再推送或调 `gh pr merge`。真正的兜底是 GitHub 上的分支保护：主干开“必须经合并请求”“禁止强推”，机器人用的 GitHub 账号不给绕过保护的权限。
 

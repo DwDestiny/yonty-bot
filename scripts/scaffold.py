@@ -68,12 +68,14 @@ def build_release():
     os.makedirs(os.path.join(d, "hooks", "git"))
     for f in CODE: shutil.copy(os.path.join(T, f), os.path.join(d, f))
     for f in HOOKS: shutil.copy(os.path.join(T, "hooks", f), os.path.join(d, "hooks", f))
-    # git 钩子分发器：机器人会话把 core.hooksPath 指到 hooks/git，pre-push 查密钥，非主人触发的还只放行 bot/ 分支
+    # git 钩子分发器：机器人会话把 core.hooksPath 指到 hooks/git（主人的指到 hooks/git-owner），pre-push 查密钥，非主人触发的还只放行 bot/ 分支
     gh = os.path.join(d, "hooks", "git")
-    shutil.copy(os.path.join(T, "hooks", "git", "fcb-githook"), os.path.join(gh, "fcb-githook"))
-    os.chmod(os.path.join(gh, "fcb-githook"), 0o755)
-    for h in ("pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-push", "pre-rebase",
-              "post-checkout", "post-merge", "post-rewrite", "pre-merge-commit"): os.symlink("fcb-githook", os.path.join(gh, h))
+    for f in ("fcb-githook", "fcb-forward"):
+        shutil.copy(os.path.join(T, "hooks", "git", f), os.path.join(gh, f)); os.chmod(os.path.join(gh, f), 0o755)
+    for sub, at in (("git", ""), ("git-owner", "../git/")):
+        os.makedirs(os.path.join(d, "hooks", sub), exist_ok=True)
+        for h in ("pre-push", "pre-commit", "prepare-commit-msg", "commit-msg", "post-commit", "pre-rebase", "post-checkout", "post-merge", "post-rewrite", "pre-merge-commit"):
+            os.symlink(at + ("fcb-githook" if h == "pre-push" else "fcb-forward"), os.path.join(d, "hooks", sub, h))
     os.rename(d, os.path.join(rel, name))
     return name
 

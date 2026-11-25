@@ -93,9 +93,10 @@ def hook_env(owner, private, chat_id, channel="feishu", task_id=None):
                FCB_PRIVATE="1" if private else "0", FCB_CHAT_ID=chat_id, FCB_CHANNEL=channel)
     if not private:   # 非主人私聊：不读不写自动记忆
         env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] = "1"
-    if os.path.isdir(GIT_HOOKS):
-        # 机器人会话：git 钩子换成实例的 hooks/git（pre-push 查新增内容里的密钥，非主人的还只放行 bot/ 分支，其余转给仓库原来的钩子）
-        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=GIT_HOOKS)
+    gh = GIT_HOOKS + ("-owner" if owner else "")
+    if os.path.isdir(gh):
+        # git 钩子换成实例的：pre-push 查新增内容里的密钥，非主人的（hooks/git）还只放行 bot/ 分支，其余转给仓库原来的钩子
+        env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=gh)
     if task_id is not None:
         env["FCB_TASK_ID"] = str(task_id)
     else:

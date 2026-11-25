@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """git 钩子分发器：机器人会话通过 GIT_CONFIG_* 把 core.hooksPath 指到这里。
 
-Input:  git 调用钩子时的参数和 stdin；环境变量 FCB_OWNER
+Input:  git 调用钩子时的参数和 stdin；所在目录（git-owner 是主人的会话）、环境变量 FCB_OWNER
 Output: pre-push 时：非主人会话推送非 bot/ 分支 exit 1；新增的内容里有密钥 exit 1（主人会话也查）；其余情况转给仓库原来的钩子（.git/hooks 或仓库自己配的 core.hooksPath）
-Pos:    机器人实例 hooks/git/ 下，各个钩子名都是指向本文件的软链接
+Pos:    机器人实例 hooks/git/、hooks/git-owner/ 下，pre-push 是指向本文件的软链接，别的钩子指向 fcb-forward（只转发）
 """
 import os, re, subprocess, sys
 
 name = os.path.basename(sys.argv[0])
-data = sys.stdin.buffer.read() if name in ("pre-push", "post-rewrite", "reference-transaction") else None
-if name == "pre-push" and os.environ.get("FCB_OWNER") != "1":
+data = sys.stdin.buffer.read() if name in ("pre-push", "post-rewrite", "reference-transaction") else None   # 3.17 起只有 pre-push 指到这里，别的钩子走 fcb-forward
+OWNER = os.path.basename(os.path.dirname(os.path.abspath(__file__))) == "git-owner"   # 主人的会话指到 hooks/git-owner：看目录，不看环境变量（任务里跑的测试会清掉 FCB_*）
+if name == "pre-push" and not OWNER and os.environ.get("FCB_OWNER") != "1":
     for line in data.decode(errors="ignore").splitlines():
         parts = line.split()
         if len(parts) == 4 and not parts[2].startswith("refs/heads/bot/"):
@@ -105,7 +106,7 @@ def push_scan(lines):
 
 if name == "pre-push": push_scan(data.decode(errors="ignore").splitlines())
 
-orig = next((x for s in ("--local", "--global", "--system") for x in [q("config", s, "--get", "core.hooksPath")] if x), "")
+orig = next((x for s in ("--local", "--global", "--system") for x in [q("config", s, "--type=path", "--get", "core.hooksPath")] if x), "")
 if orig and not os.path.isabs(orig):
     orig = os.path.join(q("rev-parse", "--show-toplevel"), orig)
 if not orig:

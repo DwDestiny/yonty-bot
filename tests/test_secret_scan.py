@@ -8,6 +8,8 @@ import os, subprocess, tempfile, unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(ROOT, "app", "hooks", "git", "fcb-githook")
+FWD = os.path.join(ROOT, "app", "hooks", "git", "fcb-forward")
+ENV = {k: v for k, v in os.environ.items() if not k.startswith(("GIT_", "FCB_"))}   # 在机器人的任务里跑时，环境里带着实例的钩子
 R = "q7Rt2Kx9Lm4Vb8Nc3Zp6Wd1Hs5Jf0GyQeUiA8oTn"   # 像随机串，40 个字符
 AWS = "AKIA" + "QZ7RTKX9LM4VB8NC"
 
@@ -16,14 +18,16 @@ class SecretScan(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.TemporaryDirectory(); self.addCleanup(self.d.cleanup)
         r = self.d.name
-        self.bare, self.repo, self.hooks = os.path.join(r, "b.git"), os.path.join(r, "w"), os.path.join(r, "hooks")
-        os.mkdir(self.hooks); os.symlink(HOOK, os.path.join(self.hooks, "pre-push"))
+        self.bare, self.repo, self.hooks, self.mine = (os.path.join(r, x) for x in ("b.git", "w", "git", "git-owner"))   # 同事的、主人的钩子目录，跟 scaffold 铺的一样
+        for d in (self.hooks, self.mine):
+            os.mkdir(d); os.symlink(HOOK, os.path.join(d, "pre-push"))
+            for h in ("pre-commit", "commit-msg", "post-commit", "post-checkout"): os.symlink(FWD, os.path.join(d, h))
         self.git("init", "-q", "--bare", self.bare, cwd=r); self.git("init", "-q", "-b", "main", self.repo, cwd=r)
         for k, v in (("user.email", "t@t"), ("user.name", "t"), ("commit.gpgsign", "false")): self.git("config", k, v)
         self.commit("a.txt", "你好\n"); self.git("remote", "add", "origin", self.bare); self.git("push", "-q", "origin", "main")
 
     def git(self, *a, cwd=None, env=None):
-        return subprocess.run(["git", *a], cwd=cwd or self.repo, env=env, capture_output=True, text=True)
+        return subprocess.run(["git", *a], cwd=cwd or self.repo, env=env or ENV, capture_output=True, text=True)
 
     def commit(self, name, text):
         p = os.path.join(self.repo, name); os.makedirs(os.path.dirname(p), exist_ok=True)
@@ -31,7 +35,7 @@ class SecretScan(unittest.TestCase):
         self.git("add", "-f", name); self.git("commit", "-q", "-m", "x")
 
     def push(self, dst="refs/heads/bot/x", owner="1", src="HEAD"):
-        return self.git("-c", "core.hooksPath=" + self.hooks, "push", "origin", src + ":" + dst, env=dict(os.environ, FCB_OWNER=owner))
+        return self.git("-c", "core.hooksPath=" + (self.mine if owner == "1" else self.hooks), "push", "origin", src + ":" + dst, env=dict(ENV, FCB_OWNER=owner))
 
     def blocked(self, r, word=""):
         self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr); self.assertIn("密钥扫描", r.stderr); self.assertIn(word, r.stderr)
@@ -76,14 +80,34 @@ class SecretScan(unittest.TestCase):
         self.commit("src/c.py", f"k = '{AWS}'\n"); self.git("update-ref", "-d", "refs/remotes/origin/main"); self.blocked(self.push())
 
     def test_delete_branch_and_original_hook_still_runs(self):
-        self.ok(self.push()); self.ok(self.git("-c", "core.hooksPath=" + self.hooks, "push", "origin", ":refs/heads/bot/x", env=dict(os.environ, FCB_OWNER="1")))
+        self.ok(self.push()); self.ok(self.push(src=""))
         p = os.path.join(self.repo, ".git", "hooks", "pre-push")
         with open(p, "w") as f: f.write("#!/bin/sh\necho 原来的钩子 >&2\nexit 1\n")
         os.chmod(p, 0o755); self.commit("e.py", "e = 1\n"); r = self.push(); self.assertNotEqual(r.returncode, 0); self.assertIn("原来的钩子", r.stderr)
 
+    def hook(self, path, body):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f: f.write("#!/bin/sh\n" + body)
+        os.chmod(path, 0o755)
+
+    def bot(self, *a):
+        """机器人会话里的 git：环境变量把钩子目录换成实例的。"""
+        return self.git(*a, env=dict(ENV, GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="core.hooksPath", GIT_CONFIG_VALUE_0=self.mine))
+
+    def test_other_hooks_are_forwarded_as_is(self):
+        """别的钩子只转发：默认目录、仓库自己配的相对目录（husky）都认，参数和退出码原样。"""
+        self.ok(self.bot("commit", "-q", "--allow-empty", "-m", "没有钩子"))
+        self.hook(os.path.join(self.repo, ".git", "hooks", "commit-msg"), 'grep -q 坏 "$1" && { echo 默认目录拦 >&2; exit 3; }\nexit 0\n')
+        self.ok(self.bot("commit", "-q", "--allow-empty", "-m", "好")); r = self.bot("commit", "-q", "--allow-empty", "-m", "坏"); self.assertNotEqual(r.returncode, 0); self.assertIn("默认目录拦", r.stderr)
+        self.hook(os.path.join(self.repo, ".husky", "pre-commit"), "echo 仓库自己的 >&2; exit 1\n"); self.git("config", "core.hooksPath", ".husky")
+        r = self.bot("commit", "-q", "--allow-empty", "-m", "好"); self.assertNotEqual(r.returncode, 0); self.assertIn("仓库自己的", r.stderr)
+        os.remove(os.path.join(self.repo, ".husky", "pre-commit")); self.ok(self.bot("commit", "-q", "--allow-empty", "-m", "坏"))   # 配了就不再看默认目录，跟 git 一样
+        self.git("config", "core.hooksPath", self.mine); self.ok(self.bot("commit", "-q", "--allow-empty", "-m", "不绕圈"))
+
     def test_others_still_only_push_bot_branches(self):
         self.commit("src/c.py", "x = 1\n"); r = self.push("refs/heads/main", owner="0"); self.assertNotEqual(r.returncode, 0); self.assertIn("只能推送 bot/", r.stderr)
         self.ok(self.push("refs/heads/main", owner="1"))
+        self.ok(self.bot("push", "origin", "HEAD:refs/heads/rel"))   # 看目录不看 FCB_OWNER：任务里跑的测试会清掉它
 
 
 if __name__ == "__main__":
