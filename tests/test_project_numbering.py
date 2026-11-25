@@ -41,7 +41,7 @@ BASE_TOP = {'name', 'owner_name', 'owner_open_id', 'bot_open_id', 'channels', 'c
             'chat_max_turns', 'credential_paths', 'prime', 'disable_mcp', 'p2p_idle_hours', 'group_idle_hours',
             'max_parallel', 'claude_timeout_min'}
 BASE_TASKS = {'enabled', 'root', 'max_running', 'approval_hours', 'heartbeat_min', 'models', 'budget_default',
-              'budget_factor', 'quota_alert', 'sibling_warm_min', 'sibling_max_ctx', 'compact', 'stuck_min',
+              'budget_factor', 'quota_alert', 'quota_pause', 'sibling_warm_min', 'sibling_max_ctx', 'compact', 'stuck_min',
               'verify_retries', 'verify_timeout_min', 'cloud'}
 
 

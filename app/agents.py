@@ -168,16 +168,27 @@ def report(tk, name="zcode"):
     bad = sum(t.get("agent_out") == "infra" for t in tk.all_tasks() if t.get("agent_first") == name)
     return f"{AGENTS[name].label} 试点：派了 {n} 个，结束 {end} 个，一次过 {ok} 个，没跑成（不算成绩）{bad} 个；用量：输入 {g('input')}（缓存 {g('cached')}），输出 {g('output')}。"
 
+def unfit(tk, z, d, owner, ex):
+    """这件活不能交给它的原因（边界，谁点名都不放）；空串是能接。"""
+    repos = [tk._real(r) for r in z.conf.get("repos") or []]
+    return ("只接主人派的活" if not owner else "不上云端" if ex == "cloud" else "只接开发活" if (d.get("role") or "") not in tk.AUTO_ROLES
+            else "要有验证命令" if not d.get("verify") else "不配独立验收" if d.get("accept") else "收口的活不接" if d.get("closing")
+            else "这个仓库不在试点里" if tk._real(d.get("repo")) not in repos else "本机没装好" if not z.ready() else "")
+
+def movable(tk, t, name="zcode"):
+    """额度不够时，排着队的任务能不能换给它。主人点头才换，所以不看试点的前端、风险那几条，只看边界。"""
+    if name != "zcode" or not (tk.T.get("agents") or {}).get(name): return f"没配 {name}"
+    if get(tk, t).name != "claude": return "本来就不是 Claude 在做"
+    if t.get("schedule"): return "定时任务不换"
+    return unfit(tk, ZCode(tk.T["agents"][name]), t, bool((t.get("requester") or {}).get("owner")), t.get("exec"))
+
 def pick(tk, d, pm, owner, ex):
     """派活时定智能体，返回要并进任务的字段和没选上的原因。主人派的、本机跑、有验证命令、没配独立验收的开发活才考虑；
     没点名智能体时，前端、高风险、Jev 判风险不低的留给 Claude。"""
     import re
     want, z = d.get("agent") or "", ZCode((tk.T.get("agents") or {}).get("zcode"))
     if want == "claude" or not z.conf: return {}, ""
-    repos = [tk._real(r) for r in z.conf.get("repos") or []]
-    hard = ("只接主人派的活" if not owner else "不上云端" if ex == "cloud" else "只接开发活" if d.get("role") not in tk.AUTO_ROLES
-            else "要有验证命令" if not d.get("verify") else "不配独立验收" if d.get("accept") else "主人指定了模型" if d.get("forced")
-            else "收口的活不接" if d.get("closing") else "这个仓库不在试点里" if tk._real(d.get("repo")) not in repos else "本机没装好" if not z.ready() else "")
+    hard = unfit(tk, z, d, owner, ex) or ("主人指定了模型" if d.get("forced") else "")
     if hard: return {}, hard
     if not pm.get("auto_model") or pm.get("model") == "opus": return {}, "要用更强的模型"
     if sum(t.get("agent_out") == "infra" for t in tk.all_tasks() if t.get("agent_first") == "zcode") >= 5: return {}, "没跑成的满 5 个，先查原因"
