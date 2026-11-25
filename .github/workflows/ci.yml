@@ -51,14 +51,12 @@ jobs:
           sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq bubblewrap ripgrep > /dev/null
 
-      - name: 打开沙箱和 systemd 用户总线
+      - name: 试沙箱，打开 systemd 用户总线
         run: |
-          # /proc 里有别的挂载盖着时，内核不许普通用户在新命名空间里挂 /proc，bwrap 起不来。
-          # 机器用完即删，只在这里卸掉。先卸的是最里层；binfmt_misc 盖了两层，所以按挂载表逐条卸。
-          box() { bwrap --ro-bind / / --dev /dev --proc /proc --unshare-pid --die-with-parent true; }
-          if ! box; then
-            awk '$5 ~ "^/proc/" {print $5}' /proc/self/mountinfo | sort -r | while read -r m; do sudo umount "$m"; done
-            box
+          # 跟真实沙箱一样带 --proc 试一次。起不来就只跳过确实要起沙箱的测试，名单在日志里打印。
+          if ! bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent --new-session --unshare-pid true; then
+            echo "这台机器挂不了 /proc，要起沙箱的测试会跳过"
+            echo "YONTY_NO_PROC_SANDBOX=1" >> "$GITHUB_ENV"
           fi
           sudo loginctl enable-linger "$(id -un)" || true
           echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
