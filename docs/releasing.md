@@ -1,6 +1,6 @@
 # 发版和 Release 说明的写法
 
-> 1.0.0 · 2026-11-25 · 维护：Yonty Bot contributors
+> 3.18.0 · 2026-11-25 · 维护：Yonty Bot contributors
 
 发版的人读这一页：版本号怎么升、更新日志写在哪、GitHub Release 的标题和正文怎么写、发之前查什么。
 

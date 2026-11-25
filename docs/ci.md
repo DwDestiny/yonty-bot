@@ -1,6 +1,6 @@
 # CI
 
-> 1.1.0 · 2026-11-25 · 维护：Yonty Bot contributors
+> 3.18.0 · 2026-11-25 · 维护：Yonty Bot contributors
 
 工作流只有一个：`.github/workflows/ci.yml`。它跑全量测试和页面检查，不部署，不带任何凭证。
 

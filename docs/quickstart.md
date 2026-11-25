@@ -4,7 +4,7 @@
 
 这篇带你从一台空机器走到：私聊机器人说“在吗”有回复，群里 @ 它能问答，派一个带验证命令的小活并拿到结果。每一步写三样：做什么、看到什么算对、卡住了去哪看。
 
-- 排障：下面“卡住去哪看”里写的 `docs/troubleshooting.md` 按现象查。
+- 排障：下面“卡住去哪看”里写的 [troubleshooting.md](troubleshooting.md) 按现象查。
 - 每步旁边标了“本期实测”或“没实测”。没实测的步骤命令来自代码和现有文档，真机上第一次走时请多看一眼输出。
 - 飞书后台的点选清单不在这里重复，见 [setup.md](setup.md) 第 3 节。原理和全部配置项见 [guide.md](guide.md) 和 [config.md](config.md)。
 - 用 Claude Code 帮你装也行：在仓库里打开它，说“照 docs/guide.md 帮我搭一个飞书机器人”，回答它的六个问题。这条路没实测；下面是手动版，每条命令都能单独看结果。
@@ -24,7 +24,7 @@
 uname -s                  # Linux 推荐；Darwin（Mac）可以试，部分功能没有
 python3 --version         # 需要 3.9 以上
 git --version
-node --version            # 用 npm 装 lark-cli 要 Node；Claude Code 的 npm 包声明要 Node 22 以上
+node --version            # 三个 npm 包要求不同：lark-cli ≥16，wecom-cli ≥18，Claude Code 的 npm 包 2.1.332 声明 ≥22；都装就直接用 22 或更新的
 claude --version          # Claude Code
 lark-cli --version        # 飞书命令行
 systemctl --user is-system-running   # Linux 上要有 systemd 用户服务
@@ -41,9 +41,9 @@ gh --version              # 可选：GitHub 仓库建合并请求要
 - gh：按 <https://cli.github.com/> 装，再 `gh auth login`。
 - 企业微信（可选）：`npm install -g @wecom/cli`，要 Node 18 以上，见 [wecom.md](wecom.md)。
 
-重要的顺序：先装好 `claude` 和 `lark-cli`，再跑第 4 步的 scaffold。scaffold 在生成那一刻把它们所在的目录写进服务的 PATH；装完才补装的，要重跑 scaffold。
+重要的顺序：先装好 `claude` 和 `lark-cli`，再跑第 4 步的 scaffold。scaffold 在生成那一刻把它们所在的目录写进服务的 PATH；缺 `claude` 或 `lark-cli` 时 scaffold 不会停，生成完在末尾列出“还差几样”；装完才补装的，装好后要重跑 scaffold，服务的 PATH 才带上它们。
 
-卡住去哪看：`docs/troubleshooting.md`“安装报错”。
+卡住去哪看：[troubleshooting.md](troubleshooting.md)“安装报错”。
 
 本期实测：版本检查命令在一台带这些工具的 Linux 上跑过。装工具本身没实测（`npm install` 在真机上的结果取决于你的 Node 和网络）。
 
@@ -66,7 +66,7 @@ lark-cli event consume im.message.receive_v1 --as bot --max-events 1 --timeout 6
 
 预期：打印一行 JSON 后退出。
 
-卡住去哪看：[setup.md](setup.md) 第 4 节列了收不到消息时依次查什么；`docs/troubleshooting.md`“收不到消息”。
+卡住去哪看：[setup.md](setup.md) 第 4 节列了收不到消息时依次查什么；[troubleshooting.md](troubleshooting.md)“收不到消息”。
 
 本期实测：没实测。真实飞书应用从新建到收发，本期没走过一遍。
 
@@ -109,21 +109,20 @@ python3 -m json.tool ~/work/mybot/config.json > /dev/null && echo JSON_OK
 python3 scripts/scaffold.py ~/work/mybot
 ```
 
-看到什么算对：scaffold 打印“写了 …/rules.md”“服务文件：…”“安装：…”和“完成（Yonty Bot v…）”，实例目录里有 `bridge.py`、`rules.md`、`roles/`、`hooks/`、服务文件。重复执行没关系：你改过的 `rules.md` 保留，模板的改动合进去。
+看到什么算对：scaffold 打印“写了 …/rules.md”“服务文件：…”“安装：…”和“完成（Yonty Bot v…）”，实例目录里有 `bridge.py`、`rules.md`、`roles/`、`hooks/`、服务文件。重复执行没关系：你改过的 `rules.md` 保留，模板的改动合进去，合不进去的会列出来，要你自己手补。
 
 要知道的几件事：
 
 - scaffold 只生成文件和打印命令，不替你启动服务。
 - 样例原样（没改名字、ID）会被拒绝，提示哪个字段还没填；`workdir` 写成实例目录也会被拒绝。
-- scaffold 目前不检查 `claude`、`lark-cli` 装没装，也不检查 `workdir` 目录存不存在；这些问题要到下一步才暴露。
+- scaffold 先检查再写文件。新装时 `workdir` 指向的目录不存在就直接退出，实例目录不动，先 `mkdir -p` 再重跑；`claude`、`lark-cli` 没装不拦，生成完在末尾列出“还差几样”，装好后重跑。装好过的实例上，这些问题都只提醒。
+- `ids.sh` 取不到任何一项（没装或没登录 lark-cli、应用没开机器人能力）时，照打能取到的，说明哪一项取不到，并以退出码 1 结束。
 - 启用企业微信时 scaffold 会跑 `npm install`，没有 npm 会报错退出，先关掉 `channels.wecom.enabled` 或装好 Node。
 - 生成后读一遍 `~/work/mybot/rules.md`，把私密内容的名单和边界按你的情况改。改守则不用重启，下一个会话生效。
 
-卡住去哪看：`docs/troubleshooting.md`“安装报错”。
+卡住去哪看：[troubleshooting.md](troubleshooting.md)“安装报错”。
 
 本期实测：`ids.sh` 没跑（它会查真实账号）；只读代码确认它打印四行：两个 ID 和两个名字。填假 ID 后 JSON 检查和 scaffold 在临时 HOME 里跑通，输出如上。真实 ID 的查询没实测。
-
-> 受后续版本影响：scaffold 的前置检查和守则补回属于计划中的安装行为改动，发版后本节“目前不检查”一条要改。
 
 ## 5. 验证缓存，装服务并启动
 
@@ -134,7 +133,7 @@ cd ~/work/mybot
 python3 bridge.py --cache-check 3        # 会调真实的 claude，花一点额度
 ```
 
-预期：结论是“正常”。结论异常或报错，先读 [cache.md](cache.md)；没装 `claude` 时这条会直接抛异常。
+预期：结论是“正常”。结论异常或报错，先读 [cache.md](cache.md)；没装 `claude`、超时或 `claude` 报错时，这条打印“缓存检查没跑完：原因”并以退出码 1 结束，不抛异常。
 
 然后装服务。第一次装要先建目录，再执行 scaffold 打印的那条安装命令：
 
@@ -154,7 +153,7 @@ systemctl --user status fcb-mybot        # active (running)
 tail -f ~/work/mybot/logs/bridge.log     # 能看到启动日志，没有 Traceback
 ```
 
-卡住去哪看：`docs/troubleshooting.md`“服务起不来”。装服务的这一步，本期只验证到“建目录和做链接成功”，没起真实 systemd 服务。缓存检查没实测（会花额度）。
+卡住去哪看：[troubleshooting.md](troubleshooting.md)“服务起不来”。装服务的这一步，本期只验证到“建目录和做链接成功”，没起真实 systemd 服务。缓存检查没实测（会花额度）。
 
 ## 6. 私聊“在吗”
 
@@ -162,7 +161,7 @@ tail -f ~/work/mybot/logs/bridge.log     # 能看到启动日志，没有 Traceb
 
 看到什么算对：几秒内你的消息上出现处理中的表情，随后机器人回复。日志里有一行 `recv`。
 
-卡住去哪看：没有反应，先看 `tail -f ~/work/mybot/logs/bridge.log` 有没有 `recv`。没有就是没收到：回第 2 节的 `event consume` 单独验证。有 `recv` 没回复，看后面的报错。`docs/troubleshooting.md`“没反应”。
+卡住去哪看：没有反应，先看 `tail -f ~/work/mybot/logs/bridge.log` 有没有 `recv`。没有就是没收到：回第 2 节的 `event consume` 单独验证。有 `recv` 没回复，看后面的报错。[troubleshooting.md](troubleshooting.md)“没反应”。
 
 本期实测：没实测，没有连真实飞书。
 
@@ -191,7 +190,7 @@ tail -f ~/work/mybot/logs/bridge.log     # 能看到启动日志，没有 Traceb
 
 没写验证命令的活，结论是“没定验证命令，服务没复核”。这是故意写出来的，别把它当成“已验证”。
 
-卡住去哪看：`/why demo-shop#1` 看为什么还没开工；`docs/troubleshooting.md`“任务不开工”“验证没过”“没建合并请求”。
+卡住去哪看：`/why demo-shop#1` 看为什么还没开工；[troubleshooting.md](troubleshooting.md)“任务不开工”“验证没过”“没建合并请求”。
 
 没实测：真实 Claude 上的派活全链路本期没走过。验收清单见 [guide.md](guide.md) 的“验收清单”，那里每条都要真发消息试。
 

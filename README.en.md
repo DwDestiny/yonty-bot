@@ -134,6 +134,7 @@ Prepare these first:
 | Claude Code | Install and sign in as described in the [official guide](https://code.claude.com/docs/en/setup). The bot uses its account and quota. npm package 2.1.332 needs Node 22 or later |
 | `lark-cli` | The npm package [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli), needs Node 16 or later. Install it and sign in |
 | A Feishu custom app | Turn on the bot capability, add permissions, subscribe to events and publish a version. A person has to do all four in the console. See [docs/setup.md](docs/setup.md). It uses a long connection, so no public callback URL is needed |
+| Node.js | The three npm packages differ: `lark-cli` needs 16 or later, `wecom-cli` 18 or later, the Claude Code npm package 22 or later. If you install all three, use 22 or newer |
 | Python 3.9 or later, git | |
 | `gh` (optional) | Needed to open draft pull requests on GitHub |
 | bwrap (optional) | Needed for scheduled tasks with a limited read scope, and for ZCode tasks |
@@ -155,7 +156,7 @@ When the prerequisites are ready:
 
 Cloning and generating an instance have been run in an isolated environment. Letting Claude Code do the install, and real Feishu and WeCom message flow, have not been re-tested from scratch.
 
-The full manual install commands are in `docs/quickstart.md`. Install `claude` and `lark-cli` before you generate the instance. If you change an install location, generate the instance again.
+The full manual install commands are in [docs/quickstart.md](docs/quickstart.md). Install `claude` and `lark-cli` before you generate the instance. If you change an install location, generate the instance again.
 
 **Patch versions install automatically by default.** Yonty Bot, `lark-cli`, `wecom-cli` and `mcporter` update on their own for patch versions. For Claude Code updates and non-patch versions, it asks you first. Set `updates.enabled` to `false` to turn this off.
 

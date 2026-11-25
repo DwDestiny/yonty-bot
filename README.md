@@ -23,9 +23,7 @@
 
 ## 演示
 
-<a href="docs/assets/demo/demo.zh.mp4"><img src="docs/assets/demo/demo.zh.gif" alt="演示：群里派活，项目经理拆任务，后台并行开发，服务复跑验证命令，最后在群里汇报并附上草稿合并请求链接" width="100%"></a>
-
-*示意，按真实流程重绘。人名、群名和仓库名是虚构的。点图看视频。*
+一件活从头到尾的样子。人名是虚构的，步骤按真实流程。
 
 1. 你在群里说要做什么。
 2. 项目经理读代码，拆成几个任务。
@@ -134,6 +132,7 @@
 | Claude Code | 照[官方说明](https://code.claude.com/docs/en/setup)装好并登录。机器人用它的账号和额度。npm 包 2.1.332 要求 Node 22 以上 |
 | `lark-cli` | npm 包 [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli)，要 Node 16 以上。装好并登录 |
 | 飞书自建应用 | 开机器人能力、加权限、订阅事件、发布版本，四项都要人在后台做，见 [docs/setup.md](docs/setup.md)。用长连接，不需要公网回调地址 |
+| Node.js | 三个 npm 包要求不同：`lark-cli` 16 以上，`wecom-cli` 18 以上，Claude Code 的 npm 包 22 以上。都装就直接用 22 或更新的 |
 | Python 3.9 以上、git | |
 | `gh`（可选） | 在 GitHub 上建草稿合并请求要用 |
 | bwrap（可选） | 限定了读取范围的定时任务、ZCode 任务要用 |
@@ -155,7 +154,7 @@
 
 克隆和生成实例在隔离环境里跑过。让 Claude Code 代装、真实飞书和企业微信的收发，还没有从头复测。
 
-手动安装的完整命令见 `docs/quickstart.md`。先装好 `claude` 和 `lark-cli` 再生成实例，换了安装位置要重新生成。
+手动安装的完整命令见 [docs/quickstart.md](docs/quickstart.md)。先装好 `claude` 和 `lark-cli` 再生成实例，换了安装位置要重新生成。
 
 **补丁版默认自动装**：Yonty Bot、`lark-cli`、`wecom-cli`、`mcporter` 出补丁版会自动更新。Claude Code 的更新和非补丁版先问你。`updates.enabled` 设成 `false` 就关掉。
 

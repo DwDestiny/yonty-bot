@@ -8,7 +8,7 @@
 
 - “你”指主人，装机器人的人。“同事”指别人。
 - 命令表和内部标记的完整写法在 [tasks.md](tasks.md)，这里只讲怎么用。
-- 出了问题按现象查 `docs/troubleshooting.md`。
+- 出了问题按现象查 [troubleshooting.md](troubleshooting.md)。
 - 这些场景在代码和文档里核对过。没有在真实项目上长期跑过的，在“限制”一节列出。
 
 ## 1. 问问题
