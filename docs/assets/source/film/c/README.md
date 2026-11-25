@@ -6,8 +6,8 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| `make_assets.py` | 生成墨层 `ink.png` 和印章 `stamp.png`（字体：Noto Sans CJK、Liberation Mono，均为 OFL） |
-| `scene.py` | Blender 场景，`ENGINES` 可填 `EEVEE`、`CYCLES` 或两者 |
+| `make_assets.py` | 生成墨层 `ink.png` 和印章 `stamp.png`（字体：Noto Sans Mono CJK SC，OFL） |
+| `scene.py` | Blender 场景，主镜头用 `CYCLES`，`EEVEE` 只看走位；逐帧打关键帧，运动模糊生效；`NORENDER=1` 打印章四角的画面坐标 |
 | `post.sh` | 帧序列加泛光、暗角，出 mp4 |
 | `measure.py` | 量亮度（Ylow、Yhigh）和红墨色相 |
 | `compare.py` | 样片 6 帧与参考帧 960 宽并排 |
@@ -16,7 +16,8 @@
 
 ```
 python3 make_assets.py ASSETS
-blender -b -P scene.py -- EEVEE,CYCLES 0,135,219 OUT 64 ASSETS 100 METAL     # 3 张静帧
-blender -b -P scene.py -- EEVEE 0-239 OUT 64 ASSETS 100                      # 整段
-sh post.sh OUT/ev sample.mp4
+blender --factory-startup -b -P scene.py -- CYCLES 0,110,135,219,239 OUT 64 ASSETS 100 METAL   # 5 张静帧
+blender --factory-startup -b -P scene.py -- CYCLES 0-239 OUT 64 ASSETS 100 METAL               # 整段
+sh post.sh OUT/cy sample.mp4
+python3 compare.py OUT/cy REFS compare.jpg
 ```

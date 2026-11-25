@@ -17,7 +17,7 @@ R = [0, 1, 2, 3, 4, 6.9, 7.9, 8.9]         # 各行在纸上的位置（行距 P
 # (开始秒, 走纸行数, 格数)：一格一格往外走，每格 0.09 s
 EVENTS = [(0.15, 1, 5, 0.09), (1.3, 1, 5, 0.09), (2.5, 1, 5, 0.09), (3.4, 1.7, 5, 0.09), (5.0, 1.2, 5, 0.09), (6.2, 1.0, 5, 0.09), (7.35, 1.0, 5, 0.07)]
 TC = 4.28                                  # 盖章接触时刻；4.5 秒帧为章刚抬走、墨在渗开
-MARK_ROW, MARK_DX, MARK_ROT = 5.3, 0.007, 6.0
+MARK_ROW, MARK_DX, MARK_ROT = 5.1, 0.005, 6.0
 PROG = [(1.8, 2.4, 0.0, 0.2), (5.45, 6.15, 0.2, 0.7)]   # 复跑进度格点亮：(起, 止, 从, 到)
 YAW = float(os.environ.get('YAW', -13))
 RIG_ROT = (math.radians(-24), math.radians(14), math.radians(YAW))   # 俯仰（纸往上走远）、画面内斜 14°、偏转
@@ -125,12 +125,12 @@ black = mathn('MULTIPLY', mathn('MULTIPLY', mathn('MAXIMUM', sepI.outputs['Red']
 presence = value('presence'); bleed = value('bleed'); wet = value('wet'); dent = value('dent')
 bl_ = mathn('MULTIPLY', mathn('SUBTRACT', mathn('MULTIPLY', sepS.outputs['Green'], 1.2), 0.25, clamp=True), mathn('MULTIPLY', bleed.outputs[0], 0.6))
 mk = mathn('MAXIMUM', sepS.outputs['Red'], bl_)
-mk = mathn('MULTIPLY', mathn('MULTIPLY', mk, presence.outputs[0]), mathn('ADD', mathn('MULTIPLY', dens, 0.25), 0.78), clamp=True)
+mk = mathn('MULTIPLY', mathn('MULTIPLY', mk, presence.outputs[0]), mathn('ADD', mathn('MULTIPLY', dens, 0.30), 0.54), clamp=True)
 redk = mathn('MAXIMUM', mathn('MULTIPLY', sepI.outputs['Green'], gate.outputs['Result']), mk)
 paperc = node('ShaderNodeMix', data_type='RGBA'); paperc.inputs[6].default_value = (0.93, 0.89, 0.81, 1); paperc.inputs[7].default_value = (0.86, 0.81, 0.72, 1)
 L.new(mathn('ADD', mathn('MULTIPLY', mott.outputs['Fac'], 0.6), mathn('MULTIPLY', fib.outputs['Fac'], 0.4)), paperc.inputs[0])
 c1 = node('ShaderNodeMix', data_type='RGBA'); L.new(black, c1.inputs[0]); L.new(paperc.outputs[2], c1.inputs[6]); c1.inputs[7].default_value = (0.003, 0.003, 0.003, 1)
-c2 = node('ShaderNodeMix', data_type='RGBA'); L.new(mathn('MULTIPLY', redk, 0.97, clamp=True), c2.inputs[0]); L.new(c1.outputs[2], c2.inputs[6]); c2.inputs[7].default_value = (0.42, 0.0, 0.010, 1)
+c2 = node('ShaderNodeMix', data_type='RGBA'); L.new(mathn('MULTIPLY', redk, 1.0, clamp=True), c2.inputs[0]); L.new(c1.outputs[2], c2.inputs[6]); c2.inputs[7].default_value = (0.40, 0.0, 0.006, 1)
 # 压痕：章压下时纸凹下去，带褶皱
 sepV = node('ShaderNodeSeparateXYZ'); L.new(m3.outputs['Vector'], sepV.inputs['Vector'])
 rx = mathn('MULTIPLY', mathn('SUBTRACT', sepV.outputs['X'], 0.5), 1.5); ry = mathn('MULTIPLY', mathn('SUBTRACT', sepV.outputs['Y'], 0.5), 1.5)
@@ -148,11 +148,14 @@ uvx = node('ShaderNodeSeparateXYZ'); L.new(tc_.outputs['UV'], uvx.inputs['Vector
 e_ = mathn('POWER', mathn('MULTIPLY', mathn('ABSOLUTE', mathn('SUBTRACT', uvx.outputs['X'], 0.5)), 2.0), 16.0, clamp=True)
 slot_t = mathn('POWER', mathn('SUBTRACT', 1.0, mathn('DIVIDE', rigz, 0.014), clamp=True), 3.0)
 amber = node('ShaderNodeMix', data_type='RGBA', blend_type='MULTIPLY'); L.new(mathn('ADD', 0.12, mathn('MULTIPLY', e_, 0.88), clamp=True), amber.inputs[0]); L.new(fin.outputs[2], amber.inputs[6]); amber.inputs[7].default_value = (1.0, 0.50, 0.20, 1)
+inkmask = mathn('SUBTRACT', 1.0, mathn('MAXIMUM', black, redk), clamp=True)
 bsdf = node('ShaderNodeBsdfPrincipled'); L.new(fin.outputs[2], bsdf.inputs['Base Color'])
 rough = mathn('SUBTRACT', 0.66, mathn('MULTIPLY', mathn('MULTIPLY', mk, wet.outputs[0]), 0.5))
-L.new(rough, bsdf.inputs['Roughness']); L.new(mathn('MULTIPLY', mathn('SUBTRACT', 1.0, black, clamp=True), 0.3), bsdf.inputs['Specular IOR Level']); L.new(mathn('MULTIPLY', mathn('SUBTRACT', 1.0, black, clamp=True), 0.3), bsdf.inputs['Sheen Weight']); L.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
+L.new(rough, bsdf.inputs['Roughness']); L.new(mathn('ADD', mathn('MULTIPLY', inkmask, 0.3), mathn('MULTIPLY', mathn('MULTIPLY', mk, wet.outputs[0]), 0.35)), bsdf.inputs['Specular IOR Level']); L.new(mathn('MULTIPLY', inkmask, 0.3), bsdf.inputs['Sheen Weight']); L.new(bump.outputs['Normal'], bsdf.inputs['Normal'])
 tr = node('ShaderNodeBsdfTranslucent'); L.new(amber.outputs[2], tr.inputs['Color']); L.new(bump.outputs['Normal'], tr.inputs['Normal'])
-mx = node('ShaderNodeMixShader'); L.new(mathn('ADD', 0.16, mathn('MULTIPLY', e_, 0.6)), mx.inputs['Fac']); L.new(bsdf.outputs['BSDF'], mx.inputs[1]); L.new(tr.outputs['BSDF'], mx.inputs[2])
+mx = node('ShaderNodeMixShader'); cloud = node('ShaderNodeMapRange'); cloud.inputs['From Min'].default_value = 0.35; cloud.inputs['From Max'].default_value = 0.65; cloud.inputs['To Min'].default_value = 0.5; cloud.inputs['To Max'].default_value = 1.5; cloud.clamp = True
+cn = node('ShaderNodeTexNoise'); cn.inputs['Detail'].default_value = 7; cn.inputs['Roughness'].default_value = 0.65; cmap = node('ShaderNodeMapping'); cmap.inputs['Scale'].default_value = (420, 420, 300); L.new(objc, cmap.inputs['Vector']); L.new(cmap.outputs['Vector'], cn.inputs['Vector']); L.new(cn.outputs['Fac'], cloud.inputs['Value'])
+L.new(mathn('ADD', mathn('MULTIPLY', cloud.outputs['Result'], env('TRANS', 0.24)), mathn('MULTIPLY', e_, 0.5), clamp=True), mx.inputs['Fac']); L.new(bsdf.outputs['BSDF'], mx.inputs[1]); L.new(tr.outputs['BSDF'], mx.inputs[2])
 em = node('ShaderNodeEmission'); em.inputs['Color'].default_value = (1.0, 0.30, 0.06, 1)
 glow = mathn('MAXIMUM', mathn('MULTIPLY', e_, env('EDGE', 1.1)), mathn('MULTIPLY', slot_t, env('SLOT', 1.5)))
 L.new(mathn('MULTIPLY', glow, mathn('SUBTRACT', 1.0, mathn('MAXIMUM', black, redk), clamp=True)), em.inputs['Strength'])
@@ -162,11 +165,11 @@ paper.data.materials.append(pm)
 VAL = {n: N[n].outputs[0] for n in ('zoff', 'prog', 'presence', 'bleed', 'wet', 'dent')}
 
 # ---- 出纸口：深色塑料面板 + 拉丝金属前沿 + 齿状撕纸刃 + 螺丝 ----
-bpy.ops.mesh.primitive_cube_add(size=1); lip = bpy.context.object; lip.scale = (0.10, 0.0035, 0.0466); lip.location = (0, -0.0062, -0.0293)
+bpy.ops.mesh.primitive_cube_add(size=1); lip = bpy.context.object; lip.scale = (0.10, 0.0035, 0.0466); lip.location = (0, -0.0060, -0.0262)
 bpy.ops.object.transform_apply(scale=True); adopt(lip)
 bv = lip.modifiers.new('b', 'BEVEL'); bv.width = 0.0012; bv.segments = 4; bpy.ops.object.shade_smooth()
 lip.data.materials.append(newmat('lip', (0.004, 0.004, 0.005, 1), 0.55))
-bpy.ops.mesh.primitive_cube_add(size=1); edge = bpy.context.object; edge.scale = (0.10, 0.0040, 0.0060); edge.location = (0, -0.0062, -0.0030)
+bpy.ops.mesh.primitive_cube_add(size=1); edge = bpy.context.object; edge.scale = (0.10, 0.0040, 0.0042); edge.location = (0, -0.0062, -0.0021)
 bpy.ops.object.transform_apply(scale=True); adopt(edge); eb = edge.modifiers.new('b', 'BEVEL'); eb.width = 0.0010; eb.segments = 5; bpy.ops.object.shade_smooth()
 em_ = newmat('edgemetal', (0.30, 0.30, 0.32, 1), 0.30, 1.0); en = em_.node_tree
 etc = en.nodes.new('ShaderNodeTexCoord'); emp = en.nodes.new('ShaderNodeMapping'); emp.inputs['Scale'].default_value = (3, 1, 1400)
@@ -180,8 +183,8 @@ tm_ = bpy.data.meshes.new('teeth'); tm_.from_pydata([(x, 0, z) for x, z in tv], 
 teeth = bpy.data.objects.new('teeth', tm_); sc.collection.objects.link(teeth); adopt(teeth); teeth.location = (0, -0.0030, 0.0)
 ts = teeth.modifiers.new('s', 'SOLIDIFY'); ts.thickness = 0.0016; teeth.data.materials.append(em_)
 for sx in (-0.036, 0.036):
-    bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.0013, depth=0.0010); sb = bpy.context.object
-    sb.rotation_euler = (math.pi/2, 0, 0); sb.location = (sx, -0.0083, -0.0030); adopt(sb); sb.data.materials.append(em_)
+    bpy.ops.mesh.primitive_cylinder_add(vertices=24, radius=0.0009, depth=0.0010); sb = bpy.context.object
+    sb.rotation_euler = (math.pi/2, 0, 0); sb.location = (sx, -0.0083, -0.0022); adopt(sb); sb.data.materials.append(em_)
 
 # ---- 章：黑木块 + 红胶面 + 圆钮 ----
 stamp = bpy.data.objects.new('stamp', None); sc.collection.objects.link(stamp); adopt(stamp)
@@ -206,7 +209,7 @@ def bokeh_mat(name, col, strength):
     ms = n_.nodes.new('ShaderNodeMath'); ms.operation = 'MULTIPLY'; ms.inputs[1].default_value = strength
     n_.links.new(lw_.outputs['Facing'], mm.inputs[0]); n_.links.new(mm.outputs[0], ms.inputs[0]); n_.links.new(ms.outputs[0], e.inputs['Strength'])
     o_ = n_.nodes.new('ShaderNodeOutputMaterial'); n_.links.new(e.outputs[0], o_.inputs['Surface']); return m
-BK = env('BOKEH', 6)
+BK = env('BOKEH', 4)
 tiers = [bokeh_mat('bk_hi', (1.0, 0.50, 0.15, 1), BK*1.8), bokeh_mat('bk_mid', (1.0, 0.55, 0.20, 1), BK), bokeh_mat('bk_lo', (0.95, 0.42, 0.13, 1), BK*0.45)]
 for k in range(64):
     rad = rnd.choice([0.0005, 0.0008, 0.0012, 0.0018, 0.0035, 0.006]); yv = rnd.uniform(0.35, 1.1)
@@ -222,18 +225,22 @@ def aim(ob, tgt): ob.rotation_euler = (Vector(tgt) - ob.location).to_track_quat(
 back = mk_light('AREA', 'back'); back.data.shape = 'RECTANGLE'; back.data.size = 0.05; back.data.size_y = 0.08
 back.location = (0.0, 0.035, 0.03); aim(back, (0, -1, 0.03)); back.rotation_euler = (math.radians(-90), 0, 0); back.data.color = (1.0, 0.70, 0.40); adopt(back)
 key = mk_light('SPOT', 'key'); key.data.spot_size = math.radians(30); key.data.spot_blend = 0.8; key.data.shadow_soft_size = 0.02
-key.location = (-0.16, -0.12, 0.09); aim(key, (0.0, 0, 0.018)); key.data.color = (1.0, 0.95, 0.88); adopt(key)
+key.location = (-0.20, -0.06, 0.10); aim(key, (0.0, 0, 0.018)); key.data.color = (1.0, 0.95, 0.88); adopt(key)
 hl = mk_light('AREA', 'edgehl'); hl.data.shape = 'RECTANGLE'; hl.data.size = 0.09; hl.data.size_y = 0.004; hl.data.color = (1.0, 0.85, 0.65)
 hl.location = (0, -0.05, 0.03); hl.rotation_euler = (Vector((0, 0.0075, 0.0)) - hl.location).to_track_quat('-Z', 'Y').to_euler(); adopt(hl)
 bl = mk_light('AREA', 'bladehl'); bl.data.shape = 'RECTANGLE'; bl.data.size = 0.07; bl.data.size_y = 0.003; bl.data.color = (1.0, 0.55, 0.22)
-bl.location = (0, -0.02, 0.012); bl.rotation_euler = (Vector((0, -0.003, 0.0004)) - bl.location).to_track_quat('-Z', 'Y').to_euler(); adopt(bl); bl.data.energy = env('BLADE', 0.03)
+bl.location = (0, -0.02, 0.012); bl.rotation_euler = (Vector((0, -0.003, 0.0004)) - bl.location).to_track_quat('-Z', 'Y').to_euler(); adopt(bl); bl.data.energy = env('BLADE', 0.006)
 metal_col = bpy.data.collections.new('metal'); sc.collection.children.link(metal_col)
 for o_ in (edge, teeth, lip) + tuple(o for o in bpy.data.objects if o.parent == rig and o.name.startswith('Cylinder')):
     try: metal_col.objects.link(o_)
     except Exception: pass
 try: bl.light_linking.receiver_collection = metal_col
 except Exception as e_: print('WARN light linking', e_)
-back.data.energy = env('BACK', 0.010); key.data.energy = env('KEY', 1.9); hl.data.energy = 0.02
+paper_col = bpy.data.collections.new('papercol'); sc.collection.children.link(paper_col)     # 主光只照纸和章，出纸口留在暗部
+for o_ in [paper] + list(stamp.children): paper_col.objects.link(o_)
+try: key.light_linking.receiver_collection = paper_col
+except Exception as e_: print('WARN light linking', e_)
+back.data.energy = env('BACK', 0.09); key.data.energy = env('KEY', 3.2); hl.data.energy = env('HL', 0.004)
 
 cam = bpy.data.objects.new('cam', bpy.data.cameras.new('cam')); sc.collection.objects.link(cam); sc.camera = cam
 cd = cam.data; cd.sensor_fit = 'HORIZONTAL'; cd.sensor_width = 36; cd.lens = 85
@@ -262,12 +269,13 @@ def setframe(i):
     rig.rotation_euler = (RIG_ROT[0] + math.radians(1.2*math.sin(t*1.1)), RIG_ROT[1] + math.radians(1.0*math.sin(t*1.7+1)), RIG_ROT[2] + math.radians(1.5*math.sin(t*0.8)))
     RM = rig.rotation_euler.to_matrix().to_4x4()          # 不用 rig.matrix_world（渲染前不会刷新，第一帧会是旧值）
     mz = paper.location.z - (TM + MARK_ROW*P)
-    s = 0.05; lat = Vector((0.0, 0.0)); tilt = 0.0; vis = False
+    s = 0.05; lat = Vector((0.08, 0.04)); tilt = 0.0; vis = False
     if TC-0.35 <= t < TC:
         a_ = (t-(TC-0.35))/0.35; s = 0.05*(1-a_**3)+0.0005; lat = Vector((0.08, 0.04))*(1-a_)**2; vis = True
     elif TC <= t < TC+0.05: s = 0.0004; vis = True
     elif TC+0.05 <= t < TC+0.22:
         b = (t-(TC+0.05))/0.17; s = 0.05*b**1.5+0.0004; lat = Vector((0.10, 0.06))*b**1.6; tilt = 0.35*b; vis = True
+    elif t >= TC+0.22: s = 0.0504; lat = Vector((0.10, 0.06)); tilt = 0.35
     for ob_ in [stamp]+list(stamp.children): ob_.hide_render = not vis
     stamp.location = (MARK_DX+lat.x, -s+push, mz+lat.y); stamp.rotation_euler = (tilt, 0, math.radians(MARK_ROT))
     VAL['zoff'].default_value = paper.location.z
@@ -298,6 +306,17 @@ def setframe(i):
         l_ = RM @ Vector((-0.018, 0, fz)); r_ = RM @ Vector((0.018, 0, fz))
         print('DEPTH t=%.2f row-end depth diff mm %.1f  focus %.3f' % (t, ((r_-l_).dot(fwd))*1000, cd.dof.focus_distance))
 
+def bake():      # 打成逐帧关键帧，渲染器才拿得到前后子帧，运动模糊才生效
+    try: bpy.context.preferences.edit.keyframe_new_interpolation_type = 'LINEAR'
+    except Exception: pass
+    for i in range(-1, 241):
+        setframe(i)
+        for ob_, ps in ((paper, ['location']), (rig, ['rotation_euler']), (stamp, ['location', 'rotation_euler']), (cam, ['location', 'rotation_euler'])):
+            for p_ in ps: ob_.keyframe_insert(p_, frame=i)
+        for ob_ in stamp.children: ob_.keyframe_insert('hide_render', frame=i)
+        for v_ in VAL.values(): v_.keyframe_insert('default_value', frame=i)
+        cd.dof.keyframe_insert('focus_distance', frame=i)
+sc.frame_start, sc.frame_end = 0, 239
 def set_engine(name):
     if name == 'CYCLES':
         r.engine = 'CYCLES'; c = sc.cycles; c.samples = samples; c.use_denoising = os.environ.get('NODENOISE') != '1'; c.max_bounces = 10; c.transmission_bounces = 8; c.transparent_max_bounces = 8
@@ -324,13 +343,20 @@ def set_engine(name):
         try: r.use_motion_blur = True; r.motion_blur_shutter = 0.5
         except Exception: pass
 
-res = []
+bake(); res = []
 for en in engines:
     en = en.strip().upper(); set_engine(en); od = os.path.join(out, 'cy' if en == 'CYCLES' else 'ev'); os.makedirs(od, exist_ok=True)
     secs = []
     for i in frames:
-        setframe(i); r.filepath = os.path.join(od, f'c{i:04d}.png'); t0 = time.time()
-        if os.environ.get('NORENDER'): continue
+        sc.frame_set(i); r.filepath = os.path.join(od, f'c{i:04d}.png'); t0 = time.time()
+        if os.environ.get('NORENDER'):
+            from bpy_extras.object_utils import world_to_camera_view as w2c
+            RM = rig.matrix_world; out_ = []
+            for dx, dz in ((-.013, .0065), (.013, .0065), (.013, -.0065), (-.013, -.0065)):
+                c_ = math.cos(math.radians(MARK_ROT)); s_ = math.sin(math.radians(MARK_ROT))
+                q = RM @ Vector((MARK_DX + dx*c_ + dz*s_, 0, paper.location.z - (TM+MARK_ROW*P) - dx*s_ + dz*c_))
+                v = w2c(sc, cam, q); out_.append((round(v.x, 2), round(1-v.y, 2)))
+            print('MARK', i, out_); continue
         bpy.ops.render.render(write_still=True); secs.append(round(time.time()-t0, 1))
     res.append((en, secs))
 print('RESULT', res, 'blender', bpy.app.version_string, 'samples', samples, 'res%', pct)
