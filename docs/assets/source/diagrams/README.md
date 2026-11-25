@@ -11,9 +11,10 @@
 ```bash
 python3 -I docs/assets/source/diagrams/build.py                      # 重出 16 个成品
 python3 -I docs/assets/source/diagrams/build.py --proof _tmp/proof   # 另出校样，给 svg-lint 用
+python3 -I docs/assets/source/diagrams/check.py                      # 检查，CI 可直接调，没过退出码 1
 ```
 
-需要 `fonttools` 和系统字体 Noto Sans CJK（Debian/Ubuntu 的 `fonts-noto-cjk`）。重出两次逐字节相同。文案、版面都在 `build.py`；缺字、字超框、字重叠、显示成 400 像素宽时字小于 10 像素，都会报错。
+需要 `fonttools` 和系统字体 Noto Sans CJK（Debian/Ubuntu 的 `fonts-noto-cjk`）。重出两次逐字节相同。文案、版面都在 `build.py`；缺字、字超框、字重叠、显示成 400 像素宽时字小于 10 像素，都会报错。`check.py` 在临时目录重出一遍，做上面这些检查，再核对仓库里的 16 个文件与重出的逐字节相同、没有多余或缺少。逐字节相同以字体和 `fonttools` 版本一致为前提（现用 4.46.0），换版本后先重出再提交。
 
 ## svg-lint
 
@@ -54,7 +55,7 @@ python3 -I docs/assets/source/diagrams/build.py --proof _tmp/proof   # 另出校
 | 你和同事；说事、结果箭头 | `README.md`“它怎么干活”1、6 |
 | 主控，每个聊天一个，不写代码 | `docs/architecture.md` 1.1、2.1 |
 | 转交；完成、问题箭头 | `docs/architecture.md` 1.1；`docs/tasks.md` §1 第 8 条 |
-| 项目经理，按项目和受众会话分开，不改文件 | `docs/architecture.md` 1.1；`app/hooks/scope_guard.py`（拦写文件的工具） |
+| 项目经理，按项目和受众会话分开，不写代码 | `docs/architecture.md` 1.1；`app/roles/项目经理.md`；`app/hooks/scope_guard.py`（只拦编辑类工具，Bash 仍能写） |
 | 派活；回报、提问箭头 | `app/team.py` `gate`；`docs/tasks.md` §1 第 8 条 |
 | 开发、收口、评审，各有分支 | `docs/architecture.md` 1.1；`app/tasks.py` `plan_note`；`app/roles/评审.md` |
 | 红虚线：授权、花钱、方向直接问主人 | `app/delivery.py` `OWNER_CATS`；`docs/tasks.md` §2 投递规则 |

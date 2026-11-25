@@ -233,7 +233,7 @@ T["flow.en"] = dict(title="From one message to a pull request", desc="A chat mes
 T["layers.zh"] = dict(title="三层分工", desc="主控跟人对话，项目经理出方案、派活、验收，执行层在后台做任务。授权、花钱、方向直接问主人。服务是普通程序，负责认身份、排队、验证、停工。", cards=[
     ("你和同事", ["在群里或私聊里说话"]),
     ("主控 · 每个聊天一个", ["跟人对话，记住你的决定", "你的大活转给项目经理，自己不写代码"]),
-    ("项目经理 · 每个项目按聊天分开", ["读代码、出方案、派活、验收", "自己不改文件"])],
+    ("项目经理 · 每个项目按聊天分开", ["读代码、出方案、派活、验收", "不写代码"])],
     links=[("说事", "结果"), ("转交", "完成、问题"), ("派活", "回报、提问")],
     group="执行层 · 后台任务，各有各的分支",
     workers=[("开发", ["并行做小任务", "各改各的文件"]), ("收口", ["合分支、测全量", "建合并请求"]), ("评审", ["只看改动", "只提意见"])],
@@ -242,7 +242,7 @@ T["layers.zh"] = dict(title="三层分工", desc="主控跟人对话，项目经
 T["layers.en"] = dict(title="Who does what", desc="The coordinator talks to people, the project manager plans, assigns and reviews, and background tasks do the work. Approvals, spending and direction go straight to the owner. The service is ordinary code that handles identity, queueing, checks and stops.", cards=[
     ("You and your teammates", ["In a group or a direct message"]),
     ("Coordinator · one per chat", ["Does the talking and remembers what you decided", "Passes your bigger jobs on; writes no code"]),
-    ("Project manager · per project and chat", ["Reads code, plans, assigns, reviews", "Does not edit files"])],
+    ("Project manager · per project and chat", ["Reads code, plans, assigns, reviews", "Writes no code"])],
     links=[("request", "result"), ("handover", "done / problem"), ("task", "report / question")],
     group="Background tasks, each on its own branch",
     workers=[("Developer", ["Small tasks,", "own files"]), ("Integrator", ["Full tests,", "one PR"]), ("Reviewer", ["Reads diffs,", "comments"])],
@@ -256,7 +256,7 @@ T["gate.zh"] = dict(title="验证闸门：说做完，不算数", desc="任务�
     infra=("没跑完", ["被叫停、被护栏拦了等", "不返工，BLOCKED 上交"]),
     stuck=("还是没过", ["能换更强的模型就换", "不能就 BLOCKED 上交"]),
     foot=["没定验证命令的活，服务不复核，结论里会写明。", "只读角色没有提交改动的，不跑这道闸门。"])
-T["gate.en"] = dict(title="Saying done doesn't count", desc="When a task says it is done, the service runs the check in the background. A pass goes to the project manager. A failure goes back to the task with its output. If it keeps failing, a stronger model takes over or it is handed up as BLOCKED. A check that could not finish is handed up without rework.",
+T["gate.en"] = dict(title='"Done" doesn\'t count', desc="When a task says it is done, the service runs the check in the background. A pass goes to the project manager. A failure goes back to the task with its output. If it keeps failing, a stronger model takes over or it is handed up as BLOCKED. A check that could not finish is handed up without rework.",
     said=("The task says it is done", ["Nothing counts until the service looks"]),
     run=("The service runs the check itself", ["Edited acceptance tests fail it too"]),
     **{"pass": ("Passed", ["Marked PASS, then", "the manager reviews"])},
