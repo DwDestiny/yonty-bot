@@ -3217,8 +3217,8 @@ def ftask_span(t):
 
 MR_URL = re.compile(r"https?://[^\s)）]+/(?:pull|merge_requests|change)/\d+")
 
-def ftask_meta(ts):
-    """飞书任务里能给的字段：说明、开始结束时间、自定义字段。"""
+def ftask_meta(ts, sub=False):
+    """飞书任务里能给的字段：说明、开始结束时间、自定义字段。sub：子任务，说明用它自己的任务书，不重复整个方案。"""
     spans = [ftask_span(t) for t in ts]
     start, live = min((s for s, _ in spans if s), default=0), any(not e for _, e in spans)
     end = 0 if live else max(e for _, e in spans)
@@ -3231,13 +3231,13 @@ def ftask_meta(ts):
              f"模型：{'、'.join(models)}", f"花费：{cost:.2f} 美元当量", f"仓库：{os.path.basename(t0.get('repo') or '')}　目标分支：{t0.get('target') or (t0.get('base') or '').split('/', 1)[-1] or '默认'}"]
     if mrs: lines.append("合并请求：" + " ".join(mrs[:5]))
     lines += ["", "任务："] + [f"{tasks.ref(t)} {tasks.LABEL.get(t['status'], t['status'])}　{t['title']}　{cst(s)}" + (f"–{cst(e)}" if e else "") + (f"　{t['branch']}" if t.get("branch") else "") for t, (s, e) in zip(ts, spans)]
-    body = (plan or {}).get("text") or t0.get("brief") or ""
+    body = (not sub and (plan or {}).get("text")) or t0.get("brief") or ""
     desc = "\n".join(lines) + ("\n\n" + short(body, 1200) if body else "")
     return {"start": start, "end": end, "desc": tasks.gate.SECRET_RE.sub(r"\1***", desc),
             "custom": {"项目": t0.get("project") or "", "模型": "、".join(models), "花费（美元当量）": float(cost), "用时（分钟）": float(mins_), "任务数": f"{sum(t['status'] == 'done' for t in ts)}/{len(ts)}", "合并请求": " ".join(mrs[:5])}}
 
 def ftask_plan(ts):
-    """这一批的全部任务：[(标题, 状态, 短名#N)]。按方案的任务单来，没派的也列；同标题取最新一个。"""
+    """这一批的全部任务：[(标题, 状态, 短名#N, 任务)]。按方案的任务单来，没派的也列；同标题取最新一个。"""
     t0 = ts[0]
     if not t0.get("plan"): return []
     items = list((team.plan_of(t0.get("project"), t0["plan"]) or {}).get("items") or [])
@@ -3248,7 +3248,7 @@ def ftask_plan(ts):
         if t.get("held") and s in tasks.ACTIVE: return "停工"
         if s == "done": return "完成" if tasks.accepted(t) else "待验收"
         return {"running": "进行中", "waiting": "等答复", "approved": "排队", "pending": "排队", "failed": "没做成", "lost": "没做成"}.get(s, "已取消")
-    return [(i, state(by.get(i)), tasks.ref(by[i]) if i in by else "") for i in items + [k for k in by if k not in items]]
+    return [(i, state(by.get(i)), tasks.ref(by[i]) if i in by else "", by.get(i)) for i in items + [k for k in by if k not in items]]
 
 BOARD = None
 def board_rows():

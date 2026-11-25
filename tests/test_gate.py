@@ -660,14 +660,60 @@ class FeishuTaskTest(unittest.TestCase):
             if p.endswith('/subtasks'): n[0] += 1; real(m, p, d, **k); return {'subtask': {'guid': f's{n[0]}'}}
             return real(m, p, d, **k)
         self.f.api = api
-        rows = [('甲', '进行中', 'p#1'), ('乙', '排队', 'p#2')] + [(f'丙{i}', '未派', '') for i in range(8)]
+        rows = [('甲', '进行中', 'p#1', None), ('乙', '排队', 'p#2', None)] + [(f'丙{i}', '未派', '', None) for i in range(8)]
         self.assertFalse(self.f.subs('g', rec, rows)); self.assertTrue(self.f.subs('g', rec, rows))     # 一拍最多 8 次写
         self.assertEqual(n[0], 10); k = len(self.lark.calls)
         self.f.subs('g', rec, rows); self.assertEqual(len(self.lark.calls), k)                          # 没变不写
-        self.f.subs('g', rec, [('甲', '完成', 'p#1')] + rows[1:])
+        self.f.subs('g', rec, [('甲', '完成', 'p#1', None)] + rows[1:])
         self.assertNotEqual(self.sent('/tasks/s1')[-1]['task']['completed_at'], '0')
         self.f.subs('g', rec, rows); self.assertEqual(self.sent('/tasks/s1')[-1]['task']['completed_at'], '0')   # 又叫回去：重新打开
         self.f.subs('g', rec, rows[:-1]); self.assertIn('不做了', self.sent('/tasks/s10')[-1]['task']['summary'])
+
+    def sub_env(self):
+        self.lark.task['tasklists'] = [{'tasklist_guid': 'L'}]
+        self.f.meta = lambda ts, sub=False: {'start': 1000 if ts[0]['status'] != 'approved' else 0, 'end': 2000 if ts[0]['status'] == 'done' else 0, 'desc': 'sub' if sub else 'all', 'custom': {'花费': 1.5}}
+        real = self.f.api
+        def api(m, p, d=None, **k):
+            out = real(m, p, d, **k)
+            return {'subtask': {'guid': 's1'}} if p.endswith('/subtasks') else out
+        self.f.api = api
+        return {'own': True, 'lists': ['L']}, {'id': 1, 'status': 'running', 'turn': 1, 'title': '甲', 'project': 'a', 'plan': 'A', 'updated': 1}
+
+    def test_subtask_gets_its_own_fields(self):
+        rec, t = self.sub_env()
+        fills = lambda: [d for d in self.sent('/tasks/s1') if 'custom_fields' in (d.get('task') or {})]
+        self.f.subs('g', rec, [('甲', '进行中', 'p#1', t)])
+        x = fills()[-1]['task']; self.assertEqual((x['description'], x['start']['timestamp'], 'due' in x, 'completed_at' in x), ('sub', '1000000', False, False))
+        d = dict(t, status='done'); self.f.subs('g', rec, [('甲', '完成', 'p#1', d)])
+        x = fills()[-1]['task']; self.assertEqual((x['due']['timestamp'], 'completed_at' in x), ('2000000', False))
+        k = len(self.lark.calls); self.f.subs('g', rec, [('甲', '完成', 'p#1', d)]); self.assertEqual(len(self.lark.calls), k)   # 没变不写
+        self.f.subs('g', rec, [('甲', '进行中', 'p#1', dict(t, turn=2))])
+        self.assertIn('due', fills()[-1]['update_fields']); self.assertNotIn('due', fills()[-1]['task'])                       # 又叫回去：清掉截止
+        self.assertEqual(sum('section_guid' in d for d in self.sent('add_tasklist')), 1)
+
+    def test_old_subtasks_backfilled_open_and_closed(self):
+        rec, t = self.sub_env(); d = dict(t, status='done')
+        rec['subs'] = {'甲': {'g': 's1', 's': '完成|p#1', 'done': True}}
+        self.assertTrue(self.f.subs('g', rec, [('甲', '完成', 'p#1', d)])); self.assertEqual(sum('due' in (x.get('task') or {}) for x in self.sent('/tasks/s1')), 1)
+        self.f.st = {'g': {'own': True, 'closed': True, 'filled': '1:done:1', 'keys': ['a/A'], 'lists': ['L'], 'subs': {'甲': {'g': 's2', 's': '完成|p#1', 'done': True}}}}
+        self.f.plan = lambda ts: [('甲', '完成', 'p#1', d), ('新来的', '完成', 'p#2', d)]
+        self.f.refill([d]); self.f.refill([d])
+        self.assertEqual(sum('due' in (x.get('task') or {}) for x in self.sent('/tasks/s2')), 1); self.assertEqual(self.sent('/subtasks'), [])
+
+    def test_subtask_fill_gives_up_without_blocking(self):
+        rec, t = self.sub_env(); d, real, n = dict(t, status='done'), self.f.api, [0]
+        def api(m, p, b=None, **k):
+            if 'custom_fields' in ((b or {}).get('task') or {}): n[0] += 1; raise RuntimeError('1470400')
+            return real(m, p, b, **k)
+        self.f.api = api
+        for _ in range(6): self.assertTrue(self.f.subs('g', rec, [('甲', '完成', 'p#1', d)]))
+        self.assertEqual((n[0], rec['subs']['甲']['done']), (3, True))
+
+    def test_user_closed_filled_while_running_gets_end_time(self):
+        _, t = self.sub_env(); d = dict(t, status='done')
+        self.f.st = {'g': {'own': True, 'closed': True, 'user_closed': True, 'filled': '1:running:1', 'keys': ['a/A'], 'lists': ['L']}}
+        self.f.refill([d]); self.f.refill([d])
+        got = self.sent('/tasks/g'); self.assertEqual(len(got), 1); self.assertIn('due', got[0]['task'])
 
     def test_steps_limited_still_marks_doing(self):
         self.f.on_event(self.ev)
