@@ -202,10 +202,18 @@ class FeishuTasks:
         self.lists["_history_done"] = True; self.save(self.lists_path, self.lists)
 
     def refill(self, tasks):
-        """已经勾掉、字段还不全的任务，一次补 5 条；哪条补不了就记一行、跳过，不挡后面的。"""
+        """已经勾掉、字段还不全的任务，一次补 5 条；哪条补不了就记一行、跳过，不挡后面的。子任务也补。"""
         n = 0
         for g, r in list(self.st.items()):
-            if not r.get("own") or not r.get("closed") or r.get("filled") or not self.meta: continue
+            if not r.get("own") or not r.get("closed") or not self.meta: continue
+            mine = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
+            if r.get("subs") and self.plan and mine:
+                for title, state, _, t in self.plan(mine):
+                    cur = r["subs"].get(title)
+                    if not cur or not cur.get("g") or not t or t["status"] not in ENDED or not self.sub_due(cur, t, state): continue
+                    if n >= 5: return
+                    n += 1; self.sub_fill(r, cur, t, state)
+            if r.get("filled") and (not r.get("user_closed") or r["filled"] == "1"): continue   # user_closed 的 filled 可能是进行中写的那次，缺结束时间
             ts = [t for t in tasks if self.key(t) in (r.get("keys") or [])]
             if any(t["status"] not in ENDED for t in ts): continue   # 主人提前勾掉、活还没完的，等完了再补
             if n >= 5: return
@@ -233,15 +241,46 @@ class FeishuTasks:
             out.append({"guid": self.lists[k], **({"number_value": f"{v:.2f}"} if isinstance(v, (int, float)) else {"text_value": str(v)[:1000]})})
         return out
 
+    @staticmethod
+    def base_fields(m, end):
+        """说明、开始时间；给了 end 再加截止时间。"""
+        stamp = lambda x: {"timestamp": str(int(x * 1000)), "is_all_day": False}
+        return {"description": m["desc"][:2900], **({"start": stamp(m["start"])} if m["start"] else {}), **({"due": stamp(max(end, m["start"] or 0))} if end else {})}
+
+    @staticmethod
+    def sub_sig(t, state): return f"{t['id']}:{t['status']}:{t.get('turn') or 0}:{state}"
+
+    def sub_due(self, cur, t, state):
+        """这条子任务的字段要不要写：状态变过、没写过，同一状态写不进去 3 次就不再试。"""
+        sig = self.sub_sig(t, state)
+        return bool(self.meta) and cur.get("f") != sig and not ((cur.get("bad") or [""])[0] == sig and cur["bad"][1] >= 3)
+
+    def sub_fill(self, rec, cur, t, state):
+        """子任务的时间、说明、自定义字段，并放进项目的分组（飞书自动挂在默认分组）。不动勾选。写不进去只记一行。"""
+        sig = self.sub_sig(t, state)
+        try:
+            if not rec.get("lists"): self.own_lists()
+            lst, m = (rec.get("lists") or [""])[0], self.meta([t], True)
+            task = self.base_fields(m, m["end"])
+            if lst: task["custom_fields"] = self.custom(lst, m["custom"])
+            fields = list(task) + (["due"] if cur.get("due") and "due" not in task else [])   # 又叫回去的：清掉旧的截止时间
+            self.api("PATCH", f"/tasks/{cur['g']}", {"task": task, "update_fields": fields})
+            cur["due"] = "due" in task
+            if lst and t.get("project") and cur.get("sect") != t["project"]:
+                try: self.api("POST", f"/tasks/{cur['g']}/add_tasklist", {"tasklist_guid": lst, "section_guid": self.section(lst, t["project"])}); cur["sect"] = t["project"]
+                except Exception as e: self.log.warning("feishu subtask section not ready: %s", str(e)[:200])
+            cur["f"] = sig; cur.pop("bad", None)
+        except Exception as e:
+            b = cur.get("bad") or ["", 0]
+            cur["bad"] = [sig, b[1] + 1 if b[0] == sig else 1]; self.log.warning("feishu subtask %s not filled: %s", cur["g"], str(e)[:200])
+        self._save()
+
     def fill(self, guid, rec, ts, final, done=False):
         """把能给的字段都写上：说明、开始时间、自定义字段；final 再加结束时间（截止和完成时间）；done：飞书里已经勾完成的，要先置零才能改完成时间。时间戳是绝对时间，飞书按看的人的时区显示。"""
         if not self.meta or not ts: return
         m = self.meta(ts)
-        task = {"description": m["desc"][:2900]}
-        if m["start"]: task["start"] = {"timestamp": str(int(m["start"] * 1000)), "is_all_day": False}
-        if final:
-            end = max(m["end"] or time.time(), m["start"] or 0)
-            task.update(due={"timestamp": str(int(end * 1000)), "is_all_day": False}, completed_at=str(int(end * 1000)))
+        task = self.base_fields(m, (m["end"] or time.time()) if final else 0)
+        if final: task["completed_at"] = task["due"]["timestamp"]
         if rec.get("lists"):
             try: task["custom_fields"] = self.custom(rec["lists"][0], m["custom"])
             except Exception as e: self.log.warning("feishu custom fields not ready: %s", str(e)[:200])
@@ -257,10 +296,14 @@ class FeishuTasks:
     def subs(self, guid, rec, rows):
         """方案里每个任务一条子任务：一登记就全部建好，状态变了改标题，做完勾掉。一拍最多写 8 次，剩下的下一拍接着。返回写完没有。"""
         have, n, names = rec.setdefault("subs", {}), 0, {r[0] for r in rows}
-        rows = list(rows) + [(k, "不做了", "") for k in have if k not in names]
-        for title, state, ref in rows:
+        rows = list(rows) + [(k, "不做了", "", None) for k in have if k not in names]
+        for title, state, ref, t in rows:
             cur = have.get(title) or {}
-            if cur.get("s") == f"{state}|{ref}": continue
+            if cur.get("s") == f"{state}|{ref}":
+                if t and self.sub_due(cur, t, state):
+                    if n >= 8: return False
+                    n += 1; self.sub_fill(rec, cur, t, state)
+                continue
             if n >= 8: return False
             n += 1
             text = f"{state} · {ref + ' ' if ref else ''}{title}"[:200]
@@ -274,6 +317,7 @@ class FeishuTasks:
                 self.api("PATCH", f"/tasks/{cur['g']}", {"task": {"summary": text, "completed_at": str(int(time.time() * 1000)) if over else "0"}, "update_fields": ["summary", "completed_at"]})
             else: self.api("PATCH", f"/tasks/{cur['g']}", {"task": {"summary": text}, "update_fields": ["summary"]})
             cur.update(s=f"{state}|{ref}", done=over); self._save()
+            if t and self.sub_due(cur, t, state): n += 1; self.sub_fill(rec, cur, t, state)
         return True
 
     def note(self, t, text):
@@ -334,7 +378,7 @@ class FeishuTasks:
         sub_ok = True
         if rows:
             c = {}
-            for _, s, _ in rows: c[s] = c.get(s, 0) + 1
+            for _, s, *_ in rows: c[s] = c.get(s, 0) + 1
             if want[0] == DOING: want = (DOING, (f"共 {len(rows)}：" + " ".join(f"{k}{c[k]}" for k in SUB_ORDER if c.get(k)))[:40])
             try: sub_ok = self.subs(guid, rec, rows)
             except Exception as e: self.log.warning("feishu subtasks failed: %s", str(e)[:200])   # 清单写不上不耽误整条任务的状态，下一拍再补
