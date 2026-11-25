@@ -158,6 +158,8 @@ def plan_check(tk, project, name, body):
         if n > 1: return f"“版本: {ADHOC}”的方案只装一个任务，这里有 {n} 个：按版本做，写版本号"
         day = sum(1 for p in plans.values() if p.get("version") == ADHOC and time.time() - (p.get("at") or 0) < 86400)
         return f"{project} 一天里已经有 {day} 个临时活：攒成一个版本做；真要单独做，写一行“另开: 理由”" if day >= ADHOC_DAY and not why else ""
+    same = next((n for n, p in plans.items() if p.get("version") == ver), "")
+    if same and not why: return f"版本 {ver} 已经有方案“{same}”：这个版本的活（返修、预发、发版也算）都写进它的任务单，再发一次 [方案] {same}；要做下一个版本就换版本号"
     op = sorted((p.get("at") or 0, n) for n, p in plans.items() if p.get("version") != ADHOC and plan_open(tk, project, n))
     if not op or why: return ""
     o = op[-1][1]
@@ -186,7 +188,7 @@ def gate(tk, project, d, c):
     if d["title"] not in p["items"]: return f"“{d['title']}”不在方案“{d['plan']}”的任务单里（有：{'、'.join(p['items'])}），标题要一样；要加活先更新方案"
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
-    if len(mine) >= c["max_tasks"] * 3: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口，剩下的放下一个版本"
+    if len([t for t in mine if t["status"] not in DEAD]) >= c["max_tasks"] * 3: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口，剩下的放下一个版本"
     if d.get("role") == "评审" and not d.get("review_ok"):   # 一轮全面看、一轮复核必修就够；再多是花钱磨，要人定
         n = sum(t.get("role") == "评审" and t["status"] not in DEAD + ("failed", "lost") for t in mine)
         if n >= c["max_reviews"]: return f"方案“{d['plan']}”已经评审过 {n} 轮，不自动开下一轮：剩下的必修项自己核对修没修好就收，拿不准写 [投递 主控 问题] 请主人定；主人同意再审，派活里加一行“再审: 主人同意”"

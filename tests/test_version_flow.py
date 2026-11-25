@@ -43,6 +43,8 @@ class Version(TT.Base):
     def test_next_version_opens_when_closing_starts(self):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '收口', deps='甲', closing=True))
         self.put('甲', status='done'); self.put('收口', status='running')
+        r = self.pm(self.plan('返修', ['戊', '收口'], '1.0') + block(self.e.repo, '戊', 'src/e', plan='返修'), '[不回]')   # 同一个版本号不另起方案
+        self.assertIn('版本 1.0 已经有方案“整改”', r); self.assertNotIn('戊', [t['title'] for t in self.new()])
         self.assertEqual(self.pm(self.plan('下一版', ['丁', '收口'], '1.1') + block(self.e.repo, '丁', 'src/d', plan='下一版')), '')
         self.assertEqual(self.by('丁')['plan'], '下一版')
 
