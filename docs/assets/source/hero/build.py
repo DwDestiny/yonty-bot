@@ -46,7 +46,7 @@ def width(s, size, fk):
     f, gs, cmap, upem = font(*fk)
     return sum(metrics(c, gs, cmap)[0] for c in s) * size / upem
 
-def text(s, x, y, size, fk, fill, anchor="start", heavy=0.0):
+def text(s, x, y, size, fk, fill, anchor="start"):
     f, gs, cmap, upem = font(*fk)
     w = width(s, size, fk)
     if anchor == "middle": x -= w / 2
@@ -64,8 +64,7 @@ def text(s, x, y, size, fk, fill, anchor="start", heavy=0.0):
         g.draw(TransformPen(pen, (sc, 0, 0, -sc, x - off * sc, y)))
         d.append(pen.getCommands())
         x += adv * sc
-    st = f' stroke="{fill}" stroke-width="{n(size*heavy)}" stroke-linejoin="round"' if heavy else ""
-    return f'<path fill="{fill}"{st} d="{"".join(d)}"/>'
+    return f'<path fill="{fill}" d="{"".join(d)}"/>'
 
 LIGHT = dict(bg="#f4efe6", fg="#1c1a17", red="#d6382b", mute="#7a746a", dim="#9a948a", card="#ffffff", sub="#5b5750")
 DARK = dict(bg="#1a1814", fg="#f4efe6", red="#ff5f4f", mute="#a39d92", dim="#6f695f", card="#25221d", sub="#c4beb2")
@@ -99,8 +98,8 @@ def hero(lang, c):
     zh = lang == "zh"
     b = []
     if zh:
-        b.append(text("说做完，", 64, 150, 104, BOLD, c["fg"], heavy=0.03))
-        b.append(text("不算数。", 64 + width("说做完，", 104, BOLD), 150, 104, BOLD, c["red"], heavy=0.03))
+        b.append(text("说做完，", 64, 150, 104, BOLD, c["fg"]))
+        b.append(text("不算数。", 64 + width("说做完，", 104, BOLD), 150, 104, BOLD, c["red"]))
         b.append(text("服务自己复跑一遍验证命令，没过就退回。", 66, 210, 32, SANS, c["sub"]))
         labels = ["聊天派活", "开工", "说做完了", "PASS", "你来合并"]
         head, mono = "[验证失败]", "1 failed, 11 passed  →  退回返工"
@@ -109,8 +108,8 @@ def hero(lang, c):
         title, desc = "说做完，不算数。", "流程示意：任务说做完后，服务复跑验证命令，没过就退回；PASS 之后由你决定合并。没写验证命令时服务不复核。"
     else:
         a = "\u201cDone\u201d "
-        b.append(text(a, 64, 150, 92, BOLD, c["fg"], heavy=0.03))
-        b.append(text("doesn't count.", 64 + width(a, 92, BOLD), 150, 92, BOLD, c["red"], heavy=0.03))
+        b.append(text(a, 64, 150, 92, BOLD, c["fg"]))
+        b.append(text("doesn't count.", 64 + width(a, 92, BOLD), 150, 92, BOLD, c["red"]))
         b.append(text("The service re-runs the check itself. Fail, and it goes back.", 66, 210, 32, SANS, c["sub"]))
         labels = ["Chat request", "Start", "Says done", "PASS", "You merge"]
         head, mono = "[Check failed]", "1 failed, 11 passed  →  sent back"
@@ -137,10 +136,10 @@ def card():
     c = LIGHT
     W, H, LY = 1280, 640, 566
     b = [f'<rect x="64" y="58" width="16" height="44" rx="2" fill="{c["red"]}"/>',
-         text("Yonty Bot", 96, 94, 38, BOLD, c["fg"], heavy=0.02),
+         text("Yonty Bot", 96, 94, 38, BOLD, c["fg"]),
          text("Illustration · fictional task", 1216, 92, 20, SANS, c["mute"], "end"),
-         text("\u201cDone\u201d", 64, 226, 112, BOLD, c["fg"], heavy=0.03),
-         text("doesn't count.", 64, 352, 112, BOLD, c["red"], heavy=0.03),
+         text("\u201cDone\u201d", 64, 226, 112, BOLD, c["fg"]),
+         text("doesn't count.", 64, 352, 112, BOLD, c["red"]),
          text("说做完，不算数。", 66, 418, 44, BOLD, c["fg"]),
          text("A coding agent in your team chat. It only counts as done", 66, 466, 28, SANS, c["sub"]),
          text("when the service re-runs your check and it passes.", 66, 502, 28, SANS, c["sub"])]
