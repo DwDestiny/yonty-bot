@@ -3306,22 +3306,56 @@ def ambient_loop():
         except Exception: log.exception("ambient loop error")
         time.sleep(AMB["poll_seconds"] if not amb_buf else 10)
 
+class CacheCheckError(Exception):
+    pass
+
+def cc_run(cmd, what, **kw):
+    """缓存检查里跑一次 claude：没装、超时、退出非 0 都变成一句人话（CacheCheckError），不抛 Traceback。"""
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, cwd=WORKDIR, env=hook_env(False, False, ""), **kw)
+    except FileNotFoundError:
+        raise CacheCheckError("找不到 claude 命令。先装好 Claude Code，并确认它在本服务的 PATH 里（`which claude`）。")
+    except subprocess.TimeoutExpired:
+        raise CacheCheckError(f"{what}超过 300 秒没有返回。先单独跑一次 claude 看是不是卡在登录或网络。")
+    if r.returncode != 0:
+        tail = tasks.gate.SECRET_RE.sub(r"\1***", (r.stderr or r.stdout or "").strip())[-300:]
+        raise CacheCheckError(f"{what}失败，claude 退出码 {r.returncode}。" + (f"末尾输出：{tail}" if tail else "没有输出，先单独跑一次 claude 看看。"))
+    return r
+
+def cc_json(line, what):
+    try: return json.loads(line)
+    except ValueError:
+        raise CacheCheckError(f"{what}的输出不是 JSON，没法读缓存数字。检查 claude 版本和 base_cmd 参数。")
+
 def cache_check(n):
-    """用服务同款参数连开 n 个新会话，每个都是“开场白 + 一句测试消息”，打印缓存读写。"""
+    """用服务同款参数连开 n 个新会话，每个都是“开场白 + 一句测试消息”，打印缓存读写。出错给一句人话，返回 1。"""
+    try: return cache_check_run(n)
+    except CacheCheckError as e:
+        print(f"缓存检查没跑完：{e}", flush=True); return 1
+
+def cache_check_run(n):
     print("轮次  开场白(读/写)        测试消息(读/写)")
     rows = []
     for i in range(n):
         sid = str(uuid.uuid4())
         res = []
         if PRIME_ON:
-            p = prime(sid)
-            res.append(json.loads(p.stdout)["usage"])
-        r = subprocess.run(base_cmd(stream=True) + (["--resume", sid] if PRIME_ON else ["--session-id", sid]),
-                           input=f"[缓存检查] 第 {i + 1} 轮，只回复“好”。", capture_output=True, text=True,
-                           timeout=300, cwd=WORKDIR, env=hook_env(False, False, ""))
-        evs = [json.loads(l) for l in r.stdout.splitlines() if l.startswith("{")]
+            p = cc_run(base_cmd() + ["--session-id", sid], "开场白", input=PRIME)
+            u = cc_json(p.stdout, "开场白").get("usage")
+            if not isinstance(u, dict): raise CacheCheckError("开场白的输出里没有 usage。检查 claude 版本。")
+            res.append(u)
+        r = cc_run(base_cmd(stream=True) + (["--resume", sid] if PRIME_ON else ["--session-id", sid]), "测试消息",
+                   input=f"[缓存检查] 第 {i + 1} 轮，只回复“好”。")
+        evs = []
+        for l in r.stdout.splitlines():
+            if l.startswith("{"):
+                try: evs.append(json.loads(l))
+                except ValueError: pass
         init = next((e for e in evs if e.get("type") == "system" and e.get("subtype") == "init"), {})
-        res.append(next(e for e in evs if e.get("type") == "result")["usage"])
+        fin = next((e for e in evs if e.get("type") == "result"), None)
+        if not fin or not isinstance(fin.get("usage"), dict):
+            raise CacheCheckError("测试消息的输出里没有 result（或没有 usage），没法读缓存数字。检查 claude 版本和登录状态。")
+        res.append(fin["usage"])
         rows.append(res)
         mcp = tasks.mcp_status(init)
         fmt = lambda u: f"{u.get('cache_read_input_tokens')}/{u.get('cache_creation_input_tokens')}"
@@ -3332,7 +3366,7 @@ def cache_check(n):
     first_w = rows[-1][0].get("cache_creation_input_tokens", 0)
     ok = all(r[0].get("cache_creation_input_tokens", 0) < 2000 for r in rows[1:])
     print("结论：" + ("正常。第 2 轮起开场白几乎不写缓存。" if ok else
-                     f"异常。第 2 轮起开场白仍写 {first_w} token，按 references/cache.md 排查。"))
+                     f"异常。第 2 轮起开场白仍写 {first_w} token，按 docs/cache.md 排查。"))
     return 0 if ok else 1
 
 # ---------- 企业微信：wecom_gateway.mjs 子进程负责长连接，bridge 通过它的 stdin/stdout 收发 ----------
