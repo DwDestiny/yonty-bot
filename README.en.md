@@ -23,7 +23,7 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 
 You use your own Claude subscription. Before you install, read [When not to use it](#when-not-to-use-it), [Cost and subscription](#cost-and-subscription) and [Security boundaries](#security-boundaries).
 
-## Demo
+## How a job runs
 
 A job from start to finish. The names are made up, and the steps follow the real flow.
 
@@ -33,7 +33,7 @@ A job from start to finish. The names are made up, and the steps follow the real
 4. The last task merges the work and opens a draft pull request. When it says it is done, the service re-runs the verify command and sends the task back in the background if it fails.
 5. The re-run passes, so the result says PASS. The bot reports back in the group with a link to the draft pull request.
 
-## Three selling points
+## Three highlights
 
 **"Done" doesn't count.** For a task that has a verify command, the service runs that command again when the task says it is done. If it fails, the task goes back for rework, up to 2 times by default. If it still fails, the task comes back as BLOCKED. For a task without a verify command, the result says "no verify command set, not re-checked by the service".
 

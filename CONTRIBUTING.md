@@ -42,7 +42,7 @@ python3 -m unittest tests.test_yonty_bot.RepoDocsTest
 ```
 
 - 测试不连 IM，不调真的 Claude。
-- 一部分测试要用 `bwrap` 或 systemd 用户总线，机器上没有时会跳过。
+- 一部分测试要用 `bwrap` 或 systemd 用户总线。没有 `bwrap` 时，要起沙箱的用例多数会失败，不是跳过（见 [docs/troubleshooting.md](docs/troubleshooting.md) 第 7 节）；先 `apt install bubblewrap`，或只跑跟你改动相关的文件。
 - 只改文档，跑上面两条单独的测试就够了，后一条会查文档链接和疑似真实 ID。改代码要跑全量。
 - 合并请求本身不会自动跑 CI，所以合并请求里要写你本机跑了哪些命令、结果怎样，跳过的和没跑的也照实写。
 - 维护者看完你的代码后，会把那个提交推到 `ci/` 分支，在 CI 上跑一遍全量测试：专用机跑大部分，GitHub 自带机器跑要起沙箱的测试，两边相加等于全量，一条不跳。做法见 [docs/ci.md](docs/ci.md)。你不用自己跑 CI，也不要在合并请求页面点“批准并运行”。

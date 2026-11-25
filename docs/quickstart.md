@@ -135,7 +135,7 @@ python3 bridge.py --cache-check 3        # 会调真实的 claude，花一点额
 
 预期：结论是“正常”。结论异常或报错，先读 [cache.md](cache.md)；没装 `claude`、超时或 `claude` 报错时，这条打印“缓存检查没跑完：原因”并以退出码 1 结束，不抛异常。
 
-然后装服务。第一次装要先建目录，再执行 scaffold 打印的那条安装命令：
+然后装服务。执行 scaffold 打印的那条安装命令（它自带 `mkdir -p`，下面是 Linux 上展开的样子）：
 
 ```bash
 mkdir -p ~/.config/systemd/user

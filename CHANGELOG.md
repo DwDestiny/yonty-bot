@@ -14,9 +14,9 @@
 
 ### 新增
 - `[撤方案] 项目短名 名称`：登记错了的方案可以撤掉。撤掉的方案不再占版本号，不挡新方案；方案里还有没完的任务时不让撤，先收掉。同名重新登记就恢复。
-- 失败、中断的任务也能取消；写了不存在的任务编号，机器人会回一句“没有这个编号”，不再吞掉你的话。
+- 失败、中断的任务也能取消；`/task` 这类命令遇到不存在的编号，回“没有这个任务”；你发 `短名#N 内容` 而编号不存在时，原话交给主控，不再吞掉。
 - 仓库有了 CI：专用机跑大部分测试和页面检查，GitHub 自带机器跑要起沙箱的测试，两边相加等于全量，一条不跳。说明见 [docs/ci.md](docs/ci.md)。
-- 文档：重写中英文 README（首屏图、三个卖点、什么时候别用、费用和订阅），新增手动安装（[quickstart.md](docs/quickstart.md)）、日常使用（[usage.md](docs/usage.md)）、按现象排障（[troubleshooting.md](docs/troubleshooting.md)）和发版写法（[releasing.md](docs/releasing.md)）；新增协作指南、安全问题报告、行为准则和议题、合并请求模板。
+- 文档：重写中英文 README（首屏图、三个特点、什么时候别用、费用和订阅），新增手动安装（[quickstart.md](docs/quickstart.md)）、日常使用（[usage.md](docs/usage.md)）、按现象排障（[troubleshooting.md](docs/troubleshooting.md)）和发版写法（[releasing.md](docs/releasing.md)）；新增协作指南、安全问题报告、行为准则和议题、合并请求模板。
 
 ### 变更
 - `scaffold.py` 先检查再写文件：配置缺项、新装时 `workdir` 不存在、启用企微却没有 npm，都报错退出，实例目录不动；没装 `claude` 或 `lark-cli` 不拦，生成完在末尾列出“还差几样”。守则是空的会按模板补回，服务原来用的 Python 不能用了会换成现在这个。
