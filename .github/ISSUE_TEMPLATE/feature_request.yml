@@ -1,0 +1,62 @@
+name: "功能建议 · Feature request"
+description: "想要的新能力或改进 · A new capability or an improvement"
+title: "[功能 Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **公开议题，请先脱敏。** 不要贴令牌、密钥、登录链接、真实的用户/群/应用 ID、真实姓名、聊天内容、内网地址。安全漏洞不要写在这里，按 [SECURITY.md](https://github.com/DwDestiny/yonty-bot/blob/main/SECURITY.md) 私下报告。
+
+        **This issue is public. Redact first.** No tokens, keys, login links, real user/chat/app IDs, real names, chat content or internal addresses. Report vulnerabilities privately as described in SECURITY.md.
+  - type: textarea
+    id: problem
+    attributes:
+      label: "要解决什么问题 · Problem"
+      description: "谁在什么场景遇到，现在怎么绕 · Who hits it, when, and the current workaround"
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: "希望怎样 · Proposal"
+      description: "希望的效果，例如聊天里怎么说、机器人怎么回 · Desired result"
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "想过的其他办法 · Alternatives"
+      description: "没有可以不填 · Optional"
+    validations:
+      required: false
+  - type: dropdown
+    id: boundary
+    attributes:
+      label: "会不会动到身份、钩子或隐私边界 · Does it touch identity, hooks or privacy?"
+      options:
+        - "不会 · No"
+        - "会 · Yes"
+        - "不确定 · Not sure"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: "渠道 · Channel"
+      options:
+        - "飞书 · Feishu/Lark"
+        - "企业微信 · WeCom"
+        - "两个都接 · Both"
+        - "与渠道无关 · Not channel-related"
+    validations:
+      required: true
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: "提交前确认 · Before you submit"
+      options:
+        - label: "我已去掉令牌、真实 ID、真实姓名、聊天内容和内网地址 · I removed tokens, real IDs, real names, chat content and internal addresses"
+          required: true
+        - label: "我搜过已有议题，没有重复的 · I searched existing issues"
+          required: true
