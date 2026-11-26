@@ -18,6 +18,7 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 
 <p align="center">
   <a href="#how-a-job-runs">How a job runs</a> ·
+  <a href="#group-chat-examples">Group chat examples</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#security-boundaries">Security boundaries</a> ·
@@ -49,6 +50,20 @@ The steps from start to finish:
 **Use it together in a group.** A teammate @-mentions it with a code question. It looks and answers, with no approval from you. When a teammate wants a code change, it writes a task brief and waits for your approval before it starts. An approval that nobody gives expires after 24 hours by default. Who you are comes only from the sender ID that Feishu or WeCom provides. A message that claims "I'm the owner" counts for nothing.
 
 **Progress shows up in Feishu Tasks.** With Feishu Tasks sync on, each job you give it in a direct message becomes a Feishu task: one per plan, with the bot as the assignee and you as a follower. Each finished subtask adds a line. The service, not the model, writes the time, models, cost and pull requests into the task description, and checks the task off when the work is done. Assigning a Feishu task to the bot also counts as giving it a job. Sync is off by default, and the app needs extra task permissions. See [docs/usage.md](docs/usage.md#10-飞书任务同步).
+
+## Group chat examples
+
+<table>
+  <tr>
+    <td width="50%" valign="top"><img src="docs/assets/scenes/group-banter.png" alt="Staged Feishu group chat in Chinese, named shop 项目群. Lao Chen asks who touched login last night, because login keeps timing out. Xiao Lin claims to have changed only a button color. Lao Chen @-mentions the bot (小助理), which checks the commits: #128, merged into main at 21:40 last night by Xiao Lin with the message 'tweak the button color while I'm at it', cut the login timeout from 30 seconds to 3. The two bicker. Lao Chen says 'I trusted you', and the bot, with no @-mention, adds: 'That trust timed out in 3 seconds.' Xiao Lin @-mentions it to restore 30 seconds and add a timeout test. It replies with a task brief that waits for Zhou Yu to approve. Zhou Yu sends /approve shop#31, the bot replies 'Approved, shop#31 is queued', and Zhou Yu says Lao Chen and Xiao Lin buy the bubble tea this week." width="100%"></td>
+    <td width="50%" valign="top"><img src="docs/assets/scenes/group-work.png" alt="Staged Feishu group chat in Chinese, named shop 项目群. Zhou Yu @-mentions the bot (小助理): show 'only N left' on the order page when stock is 5 or fewer, and verify with npm test. The bot hands it to shop's project manager. Then a message that starts with 【shop】 says this version does only this job, and assigns shop#32. Xiao Su @-mentions the bot to ask what the order API returns when stock is too low. It answers: 409, error code STOCK_NOT_ENOUGH, in createOrder in src/order/create.ts. Later the bot reports the job done: the service re-ran npm test and it passed, the review passed too, here is the pull request link, and it suggests merging. Xiao Su: 'That fast? I haven't finished the requirements doc.' Zhou Yu: 'Keep writing. I'll merge after I read the diff.'" width="100%"></td>
+  </tr>
+</table>
+
+- **Banter (left).** Login keeps timing out, and Lao Chen and Xiao Lin blame each other. The bot checks the commits and finds who changed the timeout. Listen mode is on in this group, so the bot adds a joke without being @-mentioned. Xiao Lin asks it to change the timeout back. It writes a task brief and @-mentions you in the group, and the work starts only after you approve.
+- **Work (right).** You give a job in the group. The bot hands it to the project manager, which assigns one lead. While the lead works, a teammate asks the bot about an API, and it answers on the spot. When the lead is done, the service re-runs `npm test`, the review passes, and the bot reports under your message with the pull request link.
+
+Both pictures are staged. The names, the group and the dialogue are made up. The interface is Feishu on the web, and everything is in Chinese, because the service's own messages are in Chinese. 周宇 (Zhou Yu, blue bubbles) is you, and 小助理 (the dark "Y" avatar) is the bot. In the bot's messages, the task brief that waits for your approval, "批了，……排上了" (approved, queued), the "【shop】" prefix and the "派了 ……" (assigned …) line are the service's fixed wording, copied from the code. The other bot lines are made-up examples. In real use, the model writes them. For each line and where it comes from in the code, see [docs/assets/source/scenes/README.md](docs/assets/source/scenes/README.md).
 
 ## Where it fits
 
@@ -240,6 +255,7 @@ Details are in [docs/boundary.md](docs/boundary.md). Config, chat state and task
 - Data from real projects on fixed-lead records and on writing acceptance tests first is still being collected.
 - The Mac is not tested in practice. The alert when the service dies and the `/upgrade` command rely on systemd, which a Mac does not have.
 - There is no web console.
+- The service's own messages are in Chinese only, for example approval requests, queue confirmations and the first line of task reports.
 - The docs are mostly in Chinese.
 
 ## How it compares

@@ -23,7 +23,7 @@
 | `wecom.md` | 企业微信渠道 | 现行 |
 | `plan-2.0.md` | 跳转页，指向 `archive/plan-2.0.md`，保住旧链接 | 跳转 |
 | `archive/` | 已实现的方案，只读归档。现有：`plan-2.0.md`（2.0 方案：三层智能体、投递、资源放行、定时任务和权限范围；对话原文和真实场景已改成转述） | 归档 |
-| `assets/` | 图片、示意图、截图和生成记录，成员见 [assets/README.md](assets/README.md) | 素材 |
+| `assets/` | 图片、示意图、截图、群聊场景，以及它们的记录，成员见 [assets/README.md](assets/README.md) | 素材 |
 
 规则：
 

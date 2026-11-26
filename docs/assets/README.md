@@ -2,20 +2,23 @@
 
 > 3.19.10 · 2026-11-26 · 维护：Yonty Bot contributors
 
-README 和文档用到的图片：主视觉、示意图、截图，以及生成图的记录。
+README 和文档用到的图片：主视觉、示意图、截图、群聊场景，以及生成图和场景图的记录。
 
 | 路径 | 放什么 |
 |---|---|
 | `hero/` | 主视觉 `hero.zh.webp`、`hero.en.webp`（README 首屏），社交卡片 `social-card.jpg`（1280×640，在仓库设置里上传后，分享链接时显示） |
 | `diagrams/` | 正文配图：派活流程（`flow`）、三层分工（`layers`）、复跑验证（`gate`）、权限边界（`boundary`），中英各一张，WebP |
 | `screenshots/` | 真实截图。`feishu-task.png`：README“一件活怎么走完”用，飞书网页版里的私聊和飞书任务，中英文 README 共用。怎么截的见下面“截图” |
+| `scenes/` | 群聊场景，摆拍：`group-banter.png`（斗嘴）、`group-work.png`（干活）。README“群聊示例”用，中英文 README 共用。界面是飞书网页版，人名和台词是编的 |
 | `source/generated/` | 生成图的记录：提示词、模型、图上的字、对应的代码，以及检查脚本 `check.py`。见 [source/generated/README.md](source/generated/README.md) |
+| `source/scenes/` | 场景图的记录：台词、机器人的哪些话照代码写，以及拼图脚本。见 [source/scenes/README.md](source/scenes/README.md) |
 
 规则：
 
 - 单个素材不超过 5 MB，素材合计不超过 15 MB。更大的走 Release 附件，文档里放链接。
 - 主视觉和示意图是生成的插画，图上的字按代码写，逐字核对过。换图要同时更新 `source/generated/` 里的记录，否则 CI 不过。
 - 截图是实拍，图注写明是节选、哪些地方换过。
+- 场景图是摆拍，图注写明台词是编的，以及机器人的哪些话是服务的固定格式。改了这些固定格式，要重拍场景图。
 - 素材里不放真实用户名、群名、ID、服务器地址和密钥。截图里的人名、头像换成占位，水印去掉。
 - 新增或改名素材后，更新本页。
 
