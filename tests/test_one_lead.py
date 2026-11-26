@@ -258,6 +258,18 @@ class Lead(TT.Base):
         self.assertNotIn('发版: 只发 beta', kinds); self.assertEqual(kinds.get('补一条回归测试'), '指令')
         self.assertTrue(any(r['to'].get('to') == '主控' and '请主人点头' in r['text'] for r in self.t.dl.load(self.t)))
 
+    def test_release_delivery_in_owner_round(self):
+        """主人这一轮说过话，项目经理却用 [投递 短名#N] 发版：退回改写成 [任务指令]，回执不叫它再去问主人；改写的那条照转（3.19.9）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
+        before = len(self.pm_prompts())
+        self.pm(f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n', f'[任务指令] {n}\n发版: 只发 beta\n原因: 主人说先发 beta\n')
+        receipts = [p for p in self.pm_prompts()[before:] if '[服务回执]' in p]
+        self.assertTrue(receipts); self.assertTrue(all('发版只走 [任务指令]' in p and '投递 主控 问题' not in p for p in receipts))
+        self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id']) if '发版: 只发 beta' in x['text']], ['指令'])
+        self.assertEqual(self.t.load(lead['id'])['status'], 'approved')
+
     def test_release_delivery_left_as_note_still_escalates(self):
         """项目经理三次都用投递答发版：按留言送（3.19.8），负责人还在等，留言不算答了，问题由服务上交主控（3.19.9）。"""
         self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
