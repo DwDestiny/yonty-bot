@@ -1,6 +1,6 @@
 # 搭建指南（给帮你安装的智能体看）
 
-> 2.0 · 2026-11-22 · 维护：Yonty Bot contributors
+> 3.18.0 · 2026-11-25 · 维护：Yonty Bot contributors
 
 ## 它是什么
 
@@ -53,16 +53,27 @@
 
 ## 步骤
 
-1. 装好并登录 lark-cli：`lark-cli config init`（新建应用加 `--new`），再 `lark-cli auth login`。登录要用户在浏览器点，按 setup.md 第 2 节把链接交给用户。
+下面所有命令都在**仓库根目录**（克隆下来的 `yonty-bot/`）里执行，路径都从仓库根算起；`<实例目录>` 换成你自己的目录。样例配置里的 `~/work`、`~/wiki`、`~/notes/kb` 是作者习惯的目录，一律换成你自己的。
+
+0. 先备好工具（官方安装途径，命令以官方页面为准）：
+   - Node.js：下面三个 npm 包对 Node 版本要求不同（2026-11-25 用 `npm view` 查）：`@larksuite/cli` ≥16，`@wecom/cli` ≥18，`@anthropic-ai/claude-code` 2.1.332 声明 ≥22。三样都要装就直接用 22 或更新的。
+   - Claude Code：`npm install -g @anthropic-ai/claude-code`，再运行 `claude` 登录。官方说明见 <https://code.claude.com/docs>。
+   - lark-cli：`npm install -g @larksuite/cli`。装完用 `lark-cli --version` 确认。
+   - 要用到的可选依赖：`gh`（GitHub 建合并请求）、`bwrap`（`apt install bubblewrap`，带读范围的定时任务要）、systemd 用户服务（Linux 常驻）。Mac 没有 bwrap 和 systemd，看门狗和 `/upgrade` 在 Mac 上用不了；Mac 上任务怎么跑没有实测。
+1. 登录 lark-cli：`lark-cli config init`（新建应用加 `--new`），再 `lark-cli auth login`。登录要用户在浏览器点，按 setup.md 第 2 节把链接交给用户。
 2. 在飞书开发者后台给应用开机器人能力、加权限、订阅 `im.message.receive_v1`（长连接）、发布版本。清单见 setup.md 第 3 节。
-3. 建实例目录，例如 `~/work/<机器人名>/`。复制 `../app/config.example.json` 为实例目录下的 `config.json`。
-4. 接飞书时运行 `bash ../scripts/ids.sh`，把输出的 `bot_open_id` 和 `owner_open_id` 填进 `config.json`；接企微时按 wecom.md 第 2 节填 `channels.wecom`。再按问到的六件事填 `persona`、`style`、`private`、`identity`、`workdir`、`add_dirs`。
-   > **注意**：`workdir` 不能是实例目录，否则 Claude 会加载实例目录的 `CLAUDE.md`。一般填主人放代码仓的目录。
-5. 运行 `python3 ../scripts/scaffold.py <实例目录>`。脚本写出 `bridge.py`、`hooks/`、`rules.md`、`claude-settings.json` 和服务文件，并打印安装命令；启用企微时另写 `wecom_gateway.mjs` 并 `npm install` SDK（需要 Node 18+）。
-6. 读一遍生成的 `rules.md`，按用户的具体情况改：私密内容的具体名单、要找谁拍板、哪些事不在飞书里做。以后改守则直接改 `rules.md`；重跑 `scaffold.py` 只把模板的改动合进去，不盖掉你的改动（加 `--rules` 才整份重写）。
-7. 验证缓存：在实例目录运行 `python3 bridge.py --cache-check 3`。结论是“正常”才往下走。看不懂或异常，读 [cache.md](cache.md)。
-8. 按脚本打印的命令安装服务并启动。服务器上还要 `sudo loginctl enable-linger $USER`（要 sudo，交给用户）。
-9. 跑下面的验收清单。
+3. 建实例目录并复制样例配置：`mkdir -p <实例目录> && cp app/config.example.json <实例目录>/config.json`，例如 `<实例目录>` 写 `~/work/<机器人名>`。
+4. 接飞书时运行 `bash scripts/ids.sh`，把输出的 `bot_open_id` 和 `owner_open_id` 填进 `<实例目录>/config.json`；任何一项取不到，脚本会打“标签 （取不到）”、在 stderr 写原因，并以退出码 1 结束，先看 stderr 再填。接企微时按 wecom.md 第 2 节填 `channels.wecom`。再按问到的六件事填 `persona`、`style`、`private`、`identity`、`workdir`、`add_dirs`。
+   > **注意**：`workdir` 不能是实例目录，否则 Claude 会加载实例目录的 `CLAUDE.md`。一般填主人放代码仓的目录。新装前先建好 `workdir` 指向的目录，不存在会停下（装过的实例只警告）。
+5. 运行 `python3 scripts/scaffold.py <实例目录>`。脚本先检查再写盘：配置缺项、`workdir` 不存在（新装）、启用企微却没有 npm，都会报错退出，什么都不写；npm 没有时的提示是“启用了企微，但没找到 npm：装好 Node 18+ 再跑；或加 --no-npm 先生成，之后自己装依赖”。通过后写出 `bridge.py`、`hooks/`、`rules.md`、`claude-settings.json` 和服务文件，启用企微时另写 `wecom_gateway.mjs` 并 `npm install` SDK。结尾打印 `完成（Yonty Bot vX）`；如果打的是 `完成（Yonty Bot vX），还差 N 样：`，下面逐条列出的（没装 claude 或 lark-cli、npm 装失败等）都要补齐。
+   > **注意**：服务的 PATH 在生成这一刻写死。先装好 claude、lark-cli（装到 `~/.local/bin` 也一样）再跑 scaffold；后装的，装好后重跑 scaffold。看门狗单元同样带这份 PATH，Linux 和 Mac 都适用。
+6. 读一遍生成的 `rules.md`，按用户的具体情况改：私密内容的具体名单、要找谁拍板、哪些事不在飞书里做。以后改守则直接改 `rules.md`；重跑 `scaffold.py` 只把模板的改动合进去，不盖掉你的改动（加 `--rules` 才整份重写）。守则是空的（或只有空白）时，重跑会按模板补回；有内容就不重写。
+7. 验证缓存：在实例目录运行 `python3 bridge.py --cache-check 3`。结论是“正常”才往下走。出错时打印 `缓存检查没跑完：原因` 并以退出码 1 结束（没装 claude、输出不是 JSON 等），按原因处理后重跑。看不懂或异常，读 [cache.md](cache.md)。
+8. 照 scaffold 打印的命令安装服务并启动（命令里已带 `mkdir -p`，不用另建目录；Linux 是 `~/.config/systemd/user`，Mac 是 `~/Library/LaunchAgents`）。服务器上还要 `sudo loginctl enable-linger $USER`（要 sudo，交给用户）。
+9. 启用看门狗（Linux）：scaffold 会生成 `<服务名>-yb-watchdog.service` 和 `.timer`，单元里已带 PATH，但不会自动启用。心跳 5 分钟没更新就私聊主人，不靠 bridge 活着。在终端跑：`systemctl --user link <实例目录>/<服务名>-yb-watchdog.service <实例目录>/<服务名>-yb-watchdog.timer && systemctl --user enable --now <服务名>-yb-watchdog.timer`。Mac 不生成这两个文件。
+10. 跑下面的验收清单。
+
+> 以上命令在沙箱里分别跑过（假 lark-cli、假 claude），服务安装只验证到建链接。没实测：真实飞书和企微、真实 Claude 登录、真实 systemd 启动、Mac。哪里卡住先看 [troubleshooting.md](troubleshooting.md)。
 
 ## 验收清单
 
@@ -107,7 +118,7 @@
 - 看日志：`tail -f <实例>/logs/bridge.log`。`recv` 收到、`context` 带了几条前文、`cost` 每次花费和缓存读写。
 - 改守则后不用重启，下一个会话生效；第一次会整段重写缓存一次（约 $0.2）。
 - 改 `bridge.py` 或 `config.json` 后重启服务。停服务用 SIGTERM（`systemctl --user restart`），不要 `kill -9`。
-- 升级：在仓库里 `git pull` 后重跑 `scaffold.py`，会覆盖 `bridge.py` 和钩子，保留 `rules.md` 和 `roles/` 里已有的模板（新角色会补上）。
+- 升级：在仓库里 `git pull` 后重跑 `scaffold.py`，会覆盖 `bridge.py` 和钩子，保留 `rules.md` 和 `roles/` 里已有的模板（新角色会补上）。服务沿用原来用的那个 Python（它没了或低于 3.9 才换成现在这个）。守则是软链或只读的，脚本不写，会列出来请你手工合。
 
 ## 踩过的坑
 
@@ -148,6 +159,7 @@
 
 ## 变更记录
 
+- 3.18.0（2026-11-25）撤方案、装机检查、CI、文档：`[撤方案] 项目短名 名称` 给方案打已撤标记（文字和任务不动，同名重登恢复；还有没完的任务时拒绝，撤后留着的失败任务不再当成要人定的事，主人交代过的作废）；失败、中断的任务能取消，不存在的编号：`/task` 类命令回“没有这个任务”，主人发 `短名#N 内容` 时原话交给主控，不再吞话。`scaffold.py` 先检查再写盘（配置缺项、新装 workdir 不存在、企微没有 npm 都退出且不写），空守则按模板补回，`claude`、`lark-cli` 没装只在末尾列“还差几样”，两个服务用同一个 Python；`ids.sh` 取不到任一项退出 1，`--cache-check` 出错打一句原因、退出 1。仓库 CI：`.github/workflows/ci.yml` 两个作业，`tests` 在专用机，`sandbox` 在 GitHub 自带机，分法清单见 `scripts/ci/`，两边相加等于全量。文档重写：两份 README、quickstart、usage、troubleshooting、releasing、CONTRIBUTING 等。人工步骤：升级不覆盖守则，实例守则要手补 `[撤方案]` 一句；改过的角色模板手动合（UPGRADE.json 的 `notes` 已登记）。
 - 3.17.0（2026-11-25）按版本干活、全部从 sonnet 起步、花快了先提醒：项目类的活一个版本一个方案、一个合并请求，测试、CI、评审、发版每个版本只做一次，方案没收口又另起一个会退回，让它补进正在做的版本；一个任务就做完的小活写 `版本: 临时`，自己测、自己建合并请求，要合并的跟一个评审；重发同名方案就是往里补；角色说明改过的，老的项目经理会话下一轮自动再带一次；一个方案开发任务最多 8 个，同类页面、一个接一个的活合成一个任务。除评审外都从 sonnet 起步（不再按风险分用 opus），验证没过两次或退回两次再升，sonnet 不带顾问。隐私和密钥由两道拦：推送前的密钥扫描（主人的会话也查，云端跑的不过这道），和合并前的评审。方案先“定性”（这句话可能是哪几种事、行话、参照、怎么证明做对了），任务书写的验收就是全部标准。新提醒：5 小时额度用得比时间快 1.5 倍以上、方案花到预警线，都只提醒不停。新配置 `tasks.quota_alert.five_hour_pace`、`plan_usd`，`team.max_tasks` 默认改成 8。
 - 3.16.0（2026-11-25）额度剩 5% 自动暂停：任一窗口用到 95% 或撞了限额，Claude 任务退回排队，自动轮次全停，只私聊主人一条，问要不要换 ZCode；不换就等刷新后自动接着干。撞限额不再报失败、不再逐条原样刷屏；人发的消息记下，恢复后回。新命令 `/quota`、`/quota zcode`、`/quota go`，新配置 `tasks.quota_pause`。
 - 3.15.1（2026-11-25）修：方案里的子任务也写开始、截止时间、说明和自定义字段，并放进项目的分组，以前建的也补；进行中写过一次字段、之后被自动勾掉的任务补上结束时间。
@@ -197,7 +209,7 @@
   - 看板按任务状态生成；`/stop`、`/resume` 停工复工；额度统一写“剩 21%，1 小时 48 分后刷新”。
   - 升级：`/upgrade` 直接升，项目经理会话自动换新。不想要新组织，在 `config.json` 写 `"team": {"strict": false}`。
 - 2.0.1（2026-11-23）`/upgrade` 自动合守则：模板从上次到现在的改动按整行逐处合进实例的 `rules.md`；实例改过的那一处不动，回报里列出来，其余照合，基线（`yonty-bot.json` 的 `rules_commit`）不前移，下次再试。手工合完加 `--rules-done` 记下。从 2.0.0 之前直接升上来的，老实例按 `commit` 当基线。
-- 2.0.0（2026-11-22）三层智能体、投递、按资源放行、设备和不可逆闸门、定时任务。详见 [architecture.md](architecture.md)、[tasks.md](tasks.md)、[schedules.md](schedules.md)、[boundary.md](boundary.md)。
+- 2.0.0（2026-11-23）三层智能体、投递、按资源放行、设备和不可逆闸门、定时任务。详见 [architecture.md](architecture.md)、[tasks.md](tasks.md)、[schedules.md](schedules.md)、[boundary.md](boundary.md)。
   - 第二轮补齐：任务回报先到项目经理（处理掉要写理由，不写服务补投给主控）；投递限频真正生效（进展 10 分钟一条、每个任务 5 条，主人私聊 10 分钟 4 条、每小时 12 条，超出的不用回复的进摘要、要回复的排队，同一发送方 2 分钟内的合并，同一对智能体来回 3 次交给主控）；每次投递跳数自动加一，超过 3 跳拦下；内存紧时冻结单元、缓过来解冻；探针在 bwrap 里跑、同事也能写探针；沙箱盖住 `/run/user`。`--cache-check` 实测见 cache.md 第 6 节。
   - 第三轮复审修复（2026-11-23）：命令行（投递、动作、建合并请求、诊断）不再带主人权限，主人专属的改成主人私聊里主控写 `[服务命令] diag|mr|act`，由服务执行；任务单元按 cgroup 路径、轮次、InvocationID、MainPID 认；定时沙箱里只有工作树、发件箱和自己的会话记录可写，租约、动作、回执由服务在箱外办；设备红线和不可逆闸门认得到套着、拆开、替换出来的写法。已经用 `rules.md` 的实例，把“跑 `tasks.py diag`”那句改成写 `[服务命令] diag`。
   - 第四轮复审修复（2026-11-23）：主人答复会话的请求，只有主人自己私聊会话发的、在同一个私聊里答复才带主人身份；沙箱先盖整个私密目录再绑回列出的子目录，`node_modules` 等也找；`[服务命令] act` 和发件箱的动作只执行一次；发件箱分批办；任务请求的答复先写收件箱再标已回；设备钩子有长度和时间上限。

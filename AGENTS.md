@@ -1,6 +1,6 @@
 # Yonty Bot · Agent Guide（L1）
 
-> 3.14.0 · 2026-11-24 · 维护：Yonty Bot contributors
+> 3.18.0 · 2026-11-25 · 维护：Yonty Bot contributors
 
 ## 目的
 
@@ -15,7 +15,11 @@
 | `app/` | 运行代码和实例模板：`bridge.py`（渠道、聊天、任务回报）、`tasks.py`（后台任务）、`delivery.py`（投递）、`scheduler.py`（定时任务）、`resources.py`（按资源放行）、`devices.py`（设备租约）、`actions.py`（动作）、`fsio.py`（写文件不跟软链接）、`outbox.py`（沙箱的发件箱）、`team.py`（方案、看板、停工、派活闸门）、`updates.py`（查更新、装更新）、`decide.py`（决策点和影子记录）、`agents.py`（智能体适配层）、`gate.py`（验证闸门怎么跑）、`feishu_tasks.py`（飞书任务同步）、`retro.py`（复盘数据）、`hooks/`（含 `device_guard.py`、`irreversible_gate.py`、`scope_guard.py`）、`roles/`（含 `项目经理.md`）、`rules/`、`wecom_gateway.mjs`、`config.example.json`。第 1 步按层拆成包 | 是 |
 | `UPGRADE.json` | 发布说明：低于哪版升级要等任务跑完、哪些版本有人工步骤 | 是 |
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID；`device-wrapper.sh` 装在设备上的命令入口，拒绝运行 claude | 是 |
-| `docs/` | 架构、搭建指南、配置、任务、定时任务（`schedules.md`）、缓存、边界、企微；2.0 方案（`plan-2.0.md`，已实现）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
+| `scripts/ci/` | CI 的测试分法：`sandbox-tests.txt`（要起沙箱、放 GitHub 自带机器跑的测试编号）、`split_tests.py`（核对分法、分两边跑）。说明见 [docs/ci.md](docs/ci.md) | 是 |
+| `docs/` | 文档，入口 [docs/README.md](docs/README.md) 按上手、场景、原理、参考、排障分类：上手（`quickstart.md`、`setup.md`、`guide.md`）、场景（`usage.md`、`tasks.md`、`schedules.md`、`wecom.md`）、原理（`architecture.md`、`boundary.md`、`cache.md`）、参考（`config.md`、`releasing.md`、`ci.md`）、排障（`troubleshooting.md`）。`archive/` 放已实现的方案（`plan-2.0.md` 原路径是跳转页）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
+| `docs/assets/` | README 和文档的图片、示意图（`hero/`、`diagrams/`）和源文件（`source/`）。单个不超过 5 MB，合计不超过 15 MB，更大走 Release 附件。见 [docs/assets/README.md](docs/assets/README.md) | 是 |
+| `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` / `CODE_OF_CONDUCT.md` | 更新日志；协作指南；安全问题怎么报；行为准则 | 是 |
+| `.github/` | `workflows/ci.yml`（唯一的 CI 工作流）、议题和合并请求模板 | 是 |
 | `tests/` | 行为测试，不连 IM、不调真 Claude | 是 |
 | `_tmp/` | 临时产物，任务结束即删 | 否 |
 | 实例目录 | 配置、守则、聊天和任务状态。在仓库外，不进 Git | 否 |

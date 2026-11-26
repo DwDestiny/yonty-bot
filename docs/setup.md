@@ -11,11 +11,15 @@
 
 推荐服务器。本机适合先试一试。
 
+条款：Yonty Bot 是驱动本机官方 CLI（Claude Code、lark-cli、wecom-cli）的连接工具，不抽取、不转发登录令牌。使用者自行遵守所用服务的条款，Anthropic 的条款见 <https://www.anthropic.com/legal/consumer-terms>、<https://code.claude.com/docs/en/legal-and-compliance>。
+
 > **警告**：两种都会长期使用这台机器的 Claude 登录态和额度。用户有“登录态只能在哪些机器上用”的规则时，先对照规则，不符合就停下。
 
 本机注意：
 - 要让 Mac 不睡：`系统设置 → 电池 → 选项` 里关自动睡眠，或用 `caffeinate -s`。
 - launchd 的 PATH 很短，scaffold 已把 `lark-cli` 和 `claude` 所在目录写进 plist。换了安装位置就重跑 scaffold。
+- Linux 同理：systemd 服务和看门狗单元的 PATH 也是 scaffold 生成时写进去的。先装好 CLI 再生成；装到 `~/.local/bin` 这类后装的位置，装好后重跑 scaffold。
+- Mac 没有 systemd 和 bwrap，看门狗不生成，`/upgrade` 和带读范围的定时任务用不了。Mac 上没有实测。
 
 ## 2. 飞书应用：复用还是新建
 

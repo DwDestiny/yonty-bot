@@ -319,6 +319,16 @@ def close_task(tk, tid, can):
         if _close([r for r in recs if can(r)], tid): save(tk, recs)
 
 
+def close_all(tk, tid):
+    """失败后被取消的任务：它留下的要人回的请求全关，带编号的、还没发出去的也算，后面排队的放出来。"""
+    with lock(tk):
+        recs = load(tk)
+        hit = [r for r in recs if r["from"].get("task") == tid and r.get("need") and r["status"] in ("open", "new", "queued")]
+        for r in hit: r["status"], r["answered_at"] = "answered", time.time()
+        if hit: _release(recs); save(tk, recs)
+    for r in hit: tk.decide("请求关了", sender=r["from"]["ref"], category=r["kind"], why="任务取消了")
+
+
 def close_ended(tk):
     """任务结束了（完成、失败、中断、取消）：挂着的没编号请求关掉，不再把短话当成它的答复；取消的，没发出去的也不发了。
     结束以后才发出去的（最后一轮输出里的 [投递]）照样发，发完再关；要接着说发 短名#N。"""

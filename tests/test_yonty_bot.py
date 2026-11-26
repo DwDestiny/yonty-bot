@@ -54,6 +54,7 @@ class ScaffoldTest(unittest.TestCase):
         cls.home = Path(cls.tmp.name) / 'home'
         cls.inst = cls.home / 'bots' / 'demo'
         cls.inst.mkdir(parents=True)
+        (cls.home / 'work').mkdir()
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(name='测试助理', owner_name='小王', owner_open_id=OWNER, bot_open_id=BOT, workdir='~/work',
                    allow_extra=['Bash(gh release delete build-*)'])
@@ -212,6 +213,7 @@ class ScaffoldTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             src, inst = Path(d) / 'src', Path(d) / 'b'
             inst.mkdir()
+            (Path(d) / 'work').mkdir()
             for n in ('app', 'scripts'): shutil.copytree(ROOT / n, src / n)
             shutil.copy(ROOT / 'VERSION', src / 'VERSION')
             g = lambda *a: subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *a], cwd=src, check=True, capture_output=True, text=True).stdout.strip()
@@ -471,6 +473,7 @@ class WecomTest(unittest.TestCase):
         cls.home = Path(cls.tmp.name) / 'home'
         cls.inst = cls.home / 'bots' / 'wx'
         cls.inst.mkdir(parents=True)
+        (cls.home / 'work').mkdir()
         cfg = json.loads((TEMPLATES / 'config.example.json').read_text(encoding='utf-8'))
         cfg.update(name='测试助理', owner_name='小王', workdir='~/work')
         cfg.pop('owner_open_id'); cfg.pop('bot_open_id')

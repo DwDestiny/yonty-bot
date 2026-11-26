@@ -1,0 +1,178 @@
+# GEB-L3
+# Input: tests/、scripts/ci/（分法清单和脚本）、docs/assets/source/<目录> 里的检查脚本。
+# Output: 全量测试（两台机器分着跑，两边相加等于全量，一条不跳）和页面检查的结果。
+# Pos: 全仓唯一的 CI。只认本仓的 main、ci/** 推送和手动触发，别人 fork 的代码不上机；
+#   不带任何凭证，不用缓存，不传产物。说明见 docs/ci.md。
+name: ci
+
+on:
+  push:
+    branches: [main, "ci/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: tests
+    runs-on: instabox-medium
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 假的 claude 放在 PATH 最前
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          printf '#!/bin/sh\necho "fake claude: CI must not reach the real CLI" >&2\nexit 97\n' > "$RUNNER_TEMP/fakebin/claude"
+          chmod 755 "$RUNNER_TEMP/fakebin/claude"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+
+      - name: 核对假的 claude 生效
+        run: |
+          test "$(command -v claude)" = "$RUNNER_TEMP/fakebin/claude"
+          rc=0; claude --version || rc=$?
+          test "$rc" -eq 97
+
+      - name: 装系统包
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq bubblewrap ripgrep > /dev/null
+
+      - name: 打开 systemd 用户总线
+        run: |
+          sudo loginctl enable-linger "$(id -un)" || true
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus"
+          for _ in 1 2 3 4 5; do systemctl --user show -p Version && break; sleep 1; done || true
+          python3 --version; git --version; node --version; bwrap --version; nproc
+
+      - name: 全量测试（减去要起沙箱的）
+        id: tests
+        timeout-minutes: 45
+        run: python3 scripts/ci/split_tests.py run main
+
+      - name: 判断要不要跑页面检查
+        id: pages
+        if: ${{ !cancelled() }}
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          run=1
+          if [ "$GITHUB_REF" = refs/heads/main ]; then base="$BEFORE"; else base="$(git merge-base origin/main HEAD 2>/dev/null)" || base=; fi
+          if [ -n "$base" ] && changed="$(git diff --name-only "$base" HEAD 2>/dev/null)"; then
+            echo "对比基准：$base"
+            if hit="$(grep '^docs/assets/' <<< "$changed")"; then echo "改到了："; echo "$hit"; else run=0; echo "没改到，跳过"; fi
+          else
+            echo "比不出差异，全跑"
+          fi
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        if: ${{ !cancelled() && steps.pages.outputs.run == '1' }}
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: 装页面检查要的字体和浏览器
+        id: page-deps
+        if: ${{ !cancelled() && steps.pages.outputs.run == '1' }}
+        timeout-minutes: 6
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq fonts-noto-cjk python3-venv > /dev/null
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --only-binary=:all: fonttools==4.46.0
+          chrome="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          if [ -z "$chrome" ]; then
+            curl -fsSL -o "$RUNNER_TEMP/chrome.deb" https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$RUNNER_TEMP/chrome.deb" > /dev/null
+            chrome="$(command -v google-chrome)"
+          fi
+          echo "CHROME_BIN=$chrome" >> "$GITHUB_ENV"
+          "$chrome" --version; dpkg-query -W fonts-noto-cjk; node --version
+
+      - name: 页面检查
+        if: ${{ !cancelled() && steps.page-deps.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          py="$RUNNER_TEMP/venv/bin/python3"; bad=0; found=0
+          one() {   # 在子进程里跑一个目录，失败不影响别的目录
+            local d="$1" rc=0
+            if [ -f "$d/package.json" ] && node -e 'process.exit(require(require("path").resolve(process.argv[1])).scripts?.check ? 0 : 1)' "$d/package.json"; then
+              (cd "$d" && npm ci --ignore-scripts --no-audit --no-fund && npm run build --if-present && npm run check) || rc=1
+            fi
+            if [ -f "$d/check.py" ]; then
+              "$py" -I "$d/check.py" || rc=1
+            elif [ -f "$d/build.py" ]; then
+              "$py" -I "$d/build.py" || return 1
+              git diff --stat --exit-code -- docs/assets || rc=1
+              new="$(git ls-files --others --exclude-standard -- docs/assets)"; [ -z "$new" ] || { echo "重出多出来的文件：$new"; rc=1; }
+            fi
+            return "$rc"
+          }
+          for d in docs/assets/source/*/; do
+            d="${d%/}"
+            [ -f "$d/package.json" ] || [ -f "$d/check.py" ] || [ -f "$d/build.py" ] || continue
+            found=1; s=$SECONDS; echo "== $d"
+            if (one "$d"); then r=过; else r=没过; bad=1; fi
+            echo "== $d：$r，$((SECONDS - s)) 秒"
+          done
+          [ "$found" = 1 ] || echo "没有带检查脚本的目录"
+          exit "$bad"
+
+  # 专用机的内核不许普通用户在新命名空间里挂 /proc，沙箱起不来，所以要起沙箱的测试放 GitHub 自带的机器上。
+  sandbox:
+    name: sandbox
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 假的 claude 放在 PATH 最前
+        run: |
+          mkdir -p "$RUNNER_TEMP/fakebin"
+          printf '#!/bin/sh\necho "fake claude: CI must not reach the real CLI" >&2\nexit 97\n' > "$RUNNER_TEMP/fakebin/claude"
+          chmod 755 "$RUNNER_TEMP/fakebin/claude"
+          echo "$RUNNER_TEMP/fakebin" >> "$GITHUB_PATH"
+
+      - name: 核对假的 claude 生效
+        run: |
+          test "$(command -v claude)" = "$RUNNER_TEMP/fakebin/claude"
+          rc=0; claude --version || rc=$?
+          test "$rc" -eq 97
+
+      - name: 装系统包
+        timeout-minutes: 5
+        run: |
+          sudo apt-get -o DPkg::Lock::Timeout=60 update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=60 install -y -qq bubblewrap ripgrep > /dev/null
+
+      - name: 放开非特权用户命名空间，试沙箱
+        run: |
+          # Ubuntu 24.04 默认用 AppArmor 拦普通用户建用户命名空间，不关这一项 bwrap 报 setting up uid map: Permission denied。
+          # 机器用完即删，只改这一项，不动挂载。
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          python3 --version; git --version; bwrap --version; nproc
+          # 参数跟 app/tasks.py 的 _box_base 一样
+          bwrap --ro-bind / / --dev /dev --proc /proc --die-with-parent --new-session --unshare-pid \
+            --tmpfs "$HOME" --tmpfs /tmp --tmpfs /run/user sh -c 'test -r /proc/1/comm'
+
+      - name: 要起沙箱的测试
+        timeout-minutes: 15
+        run: python3 scripts/ci/split_tests.py run sandbox

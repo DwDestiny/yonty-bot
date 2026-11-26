@@ -1,0 +1,74 @@
+name: "缺陷 · Bug report"
+description: "行为和文档或预期不一致 · Something does not work as documented or expected"
+title: "[缺陷 Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **公开议题，请先脱敏。** 不要贴令牌、密钥、登录链接、真实的用户/群/应用 ID、真实姓名、聊天内容、内网地址。安全漏洞不要写在这里，按 [SECURITY.md](https://github.com/DwDestiny/yonty-bot/blob/main/SECURITY.md) 私下报告。
+
+        **This issue is public. Redact first.** No tokens, keys, login links, real user/chat/app IDs, real names, chat content or internal addresses. Report vulnerabilities privately as described in SECURITY.md.
+  - type: textarea
+    id: what
+    attributes:
+      label: "发生了什么 · What happened"
+      description: "实际看到的，用占位数据 · What you saw, with placeholder data"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: "预期是什么 · What you expected"
+      description: "写明依据，例如哪篇文档 · Say what this is based on"
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: "怎么复现 · Steps to reproduce"
+      description: "最短的步骤，一行一步 · Shortest steps, one per line"
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: "Yonty Bot 版本 · Version"
+      description: "仓库根目录 VERSION 文件里的值 · The value in the VERSION file"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: "系统 · System"
+      description: "例如 Ubuntu 24.04、macOS 15；Python 版本 · OS and Python version"
+    validations:
+      required: true
+  - type: dropdown
+    id: channel
+    attributes:
+      label: "渠道 · Channel"
+      options:
+        - "飞书 · Feishu/Lark"
+        - "企业微信 · WeCom"
+        - "两个都接 · Both"
+        - "与渠道无关 · Not channel-related"
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "日志 · Logs"
+      description: "只贴有关的几行，并先脱敏。bridge.log 里会有 ID 和聊天内容 · Only relevant lines, redacted. bridge.log may contain IDs and chat content"
+      render: text
+    validations:
+      required: false
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: "提交前确认 · Before you submit"
+      options:
+        - label: "我已去掉令牌、真实 ID、真实姓名、聊天内容和内网地址 · I removed tokens, real IDs, real names, chat content and internal addresses"
+          required: true
+        - label: "我搜过已有议题，没有重复的 · I searched existing issues"
+          required: true

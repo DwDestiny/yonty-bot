@@ -330,12 +330,12 @@ class FeishuTasks:
         """飞书任务同步正常：开工、进展这些不用再另发消息。"""
         return bool(self.app) and (now or time.time()) >= getattr(self, "mirror_at", 0)
 
-    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: [], meta=None, plan=None):
-        """把长任务的状态写回飞书任务。result(t) 取完成时的结论；unplanned(t) 方案里还有没派的；mine(t) 要不要同步出去；progress(t) 任务自己写的 [进展]。"""
+    def tick(self, tasks, label, ref, result, unplanned, mine=lambda t: False, text=None, progress=lambda t: [], meta=None, plan=None, dropped=lambda t: False):
+        """把长任务的状态写回飞书任务。result(t) 取完成时的结论；unplanned(t) 方案里还有没派的；mine(t) 要不要同步出去；progress(t) 任务自己写的 [进展]；dropped(t) 方案撤了、不用再管的失败任务。"""
         now = time.time()
         if now < self.next: return
         self.next = now + 20
-        self.progress, self.meta, self.plan = progress, meta, plan
+        self.progress, self.meta, self.plan, self.dropped = progress, meta, plan, dropped
         with self.lock:
             for rec in self.st.values():   # 从指派的飞书任务里派出来的方案，后面补的活也归它，不另建
                 got = {self.key(t) for t in tasks if (t.get("origin") or {}).get("message_id") in (rec.get("mids") or []) and not rec.get("own")} - set(rec.get("keys") or [])
@@ -366,13 +366,14 @@ class FeishuTasks:
             prog[str(t["id"])] = len(got)
         live = [t for t in ts if t["status"] not in ENDED and not t.get("held")]
         done = [t for t in ts if t["status"] == "done"]
+        off = [t for t in ts if t["status"] in ("cancelled", "rejected", "expired") or self.dropped(t)]
         if not ts: want = (CONFIRM, "已答复") if rec.get("replied") and now - rec["replied"] > GRACE_S else (DOING, "正在处理")
         elif any(t["status"] != "waiting" for t in live): want = (DOING, f"{len(done)}/{len(ts)}")
         elif live: want = (CONFIRM, "等你答复")
         elif any(t.get("held") for t in ts): want = (CONFIRM, "停工中")
         elif any(unplanned(t) for t in ts) or now - max(t.get("updated") or 0 for t in ts) < GRACE_S: want = (DOING, f"{len(done)}/{len(ts)}")
-        elif len(done) == len([t for t in ts if t["status"] not in ("cancelled", "rejected", "expired")]) and done: want = (FINISHED, "执行完成")
-        elif not done and all(t["status"] in ("cancelled", "rejected", "expired") for t in ts): want = (FINISHED, "已取消")
+        elif len(done) == len(ts) - len(off) and done: want = (FINISHED, "执行完成")
+        elif len(off) == len(ts): want = (FINISHED, "已取消")
         else: want = (CONFIRM, "没做成，等你定")
         rows = self.plan(ts) if self.plan and rec.get("own") and not rec.get("hist") and ts else []
         sub_ok = True

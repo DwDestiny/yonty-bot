@@ -22,19 +22,34 @@ def conf(cfg): return dict(DEFAULTS, **(cfg.get("team") or {}))
 
 # ---------- 回复里的标记 ----------
 # 一个块到下一个标记行为止。[派活] 另用 tasks.DISPATCH_END：任务书里可以举 [任务指令] 的例子。
-END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令|处置|改验证|取消任务|改依赖|挂起)(?:\s[^\]]*)?\]")
+END = re.compile(r"^\s*\[(?:/?派活|转交|看板|交接|处理掉|投递|定时|/?方案|停|继续|不是我的|不回|/?任务指令|处置|改验证|取消任务|改依赖|挂起|撤方案)(?:\s[^\]]*)?\]")
+DROP = re.compile(r"^\s*\[撤方案\][ \t]*(.*)$")
+REASON = re.compile(r"^\s*理由\s*[:：]\s*(.*)$")
 SILENT = re.compile(r"^\s*\[不回\][\s。.!！~～]*$")
 FENCE = re.compile(r"^\s*(?:`{3,}|~{3,})")
+
+def fenced(lines):
+    """哪些行在代码块里（含围栏行）。收尾的围栏要同一种符号、不比开头短、后面没有字。"""
+    out, mark = set(), ""
+    for i, l in enumerate(lines):
+        m = re.match(r"^\s*(`{3,}|~{3,})(.*)$", l)
+        if mark:
+            out.add(i)
+            if m and m.group(1)[0] == mark[0] and len(m.group(1)) >= len(mark) and not m.group(2).strip(): mark = ""
+        elif m: out.add(i); mark = m.group(1)
+    return out
 
 def blocks(text, name):
     """拆出 [name] 开头的块。返回 (剩下的文字, [(头一行标记后面的字, 正文)])。"""
     head = re.compile(r"^\s*\[" + re.escape(name) + r"\][ \t]*(.*)$")
-    keep, out, cur, fence = [], [], None, False
-    for l in (text or "").split("\n"):
+    keep, out, cur, fence, lines = [], [], None, False, (text or "").split("\n")
+    code = fenced(lines)
+    for n, l in enumerate(lines):
         if FENCE.match(l) and cur is None: fence = not fence
         m = None if fence else head.match(l)
         if m: cur = (m.group(1).strip(), []); out.append(cur); continue
-        if cur is not None and END.match(l):
+        if cur is not None and END.match(l) and not (n in code and DROP.match(l)):   # 块里举例的 [撤方案] 不断开，免得漏到外面被执行
+           
             cur = None
             if l.strip() == f"[/{name}]": continue
         (cur[1] if cur is not None else keep).append(l)
@@ -42,10 +57,13 @@ def blocks(text, name):
 
 def visible(text):
     """要发给人的话：去掉内部标记行和块。返回空串就是不用发。正文里提到、代码块里写着的不动。"""
-    keep, skip, fence = [], False, False
+    keep, skip, fence, why = [], False, False, False
     for l in (text or "").split("\n"):
         if FENCE.match(l) and not skip: fence = not fence
         if fence: keep.append(l); continue
+        if why and REASON.match(l): why = False; continue   # [撤方案] 的理由行跟着标记走
+        why = bool(DROP.match(l))
+        if why: skip = False; continue
         if SILENT.match(l) or re.match(r"^\s*\[(?:看板|处理掉|不是我的|停|继续|处置|改验证|取消任务|改依赖|挂起)\]", l) or re.match(r"^\s*\[/(?:派活|方案|任务指令)\]\s*$", l): skip = False; continue
         if re.match(r"^\s*\[(?:交接|方案|转交|投递[^\]]*)\]", l): skip = True; continue
         if skip and END.match(l): skip = False
@@ -112,11 +130,12 @@ def save_plan(project, name, body, tk=None, c=None):
     重发同名的：任务单列全了原来的，整份换成新的；没列全就是往里补，原来的任务和正文都留着。不做的写一行“去掉: 标题一、标题二”（已经派出去的去不掉，用 [取消任务]）。"""
     name = name.strip()
     if not name: return "[方案] 后面没写名称"
-    items = titles(body)
-    if not items and not (plan_of(project, name) and _line(body, "去掉", 600)): return f"方案“{name}”没有任务单：写一行“任务:”，下面一行一个任务，- 标题 | 文件 | 依赖"
+    items, old, text = titles(body), plan_of(project, name) or {}, body
+    if old.get("dropped"): old = {}   # 撤掉的重登当新登记：没派的旧任务、旧正文不带回来，撤之前失败的也不算
+    if not items and not (old and _line(body, "去掉", 600)): return f"方案“{name}”没有任务单：写一行“任务:”，下面一行一个任务，- 标题 | 文件 | 依赖"
     if len(set(items)) != len(items): return f"方案“{name}”里有重名的任务"
-    old, text = plan_of(project, name) or {}, body
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD] if tk else []
+    mine = [t for t in mine if t["status"] not in ("failed", "lost") or t["title"] in (old.get("items") or [])]
     done, sent = {t["title"] for t in mine if t["status"] == "done"}, [t["title"] for t in mine]
     cut, drop = _line(body, "去掉", 600), set()
     for i in sorted(old.get("items") or [], key=len, reverse=True):   # 标题里带顿号、逗号的先整条认出来
@@ -162,6 +181,7 @@ def budget_of(body):
 def plan_open(tk, project, name):
     """方案还能往里补活：有没做完的、收口还没开工。一天没动静又没有活的不算。"""
     p = plan_of(project, name) or {}
+    if p.get("dropped"): return False
     ts = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD]
     if any(t.get("closing") and t["status"] in ("running", "waiting", "done") for t in ts): return False
     if not set(p.get("items") or ()) - {t["title"] for t in ts if t["status"] == "done"}: return False
@@ -169,7 +189,7 @@ def plan_open(tk, project, name):
 
 def plan_check(tk, project, name, body):
     """登记新方案前：写没写版本、是不是又另起了一个。返回不放行的原因，空串放行。"""
-    name, plans = name.strip(), (load().get("plans") or {}).get(project) or {}
+    name, plans = name.strip(), {n: p for n, p in ((load().get("plans") or {}).get(project) or {}).items() if not p.get("dropped")}   # 撤掉的不占版本、不挡新方案；同名重登照新方案查
     ver, why, small = version_of(body), _line(body, "另开", 600), [x for x in titles(body) if "评审" not in x]
     if name in plans:   # 重发已有的方案就是往里补；收口过的方案名不拿来做新版本，临时的不变成版本、版本的不变成临时
         was, on = plans[name].get("version"), plan_open(tk, project, name)
@@ -197,6 +217,30 @@ def plan_check(tk, project, name, body):
     return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没收口，同一个项目一次只做一个版本：把这些需求点加进它的任务单，再发一次 [方案] {o}（已经派出去的不用重写）。"
             f"一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
 
+def drop_plan(tk, project, name, why, who, key=""):
+    """[撤方案]：打上已撤标记，文字和任务都不动；同名重登就恢复。返回 (没办成的原因, 是不是重送)。"""
+    def f(st):
+        seen = st.setdefault("drop_seen", [])
+        if key and key in seen: return "", True
+        p = ((st.get("plans") or {}).get(project) or {}).get(name)
+        if not p: return f"没有登记过方案“{name}”（名称要跟登记的一字不差）", False
+        if p.get("dropped"): return f"方案“{name}”已经撤过了", False
+        live = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] in tk.ACTIVE + ("pending",)]
+        if live: return f"方案“{name}”还有没完的任务：" + "、".join(f"{tk.ref(t)}（{tk.LABEL.get(t['status'], t['status'])}）" for t in live) + "，先收掉再撤", False
+        p["dropped"] = {"at": time.time(), "who": who[:80], "why": why[:300]}
+        ((st.get("vouched") or {}).get(project) or {}).pop(name, None)   # 主人交代过的也一起作废，重登后要重新交代
+        if key: st["drop_seen"] = (seen + [key])[-200:]
+        return "", False
+    return _change(f)
+
+def dropped(project, name):
+    """撤掉的方案返回 {at, who, why}，没撤返回 None。"""
+    return (plan_of(project, name) or {}).get("dropped") if name else None
+
+def left_over(t):
+    """方案撤了还留着的失败任务：状态不动，不再当成要人定的事。"""
+    return t["status"] in ("failed", "lost") and bool(dropped(t.get("project"), t.get("plan")))
+
 def _stem(p): return re.split(r"[*?\[]", p, maxsplit=1)[0].rstrip("/")
 def overlap(a, b):
     for x in a:
@@ -210,6 +254,7 @@ def gate(tk, project, d, c):
     if not d.get("plan"): return f"“{d['title']}”没写“方案:”：先写 [方案] 登记任务单，再照着派"
     p = plan_of(project, d["plan"])
     if not p: return f"没有登记过方案“{d['plan']}”：先写 [方案] {d['plan']}"
+    if p.get("dropped"): return f"方案“{d['plan']}”已撤（{p['dropped'].get('why', '')[:80]}），不派；要接着做就重新登记 [方案] {d['plan']}"
     if d.get("swallowed"): return f"“{d['title']}”的任务书里有一行“{d['swallowed']}”，没写 [/派活]，分不清是任务书的字还是要执行的标记：任务书结尾单独一行写 [/派活]，要执行的标记写在它后面"
     raw, got = d.get("deps_raw") or "", []
     for it in sorted((i for i in p["items"] if re.search(r"[,，、;；]", i)), key=len, reverse=True):   # 标题里带顿号、逗号的先整条认出来，再拆剩下的
@@ -248,6 +293,9 @@ def dep_tasks(tk, t, pool=None):
     by, out = plan_tasks(t, pool), []
     for x in t.get("deps") or []: out.append((x, by.get(x) if x != t["title"] else None) if x in by else (x, tk.resolve(x, pool)[0]))
     if t.get("closing"):
+        ok = t.get("deps_ok") or []   # 失败后取消、还没重派的也要等；[改依赖] 收口之后不等
+        lost = {y["title"] for y in pool if y.get("cancelled_from") and y["status"] in DEAD and y.get("plan") == t["plan"] and y.get("project") == t.get("project") and y["id"] not in ok} - set(by) - set(t.get("deps") or [])
+        out += [(n, None) for n in sorted(lost)]
         after, grew = {t["title"]}, True
         while grew:
             new = {n for n, y in by.items() if n not in after and after & set(y.get("deps") or [])}
@@ -309,7 +357,7 @@ def board(tk, project=None, limit=1800):
     """按任务状态生成，主控和项目经理照它汇报。"""
     st, now, by, pool = load(), time.time(), {}, tk.all_tasks()
     for t in pool:
-        if t.get("schedule") or (project and t.get("project") != project): continue
+        if t.get("schedule") or (project and t.get("project") != project) or t.get("cancelled_from") or left_over(t): continue
         if t["status"] in tk.ACTIVE + ("pending",) or (t["status"] in ("done", "failed", "lost", "cancelled") and now - (t.get("updated") or 0) < 12 * 3600):
             by.setdefault(t.get("project") or "task", []).append(t)
     for p in st.get("held") or {}:
@@ -318,7 +366,7 @@ def board(tk, project=None, limit=1800):
     for p, ts in sorted(by.items()):
         out.append(f"{p}" + ("（停工中）" if p in (st.get("held") or {}) else "") + "：" + ((st.get("notes") or {}).get(p) or ""))
         rest = {n: [i for i in x["items"] if not any(t.get("plan") == n and t["title"] == i for t in pool if t.get("project") == p)]
-                for n, x in ((st.get("plans") or {}).get(p) or {}).items() if now - x["at"] < 7 * 86400}
+                for n, x in ((st.get("plans") or {}).get(p) or {}).items() if now - x["at"] < 7 * 86400 and not x.get("dropped")}
         act = [t for t in ts if t["status"] in tk.ACTIVE + ("pending",)]
         for t in act + sorted((t for t in ts if t not in act), key=lambda t: -(t.get("updated") or 0))[:4]:
             why = t.get("wait_why") if t["status"] == "approved" else tk.gate_text(t)

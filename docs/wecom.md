@@ -23,7 +23,7 @@
 2. 扫码会建好一个智能机器人，Bot ID 和 Secret 加密存在 `~/.config/wecom/`。网关默认直接读这里（`channels.wecom.credentials = "wecom-cli"`）。
    - 这是 wecom-cli 的内部格式，升级后可能变。读失败时网关会报错退出，改用 JSON 凭证文件：`{"bot_id": "...", "secret": "..."}`，权限 0600，路径填进 `credentials`。
    - 密钥只存在系统 keyring（不在 `.encryption_key` 文件里）时也读不到，同样改用 JSON 文件。
-3. 在 `config.json` 里打开 `channels.wecom.enabled`，先把 `owner_userid` 随便填一个占位值，运行 `scaffold.py`（会装好 SDK），启动服务。
+3. 在 `config.json` 里打开 `channels.wecom.enabled`，先把 `owner_userid` 随便填一个占位值，运行 `scaffold.py`（会装好 SDK），启动服务。机器上没有 npm 时 scaffold 会停下，什么都不写，装好 Node 18+ 再跑，或加 `--no-npm` 先生成；`npm install` 失败时会打印补装命令（`cd <实例目录> && npm install --omit=dev --no-audit --no-fund`），照着补装。
 4. 主人在企微里私聊机器人一句，日志 `recv` 行里的发送人就是主人的 userid。填进 `owner_userid`，重启服务。
    > **注意**：`wecom-cli identity whoami` 显示的 ID 是加密过的，跟长连接消息里的 userid 不是一个值，不能拿来填。
 

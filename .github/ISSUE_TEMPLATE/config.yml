@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "安全问题 · Security"
+    url: "https://github.com/DwDestiny/yonty-bot/security/policy"
+    about: "不要开公开议题，先看怎么私下报告 · Do not open a public issue. See how to report privately"
+  - name: "搭建指南 · Setup guide"
+    url: "https://github.com/DwDestiny/yonty-bot/blob/main/docs/guide.md"
+    about: "安装步骤、验收清单、踩过的坑（中文） · Install steps, checklist and known pitfalls (Chinese)"
