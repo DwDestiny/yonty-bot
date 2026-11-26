@@ -1,6 +1,6 @@
 # 搭建指南（给帮你安装的智能体看）
 
-> 3.19.7 · 2026-11-26 · 维护：Yonty Bot contributors
+> 3.19.8 · 2026-11-26 · 维护：Yonty Bot contributors
 
 ## 它是什么
 
@@ -160,6 +160,7 @@
 
 ## 变更记录
 
+- 3.19.8（2026-11-26）发版只走 `[任务指令]`：`delivery.submit` 给负责人的投递要发版（`team.asks_release`）的按留言送。负责人在等答复时，项目经理在任务回报那一轮用 `[投递 短名#N]` 答，以前算指令（`pm_sender` 的 owner 按派活人记，不按这一轮主人说没说话）。`tasks.personal` 加上投递来的（记着 `src`）不算，管 3.19.7 以前没记 `upper` 的条目。
 - 3.19.7（2026-11-26）负责人只认 `发版:` 那一行或主人亲手发的指令：新加 `team.RELEASE_LINE`、`team.asks_release`（明说发版的动作；这一小句里有不、别的不算）、`team.release_unmarked`；`team.RELEASE_ASK` 换成发版动作。3.19.5 的词表在实例 299 条真实指令里认出 66 条，多是普通返修；新的认 8 条，都和发版有关。`bridge.unmarked_release` 在 `with_retry` 里把主人说过话那一轮没写这一行的退回重写，`chat_followups` 兜底不转。收件箱的“（主人本人）”只标主人亲手发的（`tasks.personal`；`inbox_add` 新记 `upper`），负责人凭它认主人亲自叫它发版。
 - 3.19.6（2026-11-26）主人没说过话的几轮都不转负责人的发版指令：新加 `team.release_held(x, body)`（任务是负责人、正文命中 `RELEASE_ASK`），`bridge.follow_cmds`（主控转回来的那一轮）和 `bridge.relay_followups`（任务回报、提问、告警、投递叫起来的那一轮）都用它；项目经理那一轮的话没人看，没转的用 `ctl_bad` 叫它一次。老方案的任务不管，照老规矩。定时任务派的活派活人是 `schedule`（不是主人），本来就发不了版。
 - 3.19.5（2026-11-26）发版要主人点过头：任务的基本规矩改回一律“不发版”，`tasks.plan_note` 只给主人派的负责人（`by_owner`）写“合并以后项目经理用指令明确叫你发时才发”这个例外；`bridge.follow_cmds` 在主控转回来的那一轮，指令正文命中 `team.RELEASE_ASK`（发版、发布、beta、上线、标签、tag、release、publish，加上 `LIVE_RELEASE` 那几个词）的不转。核过钩子：主人派的任务打标签、`gh release create` 都放行（`irreversible_gate` 只在收件箱有没取的指令时拦）；同事派的，推标签由 `pre-push` 拦（只放行 `bot/` 分支），`gh release` 由 `git_guard` 拦。

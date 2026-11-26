@@ -234,6 +234,8 @@ def submit(tk, sender, to_s, kind, text, hop=None, need_reply=None, extra=None, 
             if upstream and t2["requester"].get("owner") and not sender.get("owner"):
                 upstream, why = False, "这一轮不是主人触发的，主人派的任务只收留言"
             else: why = tk.steer_block(t2, full, tk.T.get("relay_max") or 10) if upstream else ""
+            if upstream and not why and t2.get("lead") and (w := tk._mod_team().asks_release(full)):   # 发版的指令只走 [任务指令]，那里分得清主人这一轮说没说话（3.19.8）
+                why = f"要发版（{w}）：发版的指令写 [任务指令] {tk.ref(t2)}，在主人点过头的那一轮发，正文单独一行 发版: 发到哪一步"
             if why: upstream = False
             n = tk.inbox_add(t2["id"], sender["label"], bool(sender.get("owner")) and upstream, full,
                              kind="指令" if upstream else "留言", src=sender, upper=upstream)
