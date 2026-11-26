@@ -211,6 +211,17 @@ class Lead(TT.Base):
         r = self.pm("[方案] 推广\n任务:\n- 发版 | | 评审\n[/方案]\n", '[不回]')
         self.assertIn(n, r); self.assertNotIn('发版', self.plan()['items'])
 
+    def test_release_held_in_report_round(self):
+        """任务回报那一轮主人没说过话：给负责人的发版指令不转，项目经理收到提醒；别的指令照转（3.19.6）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='done'); self.t.event(lead['id'], 'done', '结论：PASS\n合并请求 https://example.com/pr/1')
+        self.layers([], [f'[任务指令] {n} 合并以后打 v2.2.0 标签、发 Release\n原因: 下一步\n[/任务指令]\n[任务指令] {n} 顺手补一条回归测试\n原因: 没做全\n[/任务指令]\n'])
+        self.e.tick(); self.flush()
+        with open(os.path.join(self.t.tdir(lead['id']), 'inbox.jsonl')) as f: box = f.read()
+        self.assertNotIn('发 Release', box); self.assertIn('补一条回归测试', box)
+        self.assertTrue(any('发版指令没转' in str(e) for e in self.t.events(lead['id'])))
+
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
         c, hist = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}, [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]
