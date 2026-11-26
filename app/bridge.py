@@ -717,6 +717,7 @@ def with_retry(ev, key, result, redo, pm=None, follow=True):
         errs, ev["handed_before"] = [], frozenset(ev["handed"])
         if pm: result, e = pm_notes(pm, key, result, vouch=is_owner(ev) and ev.get("chat_type") == "p2p"); errs.extend(e)
         result = run_marks(ev, result, (("转交", lambda r: handover(ev, r, errs)), ("派活", lambda r: task_directive(ev, r, errs, notes))))
+        if follow: errs.extend(unmarked_release(ev, result))
         if not errs: break
         tasks.decide("回执退回", session=key, why="；".join(errs)[:300])
         done = notes + [f"转交 {p}" for p in sorted(ev["handed"])]
@@ -1318,11 +1319,22 @@ def chat_followups(ev, result):
         t, cands = tasks.resolve(s, pool)
         if not t: return f"（{ambiguous(s, cands)}没转。）" if len(cands) > 1 else f"（{s} 不归这边管，没转。）"
         if not body: return f"（给 {tasks.ref(t)} 的指令是空的，没转。）"
+        if w := team.release_unmarked(t, body): return f"（给 {tasks.ref(t)} 的指令要发版（{w}），没转：{team.RELEASE_HOW}。）"   # 重写机会用完了还没补（3.19.7）
         key = idem_key(ev.get("idem"), t["id"], count)
         if tasks.inbox_seen(t["id"], key): return ""   # 这一轮是重送，上一次已经转过
         r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), t, body, key)
         return "" if r.startswith("收到") else f"（{r}）"
     return apply_taskcmds(result, apply).strip()
+
+def unmarked_release(ev, result):
+    """有人说过话的这一轮：[任务指令] 明说要主人派的负责人发版，却没写“发版:”那一行的，退回重写（这时候指令还没执行，3.19.7）。"""
+    cmds = [(s, body) for s, body in split_taskcmds(result) if s is not None and body]
+    if not cmds: return []
+    pool, out = [t for t in tasks.all_tasks() if can_see(t, ev) and can_steer(t, ev)], []
+    for s, body in cmds:
+        t, _ = tasks.resolve(s, pool)
+        if t and (w := team.release_unmarked(t, body)): out.append(f"给 {tasks.ref(t)} 的指令要发版（{w}）：{team.RELEASE_HOW}")
+    return out
 
 def task_directive(ev, result, errs=None, notes=None):
     """回复里的每个 [派活] 块建一个任务，把块换成排期或审批的说明。errs、notes 给了就把没成的、成了的分开写进去。"""
@@ -2187,7 +2199,7 @@ def follow_cmds(ev, text, errs, made, idem):
         n, key = tasks.ref(x), f"{idem}:{x['id']}:{hashlib.sha1(body.encode()).hexdigest()[:12]}"
         if tasks.inbox_seen(x["id"], key): return ""
         why = ("方案已撤" if team.dropped(x.get("project"), x["plan"]) else f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "在等答复，这一轮不能替人答" if x["status"] == "waiting" else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
-               else "指令里要发版（打标签、发 Release、发 beta、上线、推 stable 这类），这一轮主人没说过话，要主人点头" if team.release_held(x, body)
+               else f"指令里要发版（{team.release_held(x, body)}），这一轮主人没说过话，要主人点头；不是发版就换个说法" if team.release_held(x, body)
                else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
         if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
         tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
@@ -3092,8 +3104,9 @@ def relay_followups(t, text, who=None, hop=None, idem=None, cli=False, pm="", pl
         if tasks.inbox_seen(tid, key):
             tasks.decide("指令去重", task=n, why=f"{key} 已经转过，这一轮是重送"); return ""
         if cli and (tasks.BUDGET_RE.search(body) or "放开验收" in body): return "（命令行投递叫起来的这一轮不改预算、不放开验收，没转。）"
-        if team.release_held(x, body):   # 任务回报、提问、告警这一轮主人没说过话：负责人的发版指令不转（3.19.6）
-            msg = f"给 {n} 的发版指令没转：这一轮{OWNER_NAME}没说过话，发版要{OWNER_NAME}点头，先写 [投递 主控 问题] 问{OWNER_NAME}"
+        if w := team.release_held(x, body):   # 任务回报、提问、告警这一轮主人没说过话：负责人的发版指令不转（3.19.6）
+            msg = (f"给 {n} 的指令要发版（{w}），没转：这一轮{OWNER_NAME}没说过话，发版要{OWNER_NAME}点头。先写 [投递 主控 问题] 问{OWNER_NAME}，"
+                   f"{OWNER_NAME}点过头的那一轮再写，正文单独一行 发版: 发到哪一步；不是发版就换个说法再发")
             if pm or plan_pm: ctl_bad(t, [msg])   # 项目经理这一轮的话没人看：叫它一次
             return f"（{msg}。）"
         why = tasks.steer_block(x, body, RELAY_MAX)
