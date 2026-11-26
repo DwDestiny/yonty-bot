@@ -108,6 +108,7 @@ def vouch_plan(project, name, body=None):
 def vouched(project, name): return ((load().get("vouched") or {}).get(project) or {}).get(name) or []
 
 LIVE_RELEASE = re.compile(r"stable|正式|生产|production|prod\b|上线", re.I)
+RELEASE_ASK = re.compile(r"发版|发布|发\s*beta|上线|标签|\btags?\b|release|publish|stable|正式|生产|production|prod\b", re.I)   # 主控转回来那一轮不转的发版指令（3.19.5）
 
 def follow_gate(project, d):
     """项目经理接着派（主控办完事转回来的，主人没亲口说话）：只派登记时带主人身份的方案里列明的任务。返回不放行的原因，空串放行。"""
@@ -147,7 +148,7 @@ def lead_task(tk, project, name, pool=None):
     xs = [t for t in (pool if pool is not None else tk.all_tasks()) if ld and t.get("project") == project and t.get("plan") == name and t["title"] == ld and t["status"] not in DEAD]
     return max(xs, key=lambda t: t["id"]) if xs else None
 
-NEXT = "返修、发版也不另列任务，到时候用 [任务指令] 叫负责人接着做（返修写 原因: 评审必修，发版写 原因: 下一步）"   # 一个负责人的版本没有单列的发版任务（3.19.4）
+NEXT = "返修、发版也不另列任务，到时候用 [任务指令] 叫负责人接着做（返修写 原因: 评审必修；发版要主人点过头，写 原因: 下一步）"   # 一个负责人的版本没有单列的发版任务（3.19.4）
 ONE_LEAD = ("一个版本只派一个负责人任务：调研、定性、写、自测、跑全量、建合并请求都归它，要大量读的它在自己会话里开子代理，同一件事的几个阶段、几个方向都算它的。"
             "真要另开的只有两种，第四栏写“检查：理由”（" + KINDS["检查"] + "）或“独立：理由”（" + KINDS["独立"] + "）；评审照写。不派收口：负责人自己合、自己建合并请求。" + NEXT)
 
@@ -287,7 +288,7 @@ def plan_check(tk, project, name, body):
     if same and not why:
         if "lead" not in plans[same]: return f"版本 {ver} 已经有方案“{same}”：这个版本的活（返修、预发、发版也算）都写进它的任务单，再发一次 [方案] {same}；要做下一个版本就换版本号"
         ld, lt = plans[same]["lead"], (lead_task(tk, project, same) if tk else None)   # 一个负责人的版本：写进任务单会被当成第二个负责人退回（3.19.4）
-        how = f"用 [任务指令] {tk.ref(lt)} 叫它接着做（正文加一行 原因: X，发版写 原因: 下一步）" if lt else "它还没派，写进它的任务书"
+        how = f"用 [任务指令] {tk.ref(lt)} 叫它接着做（正文加一行 原因: X；发版要主人点过头，写 原因: 下一步）" if lt else "它还没派，写进它的任务书"
         return (f"版本 {ver} 已经有方案“{same}”，这个版本的活都归它的负责人“{ld}”：返修、发版不另列任务，{how}；"
                 f"要跟负责人分开的检查、互不相干的块加进 [方案] {same}，第四栏写理由；要做下一个版本就换版本号")
     s = "" if why else shipped(repo_of(tk, project), ver)

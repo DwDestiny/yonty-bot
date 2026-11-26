@@ -2179,7 +2179,7 @@ def follow_marks(src, project, key, hop, result, idem):
     return rest.strip()
 
 def follow_cmds(ev, text, errs, made, idem):
-    """接着派那一轮的 [任务指令]：只给本项目、主人在这个私聊里派的、方案里的任务；不加预算、不改验收、不碰正式发布（任务标题和指令正文都查：一个负责人的版本，发版是用指令交给负责人的，3.19.4）。自动追加次数照算。"""
+    """接着派那一轮的 [任务指令]：只给本项目、主人在这个私聊里派的、方案里的任务；不加预算、不改验收、不碰发版（任务标题带 stable、正式、生产、上线的不转；指令正文要发版的也不转，一个负责人的版本发版是用指令交给负责人的，3.19.5）。自动追加次数照算。"""
     pool = [x for x in tasks.all_tasks() if x.get("project") == ev["pm"] and x.get("plan") and owner_dm_task(x) and x["origin"].get("channel") == ev.get("channel") and x["origin"].get("chat_id") == ev.get("chat_id")]
     def apply(s, body):
         x, cands = tasks.resolve(s, pool)
@@ -2187,7 +2187,7 @@ def follow_cmds(ev, text, errs, made, idem):
         n, key = tasks.ref(x), f"{idem}:{x['id']}:{hashlib.sha1(body.encode()).hexdigest()[:12]}"
         if tasks.inbox_seen(x["id"], key): return ""
         why = ("方案已撤" if team.dropped(x.get("project"), x["plan"]) else f"{ev['pm']} 停工中" if team.held(ev["pm"]) or x.get("held") else "在等答复，这一轮不能替人答" if x["status"] == "waiting" else "是正式发布，要主人点头" if team.LIVE_RELEASE.search(x["title"])
-               else "指令里要做正式发布（stable、正式、生产、上线这类），要主人点头" if team.LIVE_RELEASE.search(body)
+               else "指令里要发版（打标签、发 Release、发 beta、上线、推 stable 这类），这一轮主人没说过话，要主人点头" if team.RELEASE_ASK.search(body)
                else "不能改预算、放开验收，要主人点头" if tasks.BUDGET_RE.search(body) or "放开验收" in body else tasks.steer_block(x, body, RELAY_MAX))
         if why: errs.append(f"给 {n} 的指令没转：{why}"); return ""
         tasks.inbox_add(x["id"], f"{ev['pm']} 的项目经理（替{x['requester']['name']}）", False, body, idem=key, keep_budget=True)
