@@ -30,10 +30,10 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 ## How a job runs
 
 <p align="center">
-  <img src="docs/assets/screenshots/feishu-task.png" alt="Real screenshot from Feishu on the web, an excerpt with a Chinese interface. Left: a direct message. The owner asks the bot to start on the open-source launch, and the bot replies that it has started. Later the owner says to merge when it is ready. The bot reports that 3.18.0 is merged into main, with a pull request card, and then posts the Feishu task link 'yonty-bot · 开源推广一期'. Right: that Feishu task, marked done and owned by the agent. Its execution log lists finished subtasks such as yonty-bot#18. Names and avatars are replaced, the watermark is removed, and unrelated messages in between are left out." width="100%">
+  <img src="docs/assets/screenshots/feishu-task.png" alt="Real screenshot from Feishu on the web, an excerpt with a Chinese interface. Left: a direct message. The owner asks the bot to start on the open-source launch, and the bot replies that it has started. Later the owner says to merge when it is ready. The bot reports that 3.18.0 is merged into main, with a pull request card, and then posts the Feishu task link 'yonty-bot · 开源推广一期'. Right: that Feishu task, marked done and owned by the agent. Its execution log lists the finished subtasks. Names and avatars are replaced and the watermark is removed. Unrelated messages in between, and the last two paragraphs of the merge reply, are left out." width="100%">
 </p>
 
-This is a real screenshot (an excerpt) from the author's own instance. The interface is in Chinese. On the left is a direct message: a one-line request, and the bot starts. Later you say to merge when it is ready, and it merges into main and posts a link to the Feishu task. On the right is that Feishu task: done, with one line for each finished subtask. Names and avatars are replaced, the watermark is removed, and unrelated messages in between are left out.
+This is a real screenshot (an excerpt) from the author's own instance. The interface is in Chinese. On the left is a direct message: a one-line request, and the bot starts. Later you say to merge when it is ready, and it merges into main and posts a link to the Feishu task. On the right is that Feishu task: done, with one line for each finished subtask. Names and avatars are replaced and the watermark is removed. Unrelated messages in between are left out, and the merge reply keeps only its first paragraph.
 
 The steps from start to finish:
 
@@ -41,7 +41,7 @@ The steps from start to finish:
 2. The project manager reads the code, decides what this version covers and assigns one lead.
 3. The lead works on its own branch in the background from start to finish: research, code, tests and a draft pull request.
 4. When the lead says it is done, the service re-runs the verify command and sends the task back in the background if it fails. Then a reviewer reads the diff, and fixes go back to the same lead.
-5. The re-run passes, so the result says PASS. The bot reports back in the group with a link to the draft pull request.
+5. The re-run passes, so the result says PASS. The bot reports back in the chat where you gave the job, with a link to the draft pull request.
 
 ## Four highlights
 
