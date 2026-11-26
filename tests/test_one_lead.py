@@ -241,6 +241,19 @@ class Lead(TT.Base):
         self.t.update(lead['id'], status='done')
         self.say(f'{n} 发 beta')
         self.assertIn('本人）：发 beta', self.t.format_inbox(self.t.inbox_items(lead['id'])))
+        old = {'n': 9, 'who': 'proj 的项目经理', 'owner': True, 'kind': '指令', 'text': '发版: 只发 beta', 'src': 'proj'}   # 3.19.7 以前投递进来的，没记 upper
+        self.assertNotIn('本人', self.t.format_one(old))
+
+    def test_release_not_by_delivery(self):
+        """发版的指令只走 [任务指令]：负责人在问要不要发版，项目经理在回报那一轮用 [投递 短名#N] 答“发版:”，按留言送，不当指令；别的投递照旧算指令（3.19.8）。
+        做完的任务收不到投递（转给项目经理），所以负责人得在等答复。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
+        self.layers([], [f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n[投递 {n} 留言]\n合并好了\n补一条回归测试\n[/投递]\n'])
+        self.e.tick(); self.flush()
+        kinds = {x['text'].split('\n')[-1]: x['kind'] for x in self.t.inbox_items(lead['id'])}
+        self.assertEqual(kinds.get('发版: 只发 beta'), '留言'); self.assertEqual(kinds.get('补一条回归测试'), '指令')
 
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)

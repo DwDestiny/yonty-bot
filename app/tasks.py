@@ -488,8 +488,9 @@ def inbox_hint(items, gate=False):
             + ("这一轮结束时它们还没取，所以不算做完：先取出来处理，再结束。" if gate else ""))
 
 def personal(x):
-    """主人亲手发的：主人发的，不是服务、主控、项目经理替人转的（转的 who 带“（替”，服务记的是 upper）。负责人凭它认主人亲自叫它发版（3.19.7）。"""
-    return bool(x.get("owner")) and not x.get("upper") and "（替" not in (x.get("who") or "")
+    """主人亲手发的：主人发的，不是服务、主控、项目经理替人转的（转的 who 带“（替”，服务、上级记的是 upper，投递来的记着 src）。
+    负责人凭它认主人亲自叫它发版（3.19.7；src 那条管 3.19.7 以前没记 upper 的投递，3.19.8）。"""
+    return bool(x.get("owner")) and not x.get("upper") and not x.get("src") and "（替" not in (x.get("who") or "")
 
 def format_one(x):
     if x.get("kind") == "留言":
