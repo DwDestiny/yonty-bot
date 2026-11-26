@@ -245,16 +245,41 @@ class Lead(TT.Base):
         self.assertNotIn('本人', self.t.format_one(old))
 
     def test_release_not_by_delivery(self):
-        """发版的指令只走 [任务指令]：负责人在问要不要发版，项目经理在回报那一轮用 [投递 短名#N] 答“发版:”，按留言送，不当指令；别的投递照旧算指令（3.19.8）。
-        做完的任务收不到投递（转给项目经理），所以负责人得在等答复。"""
+        """发版的指令只走 [任务指令]：负责人在问要不要发版，项目经理在回报那一轮用 [投递 短名#N] 答“发版:”，退回重写（3.19.9）。
+        别的投递照旧算指令。做完的任务收不到投递（转给项目经理），所以负责人得在等答复。"""
         self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
         self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
         self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
-        self.layers([], [f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n[投递 {n} 留言]\n合并好了\n补一条回归测试\n[/投递]\n'])
+        bad, before = f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n', len(self.pm_prompts())
+        self.layers([], [bad, f'[投递 {n} 留言]\n合并好了\n补一条回归测试\n[/投递]\n[投递 主控 问题]\n{n} 问要不要发 2.2.0，请主人点头\n[/投递]\n'])
         self.e.tick(); self.flush()
+        self.assertTrue(any('发版只走 [任务指令]' in p for p in self.pm_prompts()[before:] if '[服务回执]' in p))
         kinds = {x['text'].split('\n')[-1]: x['kind'] for x in self.t.inbox_items(lead['id'])}
-        self.assertEqual(kinds.get('发版: 只发 beta'), '留言'); self.assertEqual(kinds.get('补一条回归测试'), '指令')
+        self.assertNotIn('发版: 只发 beta', kinds); self.assertEqual(kinds.get('补一条回归测试'), '指令')
+        self.assertTrue(any(r['to'].get('to') == '主控' and '请主人点头' in r['text'] for r in self.t.dl.load(self.t)))
 
+    def test_release_delivery_in_owner_round(self):
+        """主人这一轮说过话，项目经理却用 [投递 短名#N] 发版：退回改写成 [任务指令]，回执不叫它再去问主人；改写的那条照转（3.19.9）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
+        before = len(self.pm_prompts())
+        self.pm(f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n', f'[任务指令] {n}\n发版: 只发 beta\n原因: 主人说先发 beta\n')
+        receipts = [p for p in self.pm_prompts()[before:] if '[服务回执]' in p]
+        self.assertTrue(receipts); self.assertTrue(all('发版只走 [任务指令]' in p and '投递 主控 问题' not in p for p in receipts))
+        self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id']) if '发版: 只发 beta' in x['text']], ['指令'])
+        self.assertEqual(self.t.load(lead['id'])['status'], 'approved')
+
+    def test_release_delivery_left_as_note_still_escalates(self):
+        """项目经理三次都用投递答发版：按留言送（3.19.8），负责人还在等，留言不算答了，问题由服务上交主控（3.19.9）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
+        bad, recs0 = f'[投递 {n} 留言]\n合并好了\n发版: 只发 beta\n[/投递]\n', len(self.t.dl.load(self.t))
+        self.layers([], [bad, bad, bad])
+        self.e.tick(); self.flush()
+        self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id'])], ['留言']); self.assertEqual(self.t.load(lead['id'])['status'], 'waiting')
+        self.assertTrue(any(r['to'].get('to') == '主控' and '要我发 2.2.0' in r['text'] for r in self.t.dl.load(self.t)[recs0:]))
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
         c, hist = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}, [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]

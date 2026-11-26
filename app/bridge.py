@@ -718,6 +718,7 @@ def with_retry(ev, key, result, redo, pm=None, follow=True):
         if pm: result, e = pm_notes(pm, key, result, vouch=is_owner(ev) and ev.get("chat_type") == "p2p"); errs.extend(e)
         result = run_marks(ev, result, (("转交", lambda r: handover(ev, r, errs)), ("派活", lambda r: task_directive(ev, r, errs, notes))))
         if follow: errs.extend(unmarked_release(ev, result))
+        if pm: errs.extend(release_by_delivery(result, pm, follow and is_owner(ev)))
         if not errs: break
         tasks.decide("回执退回", session=key, why="；".join(errs)[:300])
         done = notes + [f"转交 {p}" for p in sorted(ev["handed"])]
@@ -1325,6 +1326,19 @@ def chat_followups(ev, result):
         r = task_follow(dict(ev, sender_name=f"主控（替{name}）"), t, body, key)
         return "" if r.startswith("收到") else f"（{r}）"
     return apply_taskcmds(result, apply).strip()
+
+def release_by_delivery(result, pm, spoke):
+    """项目经理用 [投递 短名#N] 给本项目的负责人发版：投递按留言送（3.19.8），负责人不当指令；它要是在等答复，留言叫不醒它，就一直等着。
+    退回重写（这时候投递还没发），发版只走 [任务指令]（3.19.9）。spoke：这一轮主人说过话。"""
+    out = []
+    for to, _, body, _ in tasks.dl.parse_marks(result or "")[1]:
+        if not re.match(r"^[^\s#]*#\d+$", (to or "").strip()): continue
+        t, _ = tasks.resolve(to.strip())
+        if not (t and t.get("lead") and t.get("project") == pm) or not (w := team.asks_release(body)): continue
+        how = (f"写 [任务指令] {tasks.ref(t)}，正文单独一行 发版: 发到哪一步" if spoke else
+               f"这一轮{OWNER_NAME}没说过话，发版要{OWNER_NAME}点头：先写 [投递 主控 问题] 问{OWNER_NAME}，{OWNER_NAME}点过头的那一轮再写 [任务指令] {tasks.ref(t)}，正文单独一行 发版: 发到哪一步")
+        out.append(f"给 {tasks.ref(t)} 的投递要发版（{w}）：投递按留言送，负责人不当指令，在等答复的也叫不醒。发版只走 [任务指令]，{how}；不是发版就换个说法")
+    return out
 
 def unmarked_release(ev, result):
     """有人说过话的这一轮：[任务指令] 明说要主人派的负责人发版，却没写“发版:”那一行的，退回重写（这时候指令还没执行，3.19.7）。"""
@@ -2997,7 +3011,7 @@ def pm_relay(ev):
         okey = origin_key(t); key = pm_key(pm, okey)
         owner = bool(t["requester"].get("owner"))
         last_rec = max([r["id"] for r in tasks.dl.load(tk)] or [0])
-        inbox0 = len(tasks.inbox_items(n))
+        inbox0 = len([x for x in tasks.inbox_items(n) if x["kind"] == "指令"])
         result = None
         try:
             with sem:
@@ -3030,7 +3044,7 @@ def pm_relay(ev):
         text = pm_marks(pm, key, owner, text, hop, n, f"pm{n}e{idx}").strip()
         mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("key") == key
                 and (r["to"]["to"] == "主控" or (e["kind"] == "question" and r["to"]["to"] == "主人"))]
-        answered_q = len(tasks.inbox_items(n)) > inbox0
+        answered_q = len([x for x in tasks.inbox_items(n) if x["kind"] == "指令"]) > inbox0   # 留言叫不醒在等答复的任务，不算答了（3.19.9）
         if t.get("plan") and not t.get("closing") and not t.get("lead") and e["kind"] == "done" and not absorbed and not mine:   # 负责人做完就是这个版本的合并请求好了，跟收口一样要上报
             tasks.decide("项目经理处理掉", task=ref, why="方案里的小任务做完，看板上有，不逐个报")
         elif not mine and (tasks.load(n).get("cancelled_from") or team.left_over(tasks.load(n))): tasks.decide("项目经理处理掉", task=ref, why="任务取消了，或方案撤了")
