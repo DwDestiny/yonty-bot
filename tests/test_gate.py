@@ -88,9 +88,13 @@ class GateRunTest(unittest.TestCase):
 
 
 class Base(unittest.TestCase):
+    LEGACY = False   # True：这个类测的是 3.19 以前登记的老方案，见 test_team.legacy
+
     def setUp(self):
         self.e = A.Inst(self); self.t, self.b = self.e.t, self.e.b
         self.b.TEAM['strict'] = True; self.b.STRICT = True
+        if self.LEGACY:
+            import test_team; test_team.legacy(self.b, self)
 
     def run_task(self, **kw):
         kw = dict({'status': 'running', 'launched': time.time(), 'v2': True}, **kw)
@@ -200,6 +204,7 @@ class RelayTest(Base):
 
 
 class MarksTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行
     def test_cancel_once_and_tells_requester(self):
         said = []; self.b.task_say = lambda t, text, key: said.append(text) or 'om'
         t = self.run_task(status='approved')
@@ -336,6 +341,7 @@ class MarksTest(Base):
 
 
 class LoopTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行
     """2026-11-24 发 beta 那一晚：打包没打成记成完成，下游跟着开工，项目经理有意不回被报成没人管。"""
     def plan(self, title, deps=(), **kv):
         return self.run_task(title=title, plan='P', thing='主线', deps=list(deps), files=[title], v2=True, **kv)

@@ -148,7 +148,7 @@ def update(tid, _force=False, _touch=True, _from=None, **kv):
         fsio.write_json(os.path.join(tdir(tid), "task.json"), t, 1)
         return t
 
-# 三档：1 sonnet medium，全部从这里起步；2 opus medium，验证没过两次或被退回两次才升；3 opus xhigh，前两档解决不了的疑难（max 只在主人点名时用）。风险分只记录，不定档
+# 三档：1 sonnet medium，从这里起步；2 opus medium，验证没过两次或被退回两次才升，画面活从这里起步；3 opus xhigh，前两档解决不了的疑难（max 只在主人点名时用）。风险分只记录，不定档
 TIERS = ({"model": "sonnet", "effort": "medium"}, {"model": "opus", "effort": "medium"}, {"model": "opus", "effort": "xhigh"})
 def next_tier(t):
     """验证没过、认输之后换到哪一档；到顶了返回 None。"""
@@ -158,21 +158,30 @@ def next_tier(t):
 
 def cap_tier(model, effort):
     """会话写的模型和思考档收进档位：sonnet 最高 high（产品、排查这类要多想的用）；opus 写 high 改成 medium。xhigh、max 是疑难档，照写的。
-    2026-11-25 主人定：没有一样活一定要 Opus，都从 sonnet 起步，验证不过、被退回再升，隐私和密钥靠推送前扫描和最后的评审拦。"""
+    2026-11-25 主人定：从 sonnet 起步，验证不过、被退回再升，隐私和密钥靠推送前扫描和最后的评审拦。2026-11-26 主人定：画面、质感类的活从 opus 起步（见 pick_model）。"""
     if model == "sonnet" and effort in ("xhigh", "max"): return "sonnet", "high"
     if model == "opus" and effort == "high": return "opus", "medium"
     return model, effort
 
 AUTO_ROLES = ("", "开发")   # 这些角色的模型由服务定：有验证命令、在本机跑的先用 sonnet，验证过不了再换 opus
-def pick_model(role, verify, ex, model="", effort="", forced=False):
+def pick_model(role, verify, ex, model="", effort="", forced=False, craft=""):
     """派活时定模型和思考档，返回 {model, effort, auto_model}。本机跑、有验证命令的开发活不听会话写的，先用 sonnet（历史上 19 个这样的活 16 个写了 opus，占 165 美元当量），
-    除非主人的话派的、写明“主人指定”。别的活写了听写的、没写用角色模板，但除评审外写 opus 的改成 sonnet high；auto_up 是验证不过、被退回两次可以升档。云端跑的没有自动换人的机会。"""
+    除非主人的话派的、写明“主人指定”。别的活写了听写的、没写用角色模板，但除评审外写 opus 的改成 sonnet high；auto_up 是验证不过、被退回两次可以升档。云端跑的没有自动换人的机会。
+    craft 是派活写的“画面:”（界面、图、动效、视频这类要看质感的活）：从 opus medium 起步。2026-11-26 主人定，起因：推广片三条样片，全程 sonnet 的两条和第一版首屏演示都被否，
+    最接近能用的那条是 sonnet 做不成、升到 opus 才做出来的。谁标的、标的什么记在任务的 craft 里，复盘按它看 opus 占比。"""
+    craft = craft and role != "评审" and "opus" in MODELS
     if forced and model or role not in AUTO_ROLES or not verify or ex == "cloud" or not {"sonnet", "opus"} <= set(MODELS):
         if not forced:
             model, effort = cap_tier(model or ((roles().get(role) or {}).get("model") or "" if effort else ""), effort)   # 只写思考档的，按角色的模型算
-            if model == "opus" and role != "评审": model, effort = "sonnet", "high"   # 除评审外不从 opus 起步；要 opus 靠验证不过升档，或主人指定
+            if craft: model, effort = "opus", (effort if model == "opus" and effort in ("xhigh", "max") else "medium")
+            elif model == "opus" and role != "评审": model, effort = "sonnet", "high"   # 除评审、画面活外不从 opus 起步；要 opus 靠验证不过升档，或主人指定
         return {"model": model, "effort": effort, "auto_model": False, **({"auto_up": True} if not forced and role != "评审" and ex != "cloud" else {})}
-    return dict(TIERS[0], auto_model=True)
+    return dict(TIERS[1] if craft else TIERS[0], auto_model=True)
+
+def craft_of(v):
+    """派活里“画面:”写的：要看质感的是什么画面。没写、写了不是、照抄了模板的返回空串。"""
+    v = re.sub(r"\s+", " ", v or "").strip()[:80]
+    return "" if not v or v.startswith(("<", "不", "否", "无", "没", "-", "—")) or "要看质感" in v else v
 
 def sibling_drop(t, model):
     """验证没过、换了人的会话不再拿来分叉。"""
@@ -1073,7 +1082,7 @@ def _directive(block):
             "repo": field("仓库"), "title": field("标题")[:80] or "未命名任务", "brief": brief,
                   "agent": agents.ALIAS.get(field("智能体").lower(), ""), "model": pick(field("模型"), MODELS), "forced": "主人指定" in field("模型"), "effort": pick(field("思考"), EFFORTS), "target": target,
                   "mem_est": res.parse_mem(field("资源"))[0], "mem_why": res.parse_mem(field("资源"))[1], "release": field("放行")[:40],
-                  "verify": verify, "verify_said": bool(field("验证")), "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept,
+                  "verify": verify, "verify_said": bool(field("验证")), "exec": ex, "role": role, "budget": budget, "thing": thing_name(field("事情")), "accept": accept, "craft": craft_of(field("画面")),
                   "budget_why": ("主控估：" + bm2.group(2).strip()[:120]) if budget and bm2.group(2).strip() else ("主控估" if budget else "")}
 
 def model_label(t):
@@ -1852,12 +1861,18 @@ def first_prompt(t, base, forked=False):
 {t['brief']}{t.get('takeover', '')}"""
 
 def part(t):
-    """方案里的任务（不含收口、临时活）：只推分支，不建合并请求。"""
-    return bool(t.get("plan")) and not t.get("closing") and (not t.get("adhoc") or t.get("role") == "评审")
+    """方案里的任务（不含收口、负责人、临时活）：只推分支，不建合并请求。"""
+    return bool(t.get("plan")) and not t.get("closing") and not t.get("lead") and (not t.get("adhoc") or t.get("role") == "评审")
+
+def part_note(t):
+    """回报里说这个任务为什么不建合并请求。"""
+    if t.get("role") == "评审": return "评审：不改文件，不建合并请求"
+    if t.get("extra"): return "另开的任务：不建合并请求，由负责人合进这个版本的合并请求"
+    return "小任务：不建合并请求，由收口任务统一建"
 
 def mr_note(t, base):
     if agent_of(t).boxed: return "。你在沙箱里，没有远端凭据：不用推送、不用建合并请求，验证过了服务替你做。没提交的改动不算数"
-    if part(t): return "，不建合并请求（收口任务统一建）"
+    if part(t): return "，不建合并请求（" + ("由负责人合进这个版本的合并请求" if t.get("extra") else "评审只出意见" if t.get("role") == "评审" else "收口任务统一建") + "）"
     return f"，再建草稿合并请求：在工作树里跑 `{mr_cmd(t, base)}`（GitHub、Codeup 都走它，凭据它自己读；不要直接读令牌或调平台接口）"
 
 def plan_note(t):
@@ -1866,10 +1881,22 @@ def plan_note(t):
     br = [y["branch"] for y in _mod_team().merge_list(_me(), t) if y.get("branch")]
     if t.get("closing"):
         own = "你做收口：合好上面的分支，解决冲突，跑一次全量测试，只建这一个合并请求。"
+    elif t.get("lead"):
+        own = (f"这个版本由你一个人从头做到尾：调研、定性、写、自测、跑一次全量测试（仓库有 CI 的等 CI）、建这个版本的一个合并请求；版本号、更新日志照仓库的发版规矩写。"
+               f"改动范围：{'、'.join(t.get('files') or [])}。要大量读的东西（扫历史、读十几个同类项目、看片子、查资料）开子代理去读，只拿回结论，别把原文堆进自己的上下文；"
+               "同一件事的几个阶段、几个方向都是你的活，不拆给别人。另开的检查、独立块做完，项目经理会把结论或分支交给你合；评审提的必修项也退回给你接着改。"
+               "要主人定的事攒到一起问：能自己定的先定，写进交回；真要主人定的，攒齐了一次写清背景、选项和你的建议，不做完一小块就问一次。")
+    elif t.get("wait_all"):
+        ex = [y for y in _mod_team().plan_tasks(t, _me().all_tasks()).values() if not y.get("lead") and y.get("role") != "评审" and y.get("branch")]
+        own = ("你只评审，不改文件，不建合并请求。看的是负责人的分支，它就是这个版本的合并请求。"
+               + (f"另开任务的分支 {'、'.join(y['branch'] for y in ex)} 有提交的，要已经合进负责人的分支（git merge-base --is-ancestor 核对），没合进去算必修。" if ex else ""))
     elif t.get("role") == "评审":
         own = "你只评审合好的改动，不改文件，不建合并请求。"
     elif t.get("adhoc"):
         own = f"这件小活就你一个人做完：只改这些文件：{'、'.join(t.get('files') or [])}，跑跟改动有关的检查，自己建这一个合并请求。不走收口；任务书写的验收就是全部，不另加检查。"
+    elif t.get("extra"):
+        own = (f"这是这个版本另开的任务（{t['extra']}），只改这些文件：{'、'.join(t.get('files') or [])}；要动范围外的文件，先用 [提问] 找项目经理。"
+               "只跑跟它有关的检查；提交并推送分支，不建合并请求，由负责人合进这个版本的合并请求。任务书写的验收就是全部；别的地方有问题，写进交回。")
     else:
         own = (f"你只做“{t['title']}”这一个小任务，只改这些文件：{'、'.join(t.get('files') or [])}。别的任务同时在改别的文件；要动范围外的文件，先用 [提问] 找项目经理。"
                "只跑跟改动有关的检查，不跑全量测试；提交并推送分支，不建合并请求，收口任务统一建。任务书写的验收就是全部：不另加检查、评审和复核轮；别的地方有问题，写进交回。")

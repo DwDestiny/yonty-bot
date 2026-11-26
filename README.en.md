@@ -1,8 +1,8 @@
 # Yonty Bot
 
-> 3.18.0 · 2026-11-25 · MIT · [中文](README.md) | English
+> 3.19.0 · 2026-11-26 · MIT · [中文](README.md) | English
 
-**Give Claude Code work from a Feishu/Lark or WeCom group chat. A project manager splits the job, background agents change the code on their own branches, and the service re-runs your verify command. It reports PASS only if the command passes.**
+**Give Claude Code work from a Feishu/Lark or WeCom group chat. A project manager gives each job to one lead agent, the lead does the whole job on its own branch in the background, and the service re-runs your verify command. It reports PASS only if the command passes.**
 
 Self-hosted, MIT. You and your teammates share one group. A teammate's code question gets an answer on the spot. When a teammate asks for a code change, work starts only after you approve. If a task has no verify command, the service does not re-check it, and the result says so.
 
@@ -28,16 +28,16 @@ You use your own Claude subscription. Before you install, read [When not to use 
 A job from start to finish. The names are made up, and the steps follow the real flow.
 
 1. You say in the group what you want built.
-2. The project manager reads the code and splits the job into tasks.
-3. Several developers change code in the background in parallel. Each edits its own files.
-4. The last task merges the work and opens a draft pull request. When it says it is done, the service re-runs the verify command and sends the task back in the background if it fails.
+2. The project manager reads the code, decides what this version covers and assigns one lead.
+3. The lead works on its own branch in the background from start to finish: research, code, tests and a draft pull request.
+4. When the lead says it is done, the service re-runs the verify command and sends the task back in the background if it fails. Then a reviewer reads the diff, and fixes go back to the same lead.
 5. The re-run passes, so the result says PASS. The bot reports back in the group with a link to the draft pull request.
 
 ## Three highlights
 
 **"Done" doesn't count.** For a task that has a verify command, the service runs that command again when the task says it is done. If it fails, the task goes back for rework, up to 2 times by default. If it still fails, the task comes back as BLOCKED. For a task without a verify command, the result says "no verify command set, not re-checked by the service".
 
-**One job in, one draft pull request out.** The project manager writes the plan, splits the tasks, assigns the work and accepts the results. It does not write code itself. Tasks run in parallel, each on its own files. A project job gets one plan and one pull request per version. The pull request is a draft, and you decide whether to merge. See [docs/tasks.md](docs/tasks.md).
+**One job in, one draft pull request out.** The project manager writes the plan, assigns a lead and accepts the results. It does not write code itself. A project job gets one plan, one lead and one pull request per version. When the lead must read a lot, it starts subagents in its own session instead of splitting the job into many tasks. Only independent checks, blocks that need another machine or toolset, and the review run as separate tasks. The pull request is a draft, and you decide whether to merge. See [docs/tasks.md](docs/tasks.md).
 
 **Use it together in a group.** A teammate @-mentions it with a code question. It looks and answers, with no approval from you. When a teammate wants a code change, it writes a task brief and waits for your approval before it starts. An approval that nobody gives expires after 24 hours by default. Who you are comes only from the sender ID that Feishu or WeCom provides. A message that claims "I'm the owner" counts for nothing.
 
@@ -82,9 +82,9 @@ You can copy the lines below as they are. Replace `shop` with your repo name.
 **A job you give** (you are the person who installed the bot, called the "owner" in the docs):
 
 1. You say something in chat. The controller is the agent that talks with you in chat. It does a small job on the spot. For a big job, it first asks for the goal, the scope and what counts as done.
-2. The controller hands the big job to the project's project manager. The project manager reads the code, writes a plan and splits it into tasks.
-3. Developers work in the background. Each task has its own worktree and its own `bot/` branch. Tasks that touch the same files, or that wait on an earlier task, queue. By default each project runs at most 4 tasks from a plan at the same time.
-4. Development tasks in a plan only push branches. The final merge-check task merges them and opens one draft pull request. A small job that one task can finish skips the merge check and opens its own draft pull request.
+2. The controller hands the big job to the project's project manager, together with your original words. The project manager reads the code, writes a plan and assigns one lead.
+3. The lead works in the background in its own worktree on its own `bot/` branch, from research to code to tests to a draft pull request. Independent checks (for example a secret scan, or a clean install that follows the docs) run as separate tasks on their own branches, and the lead merges them in. Tasks that touch the same files, or that wait on an earlier task, queue.
+4. When the lead is done, the project manager starts a review that only reads the diff. Fixes go back to the same lead. Each version gets one draft pull request.
 5. When a task says it is done, the service re-runs the verify command. The first line of the report is the result: PASS, or where it got stuck.
 6. The controller tells you the result and anything you need to decide, in a few lines.
 
@@ -99,18 +99,19 @@ You can copy the lines below as they are. Replace `shop` with your repo name.
 </picture>
 </p>
 
-### What the controller, project manager and developers each do
+### What the controller, project manager and lead each do
 
 | Who | What they do |
 |---|---|
 | Controller | Talks with you and your teammates, answers questions, does small changes that take a few minutes, hands big jobs on |
-| Project manager | Writes the plan, splits tasks, assigns work and accepts results. Does not write code |
-| Developer | Writes code and runs tests on an isolated branch in the background, then hands back the result |
+| Project manager | Plans each version, assigns one lead and accepts results. Does not write code |
+| Lead | Does the whole version on an isolated branch in the background: research, code, tests and a draft pull request |
+| Checks and review | Kept apart from the writer: secret scans, clean installs and similar checks. The review reads the diff and comments |
 
 <p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.en.dark.svg">
-  <img src="docs/assets/diagrams/layers.en.svg" alt="Who does what: controller, project manager and developers, and what the service handles: identity, queueing, verification and stop" width="480">
+  <img src="docs/assets/diagrams/layers.en.svg" alt="Who does what: controller, project manager and lead, and what the service handles: identity, queueing, verification and stop" width="480">
 </picture>
 </p>
 
@@ -237,7 +238,7 @@ This covers only projects whose README was read on 2026-11-25. A feature missing
 - For several kinds of agents, several chat platforms or a web console, see [cc-connect](https://github.com/chenhg5/cc-connect). For a desktop workbench, see [emdash](https://github.com/generalaction/emdash).
 - For a Feishu bridge with one command and a QR scan, with lists of users, groups and admins, see [lark-coding-agent-bridge](https://github.com/zarazhangrui/lark-coding-agent-bridge). For per-call approval of tool use and an audit log, see [wardendeck](https://github.com/bocoboho/wardendeck).
 - For multi-agent division of work or review by another vendor's model, see [orcha](https://github.com/Ink-dark/orcha) and [cc-lark](https://github.com/yixin-1024/feishu-claude-code).
-- Yonty Bot covers the path from a chat request to verification: a project manager splits the job, work runs on isolated branches in the background, the service re-runs the command that was set when the job was given, and a draft pull request comes back.
+- Yonty Bot covers the path from a chat request to verification: a project manager gives each version to one lead, work runs on isolated branches in the background, the service re-runs the command that was set when the job was given, and a draft pull request comes back.
 
 ## Docs, contributing, license
 

@@ -2,14 +2,15 @@
 
 Input:  state/team3.json（方案、看板备注、停工、项目经理交接）；tasks 模块（各函数的 tk 参数，读任务状态）
 Output: 方案登记和闸门结论、看板文字、哪些任务先别开
-Pos:    bridge.py 用。结构：主控（唯一跟主人说话）→ 项目经理（出方案、拆任务、验收）→ 开发（并行，各改各的文件）。项目类的活一个版本一个方案、一个合并请求。看板按任务状态生成，不靠模型回忆
+Pos:    bridge.py 用。结构：主控（唯一跟主人说话）→ 项目经理（定版本、派负责人、验收）→ 负责人（一个版本一个，从头做到尾；独立检查、换机器换工具的块另开，评审另派）。
+        项目类的活一个版本一个方案、一个合并请求。3.19 以前登记的老方案（没有 lead）照老规矩：开发任务并行，各改各的文件，收口合到一起。看板按任务状态生成，不靠模型回忆
 """
 import importlib.util, json, os, re, threading, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 F = os.path.join(ROOT, "state", "team3.json")
 LK = threading.RLock()
-DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 8, "max_reviews": 2, "brief_check": True}   # max_tasks：一个方案的开发任务数，另加收口、评审两个
+DEFAULTS = {"strict": True, "max_parallel": 4, "max_tasks": 8, "max_reviews": 2, "brief_check": True}   # max_tasks：一个版本最多几项（负责人加另开的，做完的也算，不含评审）；老方案按没做完的开发任务数算，另加收口、评审两个
 def brief_part(brief, h):
     """任务书里“h:”这一段有没有内容：同一行，或者到下一个小标题之前。"""
     heads = "|".join(BRIEF_HEADS)
@@ -119,15 +120,41 @@ def follow_gate(project, d):
 
 def plan_of(project, name): return ((load().get("plans") or {}).get(project) or {}).get(name)
 
+def rows(body):
+    """[方案] 正文里“任务:”下面列的任务：[(标题, 第四栏)]。一行写 - 标题 | 文件 | 依赖 | 另开理由，第四栏只有另开的任务写。"""
+    m = re.search(r"^\s*任务\s*[:：]\s*$", body or "", re.M)
+    got = [[c.strip() for c in x.group(1).split("|")] for x in map(ITEM.match, (body[m.end():] if m else "").split("\n")) if x]
+    return [(c[0], c[3] if len(c) > 3 else "") for c in got if not re.match(r"(?:\*\*)?(?:版本|预算|另开|去掉)(?:\*\*)?\s*[:：]", c[0])]
+
 def titles(body):
     """[方案] 正文里“任务:”下面列的标题。"""
-    m = re.search(r"^\s*任务\s*[:：]\s*$", body or "", re.M)
-    got = [x.group(1).split("|")[0].strip() for x in map(ITEM.match, (body[m.end():] if m else "").split("\n")) if x]
-    return [x for x in got if not re.match(r"(?:\*\*)?(?:版本|预算|另开|去掉)(?:\*\*)?\s*[:：]", x)]
+    return [x for x, _ in rows(body)]
+
+# ---------- 一个版本一个负责人（2026-11-26 主人定）----------
+# 负责人从头做到尾：调研、定性、写、自测、建合并请求都归它，要大量读的它开子代理。另开的只有这两种，评审另算
+KINDS = {"检查": "独立检查：扫描密钥和隐私、干净环境照文档装一遍、独立验收测试", "独立": "真正互不相干的块：换一台机器、换一整套工具"}
+
+def is_review(title): return "评审" in (title or "")
+
+def kind_of(col):
+    """第四栏：(种类, 理由)；不是“检查：理由”“独立：理由”的，种类是空串。"""
+    m = re.match(r"^\s*(?:另开\s*[:：]\s*)?(检查|独立)\s*(?:[:：，,、]\s*|\s+)(\S.*)$", col or "")
+    return (m.group(1), m.group(2).strip()) if m else ("", (col or "").strip())
+
+def lead_task(tk, project, name, pool=None):
+    """一个负责人的版本里，负责人那个任务（最新派的、没作废的）；没派或老方案返回 None。"""
+    ld = (plan_of(project, name) or {}).get("lead")
+    xs = [t for t in (pool if pool is not None else tk.all_tasks()) if ld and t.get("project") == project and t.get("plan") == name and t["title"] == ld and t["status"] not in DEAD]
+    return max(xs, key=lambda t: t["id"]) if xs else None
+
+ONE_LEAD = ("一个版本只派一个负责人任务：调研、定性、写、自测、跑全量、建合并请求都归它，要大量读的它在自己会话里开子代理，同一件事的几个阶段、几个方向都算它的。"
+            "真要另开的只有两种，第四栏写“检查：理由”（" + KINDS["检查"] + "）或“独立：理由”（" + KINDS["独立"] + "）；评审照写。不派收口：负责人自己合、自己建合并请求")
 
 def save_plan(project, name, body, tk=None, c=None):
     """[方案] 名称：登记任务单。一行一个任务，写 - 标题 | 文件 | 依赖。返回出错说明，空串就是登记好了。
-    重发同名的：任务单列全了原来的，整份换成新的；没列全就是往里补，原来的任务和正文都留着。不做的写一行“去掉: 标题一、标题二”（已经派出去的去不掉，用 [取消任务]）。"""
+    重发同名的：任务单列全了原来的，整份换成新的；没列全就是往里补，原来的任务和正文都留着。不做的写一行“去掉: 标题一、标题二”（已经派出去的去不掉，用 [取消任务]）。
+    新登记的版本是一个负责人的（记下 lead）：任务单里一个不写第四栏的任务是负责人，评审照写，另开的第四栏写“检查：理由”“独立：理由”，一个版本最多 max_tasks 项（做完的也算，不含评审）。
+    3.19 以前登记的老方案（没有 lead）照老规矩往里补：没做完的开发任务最多 max_tasks 个，另加收口、评审。"""
     name = name.strip()
     if not name: return "[方案] 后面没写名称"
     items, old, text = titles(body), plan_of(project, name) or {}, body
@@ -153,12 +180,33 @@ def save_plan(project, name, body, tk=None, c=None):
         text = f"{head}\n\n[补充]\n{body}"
     items = [i for i in items if i not in drop]
     items += [i for i in dict.fromkeys(sent) if i not in items]
-    new = [i for i in items if i not in done]
-    top = (c or DEFAULTS)["max_tasks"] + 2
-    if len(new) > top: return f"方案“{name}”没做完的有 {len(new)} 个，太多（开发任务最多 {top - 2} 个，另加收口、评审）：同一类页面、同一套文件、一个接一个的活合成一个任务；还是太多，这个版本先做最要紧的，其余放下一个版本"
+    new, c = [i for i in items if i not in done], c or DEFAULTS
     ver = version_of(body) or old.get("version") or ""
+    keep = {}
+    if ver != ADHOC and (not old or "lead" in old):   # 一个负责人的版本：新登记的都是；老方案照老规矩收完
+        lead = old.get("lead") if old.get("lead") in items else ""
+        extra, cols, heads = {k: v for k, v in (old.get("extra") or {}).items() if k in items}, dict(rows(body)), []
+        for i in items:
+            if i == lead or i in extra or is_review(i): continue
+            k, why = kind_of(cols.get(i, ""))
+            if k and len(why) >= 2: extra[i] = f"{k}：{why}"[:200]; continue
+            if cols.get(i): return f"“{i}”第四栏写的是“{cols[i][:40]}”：另开的只有两种，写“检查：理由”（{KINDS['检查']}）或“独立：理由”（{KINDS['独立']}）；同一件事的几个阶段、几个方向归负责人，不写第四栏就是负责人"
+            heads.append(i)
+        if lead and heads:
+            lt = next((tk.ref(t) for t in sorted(mine, key=lambda t: -t["id"]) if t["title"] == lead), "") if tk else ""
+            return (f"这个版本的负责人是“{lead}”{lt}：新需求点交给它，已经派出去的用 [任务指令] {lt or '短名#N'} 补（正文加一行 原因: 需求变），还没派的写进它的任务书。"
+                    f"“{'、'.join(heads)[:120]}”要是检查或互不相干的块，第四栏写“检查：理由”或“独立：理由”再发")
+        if not lead:
+            if not heads: return f"方案“{name}”没有负责人任务：任务单里写一个不带第四栏的任务，这个版本由它从头做到尾。{ONE_LEAD}"
+            if len(heads) > 1: return f"方案“{name}”有 {len(heads)} 个负责人任务（{'、'.join(heads)[:120]}）。{ONE_LEAD}"
+            lead = heads[0]
+        n = len([i for i in items if not is_review(i)])
+        if n > c["max_tasks"]: return f"方案“{name}”有 {n} 项（负责人加另开的，做完的也算，不含评审），一个版本最多 {c['max_tasks']} 项：同一件事的几个阶段、几个方向都归负责人；还是太多，这个版本先做最要紧的，其余放下一个版本"
+        keep = {"lead": lead, **({"extra": extra} if extra else {})}
+    elif len(new) > c["max_tasks"] + 2:
+        return f"方案“{name}”没做完的有 {len(new)} 个，太多（开发任务最多 {c['max_tasks']} 个，另加收口、评审）：同一类页面、同一套文件、一个接一个的活合成一个任务；还是太多，这个版本先做最要紧的，其余放下一个版本"
     _change(lambda st: st.setdefault("plans", {}).setdefault(project, {}).__setitem__(
-        name, {"items": items, "text": text[:PLAN_TEXT], "at": time.time(), "version": ver, **({"budget": b} if (b := budget_of(body) or old.get("budget")) else {})}))
+        name, {"items": items, "text": text[:PLAN_TEXT], "at": time.time(), "version": ver, **keep, **({"budget": b} if (b := budget_of(body) or old.get("budget")) else {})}))
     return ""
 
 # ---------- 版本：项目类的活一个版本一个方案、一个合并请求，测试、CI、评审、发版每个版本只做一次（2026-11-25 主人定）----------
@@ -179,11 +227,11 @@ def budget_of(body):
     return float(m.group(1)) if m and float(m.group(1)) > 0 else 0
 
 def plan_open(tk, project, name):
-    """方案还能往里补活：有没做完的、收口还没开工。一天没动静又没有活的不算。"""
+    """方案还能往里补活：有没做完的、收口还没开工（一个负责人的版本：评审还没开工）。一天没动静又没有活的不算。"""
     p = plan_of(project, name) or {}
     if p.get("dropped"): return False
     ts = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == name and t["status"] not in DEAD]
-    if any(t.get("closing") and t["status"] in ("running", "waiting", "done") for t in ts): return False
+    if any((t.get("closing") or ("lead" in p and t.get("role") == "评审")) and t["status"] in ("running", "waiting", "done") for t in ts): return False
     if not set(p.get("items") or ()) - {t["title"] for t in ts if t["status"] == "done"}: return False
     return any(t["status"] in tk.ACTIVE + ("pending",) for t in ts) or time.time() - max([p.get("at") or 0] + [t.get("updated") or 0 for t in ts]) < 86400
 
@@ -214,6 +262,11 @@ def plan_check(tk, project, name, body):
     if not op or why: return ""
     o = op[-1][1]
     v = plans[o].get("version")
+    if "lead" in plans[o]:
+        lt = lead_task(tk, project, o)
+        return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没做完，同一个项目一次只做一个版本：新需求点交给它的负责人"
+                + (f" {tk.ref(lt)}，用 [任务指令] {tk.ref(lt)} 补（正文加一行 原因: 需求变）" if lt else f"“{plans[o]['lead']}”，写进它的任务书再派")
+                + f"；是检查、互不相干的块，就加进 [方案] {o}，第四栏写理由。一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
     return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没收口，同一个项目一次只做一个版本：把这些需求点加进它的任务单，再发一次 [方案] {o}（已经派出去的不用重写）。"
             f"一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
 
@@ -261,9 +314,13 @@ def gate(tk, project, d, c):
         if it in raw: got.append(it); raw = raw.replace(it, "、")
     if got: d["deps"] = got + [x.strip() for x in re.split(r"[,，、;；]+", raw) if x.strip() and x.strip() not in ("无", "没有", "-")]
     if d["title"] not in p["items"]: return f"“{d['title']}”不在方案“{d['plan']}”的任务单里（有：{'、'.join(p['items'])}），标题要一样；要加活先更新方案"
+    if "lead" in p:   # 任务单没有角色栏，登记时按标题分了类：派的时候角色、收口要跟登记的对得上，不能换个写法绕过一个负责人
+        if d.get("closing"): return f"方案“{d['plan']}”是一个负责人的版本，不派收口：负责人“{p['lead']}”自己合进另开任务的分支、跑全量、建合并请求；派活里去掉“收口: 是”"
+        if is_review(d["title"]) and d.get("role") != "评审": return f"“{d['title']}”在任务单里登记的是评审，角色写“评审”"
+        if not is_review(d["title"]) and d.get("role") == "评审": return f"“{d['title']}”在任务单里登记的不是评审，角色不能写“评审”：评审的标题里要有“评审”两个字，先用 [方案] 补进任务单"
     mine = [t for t in tk.all_tasks() if t.get("project") == project and t.get("plan") == d["plan"]]
     if any(t["title"] == d["title"] and t["status"] not in ("cancelled", "rejected", "expired", "failed") for t in mine): return f"“{d['title']}”已经派过了"
-    if len([t for t in mine if t["status"] not in DEAD]) >= c["max_tasks"] * 3: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先收口，剩下的放下一个版本"
+    if len([t for t in mine if t["status"] not in DEAD]) >= c["max_tasks"] * 3: return f"方案“{d['plan']}”已经派了 {len(mine)} 个任务，先把这个版本收尾，剩下的放下一个版本"
     if d.get("role") == "评审" and not d.get("review_ok"):   # 一轮全面看、一轮复核必修就够；再多是花钱磨，要人定
         n = sum(t.get("role") == "评审" and t["status"] not in DEAD + ("failed", "lost") for t in mine)
         if n >= c["max_reviews"]: return f"方案“{d['plan']}”已经评审过 {n} 轮，不自动开下一轮：剩下的必修项自己核对修没修好就收，拿不准写 [投递 主控 问题] 请主人定；主人同意再审，派活里加一行“再审: 主人同意”"
@@ -292,21 +349,23 @@ def dep_tasks(tk, t, pool=None):
     pool = pool if pool is not None else tk.all_tasks()
     by, out = plan_tasks(t, pool), []
     for x in t.get("deps") or []: out.append((x, by.get(x) if x != t["title"] else None) if x in by else (x, tk.resolve(x, pool)[0]))
-    if t.get("closing"):
+    if t.get("closing") or t.get("wait_all"):   # wait_all：一个负责人的版本里的评审，等齐负责人和另开的（不等别的评审），收口原来管的这件事归它
         ok = t.get("deps_ok") or []   # 失败后取消、还没重派的也要等；[改依赖] 收口之后不等
-        lost = {y["title"] for y in pool if y.get("cancelled_from") and y["status"] in DEAD and y.get("plan") == t["plan"] and y.get("project") == t.get("project") and y["id"] not in ok} - set(by) - set(t.get("deps") or [])
+        skip = lambda y: t.get("wait_all") and y.get("role") == "评审"
+        lost = {y["title"] for y in pool if y.get("cancelled_from") and y["status"] in DEAD and y.get("plan") == t["plan"] and y.get("project") == t.get("project") and y["id"] not in ok and not skip(y)} - set(by) - set(t.get("deps") or [])
         out += [(n, None) for n in sorted(lost)]
         after, grew = {t["title"]}, True
         while grew:
             new = {n for n, y in by.items() if n not in after and after & set(y.get("deps") or [])}
             after |= new; grew = bool(new)
         seen = {y["id"] for _, y in out if y}
-        out += [(n, y) for n, y in by.items() if n not in after and y["id"] not in seen and y["id"] != t["id"] and not y.get("closing")]
+        out += [(n, y) for n, y in by.items() if n not in after and y["id"] not in seen and y["id"] != t["id"] and not y.get("closing") and not skip(y)]
     return out
 
 def merge_list(tk, t):
-    """开工要先合进来的任务：依赖，加上同一方案里改过同一块文件、已经做完的。"""
+    """开工要先合进来的任务：依赖，加上同一方案里改过同一块文件、已经做完的。一个负责人的版本，评审只合负责人的分支（就是这个版本的合并请求），另开的合没合进去由评审核对。"""
     pool = tk.all_tasks()
+    if t.get("wait_all"): return [y for y in [lead_task(tk, t.get("project"), t.get("plan"), pool)] if y]
     out = [y for _, y in dep_tasks(tk, t, pool) if y]
     ids = {y["id"] for y in out} | {t["id"]}
     return out + [y for y in plan_tasks(t, pool).values() if y["id"] not in ids and y["status"] == "done" and overlap(t.get("files") or [], y.get("files") or [])]

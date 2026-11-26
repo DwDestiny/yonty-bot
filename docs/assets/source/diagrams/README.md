@@ -1,8 +1,8 @@
 # 正文配图源文件
 
-> 2026-11-25 · 维护：Yonty Bot contributors
+> 2026-11-26 · 维护：Yonty Bot contributors
 
-产物在 `docs/assets/diagrams/`：`flow`（派活流程）、`layers`（主控、项目经理、开发）、`gate`（复跑验证）、`boundary`（权限边界），各有 `.zh`、`.en`，深色版再加 `.dark`，共 16 个 SVG。图是示意，按代码画，不是实拍。
+产物在 `docs/assets/diagrams/`：`flow`（派活流程）、`layers`（主控、项目经理、负责人）、`gate`（复跑验证）、`boundary`（权限边界），各有 `.zh`、`.en`，深色版再加 `.dark`，共 16 个 SVG。图是示意，按代码画，不是实拍。
 
 ## 重出命令
 
@@ -39,16 +39,16 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 |---|---|
 | 1 聊天里说一件事 | `README.md`“它怎么干活”1 |
 | 2 主控接话，1→2、2→3 | `README.md`“它怎么干活”2；`docs/architecture.md` 1.1 |
-| 3 项目经理拆任务，3→4 | `app/team.py` `save_plan`；`app/roles/项目经理.md` |
+| 3 项目经理定版本、派一个负责人，3→4 | `app/team.py` `save_plan`（正好一个负责人，另开的写理由）；`app/roles/项目经理.md` |
 | 4 同事派的等你批；自己派的直接排队，4→5 | `app/bridge.py` `dispatch_one`（`approved` / `pending`）、`task_approve` |
-| 5 后台开工：内存、依赖、各自分支，5→复跑验证 | `app/resources.py` `admit`；`app/team.py` `waits`；`docs/tasks.md` §1 |
+| 5 负责人在后台从头做到尾，在自己的分支上建草稿合并请求，5→复跑验证 | `app/resources.py` `admit`；`app/team.py` `waits`；`app/tasks.py` `plan_note`、`mr_note`；`docs/tasks.md` §1 |
 | 复跑验证和红虚线：没过退回任务 | `app/tasks.py` `run`（`[验证失败]` 作为下一轮提示，不发聊天） |
-| 6 合并检查（任务单里写 `收口: 是`）：合分支、全量测试、草稿合并请求、再复跑验证 | `app/tasks.py` `plan_note`、`mr_note`、`run` |
+| 6 评审：只读看改动，要改的退回同一个负责人 | `app/team.py` `dep_tasks`（`wait_all`）、`merge_list`；`app/tasks.py` `plan_note`；`app/roles/评审.md` |
 | 7 PASS 交回 | `app/tasks.py` `run`；`docs/tasks.md` §1 第 8 条 |
 | 7 合并由你决定 | `app/tasks.py` `first_prompt`（不合并）；`app/rules/persona-work.md`“要主人点头” |
 | 脚注：主控可直接派同事的活 | `app/bridge.py` `dispatch_block`、`app/tasks.py` `mr_note` |
 
-### 主控、项目经理、开发（layers）
+### 主控、项目经理、负责人（layers）
 
 | 图上 | 位置 |
 |---|---|
@@ -57,7 +57,7 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 | 转交；完成、问题箭头 | `docs/architecture.md` 1.1；`docs/tasks.md` §1 第 8 条 |
 | 项目经理，按项目和受众会话分开，不写代码 | `docs/architecture.md` 1.1；`app/roles/项目经理.md`；`app/hooks/scope_guard.py`（只拦编辑类工具，Bash 仍能写） |
 | 派活；回报、提问箭头 | `app/team.py` `gate`；`docs/tasks.md` §1 第 8 条 |
-| 开发：写代码、合并检查、评审，各有分支 | `docs/architecture.md` 1.1；`app/tasks.py` `plan_note`；`app/roles/评审.md` |
+| 后台任务：负责人、独立检查、评审，各有分支 | `docs/architecture.md` 1.1；`app/tasks.py` `plan_note`、`part_note`；`app/roles/评审.md` |
 | 红虚线：授权、花钱、方向直接问主人 | `app/delivery.py` `OWNER_CATS`；`docs/tasks.md` §2 投递规则 |
 | 服务：身份、排队、验证、停工 | `app/bridge.py` `is_owner`；`app/resources.py` `admit`；`app/tasks.py` `run_verify`；`app/team.py` `set_held` |
 
@@ -103,7 +103,7 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 
 | 文档 | 代码 | 图 |
 |---|---|---|
-| README“过了开草稿合并请求” | 普通任务和合并检查在自己那一轮里建草稿合并请求，早于复跑验证（`mr_note`）；只有沙箱和云端任务是验证过了由服务建（`agent_publish`、`create_mr`） | 合并请求画在合并检查里，之后才是复跑验证和 PASS |
+| README“过了开草稿合并请求” | 普通任务和负责人在自己那一轮里建草稿合并请求，早于复跑验证（`mr_note`）；只有沙箱和云端任务是验证过了由服务建（`agent_publish`、`create_mr`） | 合并请求画在负责人那一步里，之后才是复跑验证、评审和 PASS |
 | README“推主干由钩子直接拦下” | 只对同事的活成立；主人派的只拦强推和删除 main/master（`git_guard.py`） | 放在“没有硬拦住” |
 | 分镜“验证失败”卡片像群消息 | 退回是给任务的下一轮提示 | 画成后台退回 |
 | 分镜深色底 `#14120f`、红 `#d6382b` | 主视觉用 `#1a1814`、`#ff5f4f` | 跟主视觉 |

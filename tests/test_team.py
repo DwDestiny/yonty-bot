@@ -1,11 +1,11 @@
-"""3.0 的组织规矩：主控唯一对话、项目经理按方案拆小并行、回执、看板、停工、内部标记不外露、额度写剩余。
+"""3.0 的组织规矩：主控唯一对话、项目经理按方案派活（这里多是 3.19 以前登记的老方案：拆小并行、收口；一个负责人的版本见 test_one_lead.py）、回执、看板、停工、内部标记不外露、额度写剩余。
 
 Input:  test_accept_flow 的临时实例（Claude、systemd、lark-cli 都是假的），team.strict 打开
 Output: unittest 结果
 Pos:    tests/ 下的行为测试，内容全是虚构的
 """
 import json
-import importlib.util, os, sys, unittest
+import importlib.util, os, sys, time, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_accept_flow as A
@@ -19,10 +19,28 @@ def block(repo, title, files='', deps='', closing=False, plan='整改', brief='�
 PLAN = "[方案] 整改\n版本: 1.0\n先定底座\n任务:\n- 甲 | src/a |\n- 乙 | src/b |\n- 丙 | src/c | 甲\n- 收口 | | 甲、乙、丙\n[/方案]\n"
 
 
+def legacy(b, test):
+    """3.19 以前登记的老方案（几个开发任务并行、收口合到一起、评审依赖收口）还要照老规矩跑完：新登记的方案按老规矩记（不记 lead），
+    其余照真的走。用它的测试测的是老方案；一个负责人的版本见 test_one_lead.py。"""
+    T = b.team; real = T.save_plan
+    def save(project, name, body, tk=None, c=None):
+        n = name.strip(); was = T.plan_of(project, n)
+        fresh = bool(n) and (not was or bool(was.get("dropped")))
+        if fresh: T._change(lambda st: st.setdefault("plans", {}).setdefault(project, {}).__setitem__(n, {"items": [], "text": "", "at": time.time(), "version": ""}))
+        e = real(project, name, body, tk, c)
+        if e and fresh: T._change(lambda st: st["plans"][project].__setitem__(n, was) if was else st["plans"][project].pop(n, None))
+        return e
+    T.save_plan = save
+    test.addCleanup(setattr, T, "save_plan", real)
+
+
 class Base(unittest.TestCase):
+    LEGACY = False   # True：这个类测的是 3.19 以前登记的老方案，见 legacy()
+
     def setUp(self):
         self.e = A.Inst(self, lambda c: c.__setitem__('team', {'strict': True}))
         self.b, self.t = self.e.b, self.e.t
+        if self.LEGACY: legacy(self.b, self)
         self.seed = self.e.task(status='done')   # 有 proj 这个项目
         self.t.update(self.seed['id'], posted=99)
 
@@ -45,6 +63,7 @@ class Base(unittest.TestCase):
 
 
 class ReplayTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     def test_morning(self):
         """主人一句话 → 主控转交（多行备注）→ 项目经理先方案后派工 → 多个任务 → 主控转述。主人私聊里没有项目经理直接说话。"""
         all_ = PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '乙', 'src/b') + block(self.e.repo, '丙', 'src/c', '甲') + block(self.e.repo, '收口', deps='甲、乙、丙', closing=True)
@@ -125,6 +144,7 @@ class ReplayTest(Base):
 
 
 class GateTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     def test_controller_cannot_dispatch(self):
         """主控自己派活：不建任务、那条回复不发出去，退回重写成转交。"""
         self.layers(['LIE-两条线今天就动\n' + block(self.e.repo, '甲', 'src/a'), '转给项目经理了\n[转交] proj 做甲'], ['收到'])
@@ -212,6 +232,7 @@ class GateTest(Base):
         return '[不回]'
 
 class LostDispatchTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     """2026-11-24：主控命令行留言叫起项目经理，它写的三条 [派活] 被悄悄丢掉，“已派”却投给了主控，流程停了一小时没人知道。"""
     def send(self, pm, ctrl=()):
         self.layers(list(ctrl), pm)
@@ -250,6 +271,7 @@ class LostDispatchTest(Base):
 
 
 class BriefTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     """2026-11-24 逐条看过的返工：约四成主要是任务书没核实、没列边界、没给验收办法。缺了就退回，不悄悄派出去。"""
     def test_missing_parts_refused(self):
         TM = self.b.team; d = {'title': '甲', 'plan': '整改', 'role': '开发', 'verify': 'true', 'files': ['src/a'], 'deps': []}
@@ -268,6 +290,7 @@ class BriefTest(Base):
 
 
 class FollowPlanTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     """主人 2026-11-24 同意：主控办完项目经理请办的事，项目经理按主人交代过的方案接着派。三个条件：主人私聊交代、方案已登记、任务在方案里列明。"""
     P2 = '[方案] 发版\n版本: 1.1\n另开: 测试用\n任务:\n- 打包 | src/p |\n- 发 stable | src/s |\n[/方案]\n'
     def start(self, ctrl, pm, plan=None):
@@ -417,6 +440,7 @@ class FollowPlanTest(Base):
 
 
 class HoldTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     def start(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '丙', 'src/c', '甲')])
         self.say('开工'); self.e.tick()
@@ -450,6 +474,7 @@ class HoldTest(Base):
 
 
 class BoardTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行、收口
     def test_board_follows_state_and_only_when_changed(self):
         self.layers(['[转交] proj 做'], [PLAN + block(self.e.repo, '甲', 'src/a')]); self.say('开工'); self.e.tick()
         self.layers(['A', 'B', 'C'], [])

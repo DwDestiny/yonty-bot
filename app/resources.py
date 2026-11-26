@@ -70,8 +70,8 @@ def parse_mem(v):
 
 
 def small(t):
-    """方案里的小任务（不含收口）：只跟同类比历史，不被整仓编译的峰值拖成串行。"""
-    return bool(t.get("plan")) and not t.get("closing")
+    """方案里的小任务（不含收口、负责人）：只跟同类比历史，不被整仓编译的峰值拖成串行。负责人要跑全量，跟收口一样按整仓算。"""
+    return bool(t.get("plan")) and not t.get("closing") and not t.get("lead")
 
 def estimate(t, history, c):
     """max(派活方的估计, 同仓库同角色的历史峰值)；都没有时构建类角色按 4G、其余 1G。返回 (字节, 依据)。"""
