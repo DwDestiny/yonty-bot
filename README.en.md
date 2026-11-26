@@ -136,14 +136,14 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 
 You are the person who installed the bot, called the "owner" in the docs. The roles split the work like this:
 
-| Who | What they do |
-|---|---|
-| Coordinator | The agent that talks with you and your teammates in chat. Answers questions and makes changes that take a few minutes. For a big job, it first asks for the goal, the scope and what counts as done, then hands the job and your original words to the project's project manager |
-| Project manager | Reads the code, writes the plan, sets the version, assigns one lead and accepts the result. Does not write code |
-| Lead | Works in the background in its own worktree on its own `bot/` branch, and takes one version from research to code to tests to a draft pull request |
-| Review | Started by the project manager when the lead is done. Only reads the diff. Fixes go back to the same lead |
-| Independent checks | Checks kept apart from the writer, such as a secret scan, or a clean install that follows the docs. Each pushes its own branch, and the lead merges them in |
-| The service | Ordinary code, not a model. It handles identity, queueing, the verify re-run and stops |
+- **Coordinator:** the agent that talks with you and your teammates in chat. It answers questions and makes changes that take a few minutes. For a big job, it first asks for the goal, the scope and what counts as done, then hands the job and your original words to the project's project manager.
+- **Project manager:** reads the code, writes the plan, sets the version, assigns one lead and accepts the result. It does not write code.
+- **Lead:** works in the background in its own worktree on its own `bot/` branch, and takes one version from research to code to tests to a draft pull request.
+- **Review:** started by the project manager when the lead is done. It only reads the diff. Fixes go back to the same lead.
+- **Independent checks:** checks kept apart from the writer, such as a secret scan, or a clean install that follows the docs. Each pushes its own branch, and the lead merges them in.
+- **The service:** ordinary code, not a model. It handles identity, queueing, the verify re-run and stops.
+
+How jobs move and report back:
 
 - **A job a teammate gives:** the coordinator writes the task brief, and work starts only after you approve.
 - **Queueing:** tasks that touch the same files, or that wait on an earlier task, queue.
