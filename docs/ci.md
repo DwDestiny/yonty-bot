@@ -1,6 +1,6 @@
 # CI
 
-> 3.19.8 · 2026-11-26 · 维护：Yonty Bot contributors
+> 3.19.9 · 2026-11-26 · 维护：Yonty Bot contributors
 
 工作流只有一个：`.github/workflows/ci.yml`。它跑全量测试和页面检查，不部署，不带任何凭证。
 
@@ -45,7 +45,7 @@ git push origin --delete ci/<名字>    # 验完删掉
 
 **为什么分两边。** 沙箱要用 bwrap 在新的命名空间里挂 `/proc`，专用机的内核不许普通用户这么挂，要起沙箱的测试在那里必红。GitHub 自带的机器可以，只要先放开 `kernel.apparmor_restrict_unprivileged_userns` 这一项系统设置（Ubuntu 24.04 默认不许普通用户建用户命名空间）。
 
-**怎么分。** 清单 `scripts/ci/sandbox-tests.txt` 一行一个完整的测试编号，现在 63 条（全量 788 条，专用机 725 条，数目以脚本打印为准）。清单里的在 GitHub 机上跑，其余的在专用机上跑，新加的测试默认归专用机。两边用同一个脚本取编号：
+**怎么分。** 清单 `scripts/ci/sandbox-tests.txt` 一行一个完整的测试编号，现在 63 条（全量 789 条，专用机 726 条，数目以脚本打印为准）。清单里的在 GitHub 机上跑，其余的在专用机上跑，新加的测试默认归专用机。两边用同一个脚本取编号：
 
 ```bash
 python3 scripts/ci/split_tests.py check          # 只核对分法
