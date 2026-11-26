@@ -30,27 +30,28 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 ## How a job runs
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/demo.en.dark.svg">
-  <img src="docs/assets/diagrams/demo.en.svg" alt="Group chat illustration: a teammate asks the bot a code question and gets an answer at once. You give it a job with a verify command, and it hands the job to the project manager. About 40 minutes later it reports: the service re-ran npm test and it passed, a draft pull request is open, and merging is your call. Names, repository and messages are made up." width="560">
-</picture>
+  <img src="docs/assets/screenshots/feishu-task.png" alt="Real screenshot from Feishu on the web, an excerpt with a Chinese interface. Left: a direct message. The owner asks the bot to start on the open-source launch, and the bot replies that it has started. Later the owner says to merge when it is ready. The bot reports that 3.18.0 is merged into main, with a pull request card, and then posts the Feishu task link 'yonty-bot · 开源推广一期'. Right: that Feishu task, marked done and owned by the agent. Its execution log lists finished subtasks such as yonty-bot#18. Names and avatars are replaced, the watermark is removed, and unrelated messages in between are left out." width="100%">
 </p>
 
-A job from start to finish. The steps follow the real flow.
+This is a real screenshot (an excerpt) from the author's own instance. The interface is in Chinese. On the left is a direct message: a one-line request, and the bot starts. Later you say to merge when it is ready, and it merges into main and posts a link to the Feishu task. On the right is that Feishu task: done, with one line for each finished subtask. Names and avatars are replaced, the watermark is removed, and unrelated messages in between are left out.
 
-1. You say in the group what you want built, with a verify command.
+The steps from start to finish:
+
+1. You say what you want built, in a direct message or a group, with a verify command.
 2. The project manager reads the code, decides what this version covers and assigns one lead.
 3. The lead works on its own branch in the background from start to finish: research, code, tests and a draft pull request.
 4. When the lead says it is done, the service re-runs the verify command and sends the task back in the background if it fails. Then a reviewer reads the diff, and fixes go back to the same lead.
 5. The re-run passes, so the result says PASS. The bot reports back in the group with a link to the draft pull request.
 
-## Three highlights
+## Four highlights
 
 **"Done" doesn't count.** For a task that has a verify command, the service runs that command again when the task says it is done. If it fails, the task goes back for rework, up to 2 times by default. If it still fails, the task comes back as BLOCKED. For a task without a verify command, the result says "no verify command set, not re-checked by the service".
 
 **One job in, one draft pull request out.** The project manager writes the plan, assigns a lead and accepts the results. It does not write code itself. A project job gets one plan, one lead and one pull request per version. When the lead must read a lot, it starts subagents in its own session instead of splitting the job into many tasks. Only independent checks, blocks that need another machine or toolset, and the review run as separate tasks. The pull request is a draft, and you decide whether to merge. See [docs/tasks.md](docs/tasks.md).
 
 **Use it together in a group.** A teammate @-mentions it with a code question. It looks and answers, with no approval from you. When a teammate wants a code change, it writes a task brief and waits for your approval before it starts. An approval that nobody gives expires after 24 hours by default. Who you are comes only from the sender ID that Feishu or WeCom provides. A message that claims "I'm the owner" counts for nothing.
+
+**Progress shows up in Feishu Tasks.** With Feishu Tasks sync on, each job you give it in a direct message becomes a Feishu task: one per plan, with the bot as the assignee and you as a follower. Each finished subtask adds a line. The service, not the model, writes the time, models, cost and pull requests into the task description, and checks the task off when the work is done. Assigning a Feishu task to the bot also counts as giving it a job. Sync is off by default, and the app needs extra task permissions. See [docs/usage.md](docs/usage.md#10-飞书任务同步).
 
 ## Where it fits
 
@@ -183,7 +184,6 @@ How jobs move and report back:
 - **Start only when memory allows.** The service looks at free memory and pressure to decide whether to start a new task. Send `/why shop#3` to see the reason (`shop#3` is a task ID). See [docs/tasks.md](docs/tasks.md).
 - **Listen mode.** About every 40 seconds it pulls group messages with your Feishu identity, and handles them with the permissions of "not the owner". After it speaks, it cools down for 10 minutes. See [docs/boundary.md](docs/boundary.md).
 - **Saving tokens.** A fixed prompt prefix, continuing sessions that have not expired, compacting before the cache expires, and cheaper models for cheap jobs. See [docs/cache.md](docs/cache.md).
-- **Feishu Tasks sync.** Off by default, and it needs extra permissions. See [docs/config.md](docs/config.md).
 
 ## Cost and subscription
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Input: 系统里的 Noto Sans CJK（SIL OFL 1.1）；Output: docs/assets/diagrams/ 下 20 张 SVG，--proof 目录 另出 svg-lint 用的校样。
-Pos: 五张正文配图（含群聊示意）的唯一生成脚本。文案、版面都在这里；缺字、字超框、字重叠、字太小直接报错。用法见同目录 README.md。"""
+"""Input: 系统里的 Noto Sans CJK（SIL OFL 1.1）；Output: docs/assets/diagrams/ 下 16 张 SVG，--proof 目录 另出 svg-lint 用的校样。
+Pos: 四张正文配图的唯一生成脚本。文案、版面都在这里；缺字、字超框、字重叠、字太小直接报错。用法见同目录 README.md。"""
 import os, sys
 from html import escape
 from fontTools.pens.svgPathPen import SVGPathPen
@@ -209,99 +209,6 @@ def boundary(f, t):
     f.h = y - 27 + 24
 
 
-PUNCT = set("，。、；：？！）」』》”,.;:?!)")
-
-
-def tokens(s):
-    """断行单位：空格分开的 @提及、连续的 ASCII（路径、命令、数字）各算一个，汉字一个字一个。"""
-    out = []
-    for i, part in enumerate(s.split(" ")):
-        if i: out.append(" ")
-        if part.startswith("@"):
-            out.append(part); continue
-        buf = ""
-        for ch in part:
-            if ord(ch) < 128: buf += ch; continue
-            if buf: out.append(buf); buf = ""
-            out.append(ch)
-        if buf: out.append(buf)
-    return out
-
-
-def wrap(s, size, maxw, bold=False):
-    lines, cur = [], []
-    for tk in tokens(s):
-        if tk == " " and not cur: continue
-        if cur and width("".join(cur + [tk]).rstrip(), size, bold) > maxw:
-            if tk in PUNCT:     # 标点不放行首：带上前一个字一起换行
-                last = cur.pop()
-                lines.append("".join(cur).rstrip()); cur = [last, tk]; continue
-            lines.append("".join(cur).rstrip()); cur = [] if tk == " " else [tk]
-        else:
-            cur.append(tk)
-    if cur: lines.append("".join(cur).rstrip())
-    return lines
-
-
-
-def balance(s, size, maxw):
-    """行数不变，把行宽收到最窄，免得最后一行只剩一两个字。"""
-    lines = wrap(s, size, maxw)
-    lo, hi = 0.0, float(maxw)
-    for _ in range(24):
-        mid = (lo + hi) / 2
-        if len(wrap(s, size, mid)) <= len(lines): hi = mid
-        else: lo = mid
-    return wrap(s, size, hi)
-
-
-def chat(f, t):
-    """群聊示意：左边同事和机器人，右边是你；气泡里的字按真实字宽断行。"""
-    x0, x1, wy = M, W - M, 16
-    at = len(f.out)
-    f.text(t["room"], x0 + 18, wy + 29, 15, True)
-    f.text(t["roomsub"], x1 - 18, wy + 29, 12, col="sub", anchor="end")
-    f.add(f'<path d="M{x0},{wy + 44} L {x1},{wy + 44}" fill="none" stroke="{f.c["sub"]}" stroke-width="1"/>')
-    y, size, lh, maxw = wy + 62, 14, 20.5, 268
-    for side, ini, who, s, chip in t["msgs"]:
-        if side == "-":     # 时间分隔
-            w = width(s, 12)
-            f.text(s, W / 2, y + 12, 12, col="sub", anchor="middle")
-            for a, b in ((x0 + 48, W / 2 - w / 2 - 10), (W / 2 + w / 2 + 10, x1 - 48)):
-                f.add(f'<path d="M{n(a)},{y + 8} L {n(b)},{y + 8}" fill="none" stroke="{f.c["sub"]}" stroke-width="1"/>')
-            y += 30; continue
-        lines = balance(s, size, maxw)
-        tw = max(width(l, size) for l in lines)
-        cw = width(chip, 12, True) + 14 if chip else 0
-        bw, top = max(tw, cw) + 22, 28 if chip else 0
-        bh = 31.7 + top + (len(lines) - 1) * lh
-        by = y + 17
-        if side == "r":
-            bx = x1 - 16 - bw
-            f.text(who, x1 - 16, y + 10, 12, col="sub", anchor="end")
-            f.rect(bx, by, bw, bh, "fg", None, rx=8)
-            tc = "inv"
-        else:
-            bx = x0 + 50
-            cx, cy = x0 + 28, y + 16
-            f.add(f'<circle cx="{n(cx)}" cy="{n(cy)}" r="13" fill="{f.c["fg" if side == "b" else "sub"]}"/>')
-            f.text(ini, cx, cy + 4.6, 13, True, "inv" if side == "b" else "card", "middle")
-            f.text(who, bx, y + 10, 12, col="sub")
-            f.rect(bx, by, bw, bh, "bg", None, rx=8)
-            tc = "fg"
-        if chip:
-            f.rect(bx + 11, by + 9, cw, 20, "red", None, rx=4)
-            f.text(chip, bx + 11 + 7, by + 23.2, 12, True, "onred")
-        for i, l in enumerate(lines):
-            f.text(l, bx + 11, by + 20.5 + top + i * lh, size, col=tc)
-        y = by + bh + 14
-    wb = y + 2
-    f.rect(x0, wy, x1 - x0, wb - wy, "card", "fg", 2, rx=10)
-    f.out.insert(at, f.out.pop())       # 窗口垫在最底下
-    f.text(t["foot"], W / 2, wb + 24, 12, col="sub", anchor="middle")
-    f.h = wb + 24 + 16
-
-
 T = {}
 T["flow.zh"] = dict(title="派活流程：从一句话到合并请求", desc="聊天里说一件事，主控接话，项目经理定版本、派一个负责人，同事派的等主人批，负责人在后台从头做到尾、建草稿合并请求，服务跑验证，没过在后台退回，评审只读看改动；PASS 交回，合并由主人决定。", steps=[
     ("聊天里说一件事", "你或者同事，在飞书、企业微信里说"),
@@ -369,25 +276,7 @@ T["boundary.en"] = dict(title="What is blocked, and what isn't", desc="Four grou
     ("Held until you approve", ["Teammates' tasks; unapproved ones lapse in 24 hours", "Once approved, they still run with teammate rights", "Actions registered as needing authorization"]),
     ("Not enforced, or only partly", ["Your own tasks: not merging, pushing main or\nreleasing is only a rule. Git hooks only stop\nforce-push or delete of main/master, and secrets", "Secret scan misses some, fails open, skips cloud", "Writing a script and running it slips past hooks", "Not retelling other chats to a teammate is a rule", "Turn on GitHub branch protection as the backstop"]),
     ("Sandbox (for scheduled runs)", ["Normal Claude tasks run without it", "Can write its worktree, outbox and session log,\nplus any folders you open up in the config", "Can still read this machine's Claude login", "Can still read the repository's full history", "Network is open: local ports and the internet"])])
-T["demo.zh"] = dict(title="在群里派活（示意）", desc="群聊示意：同事 @ 机器人问代码，它当场回答；你 @ 它派活，写明验证命令；它转给项目经理。约 40 分钟后它回报：服务复跑 npm test 通过，草稿合并请求已建好，合不合由你定。人名、仓库和对话都是虚构的。",
-    room="shop 开发群", roomsub="群聊 · 3 人", msgs=[
-    ("l", "林", "小林", "@小助理 下单接口在哪个文件？库存不够时返回什么？", None),
-    ("b", "助", "小助理", "在 src/order/create.ts 的 createOrder 里。库存不够返回 409，错误码 OUT_OF_STOCK。", None),
-    ("r", None, "你", "@小助理 给登录接口加失败次数限制，5 次后锁 10 分钟。补测试，用 npm test 验证。", None),
-    ("b", "助", "小助理", "收到，转给 shop 的项目经理了。做完我来报。", None),
-    ("-", None, None, "40 分钟后", None),
-    ("b", "助", "小助理", "shop#12 做完了：服务复跑 npm test，通过。草稿合并请求 #34 已建好，合不合你定。", "服务复跑 PASS")],
-    foot="示意：人名、仓库和对话都是虚构的")
-T["demo.en"] = dict(title="Assigning work in a group chat (illustration)", desc="Group chat illustration: a teammate @-mentions the bot with a code question and gets an answer at once. You @-mention it with a job and a verify command, and it hands the job to the project manager. About 40 minutes later it reports back: the service re-ran npm test and it passed, a draft pull request is open, and merging is your call. Names, repository and messages are made up.",
-    room="shop dev group", roomsub="Group · 3 people", msgs=[
-    ("l", "L", "Lin", "@assistant Which file has the order API? What does it return when stock runs out?", None),
-    ("b", "A", "assistant", "createOrder in src/order/create.ts. Out of stock returns 409 with the code OUT_OF_STOCK.", None),
-    ("r", None, "You", "@assistant Lock login for 10 minutes after 5 failed attempts. Add tests and verify with npm test.", None),
-    ("b", "A", "assistant", "Got it. I handed it to the shop project manager and will report back when it is done.", None),
-    ("-", None, None, "40 minutes later", None),
-    ("b", "A", "assistant", "shop#12 is done: the service re-ran npm test and it passed. Draft PR #34 is open. Merging is your call.", "Re-run: PASS")],
-    foot="Illustration: names, repository and messages are made up")
-DRAW = dict(flow=flow, layers=layers, gate=gatefig, boundary=boundary, demo=chat)
+DRAW = dict(flow=flow, layers=layers, gate=gatefig, boundary=boundary)
 
 
 def build(d, themes, proof):

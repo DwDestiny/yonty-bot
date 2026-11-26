@@ -2,19 +2,19 @@
 
 > 2026-11-26 · 维护：Yonty Bot contributors
 
-产物在 `docs/assets/diagrams/`：`flow`（派活流程）、`layers`（主控、项目经理、负责人）、`gate`（复跑验证）、`boundary`（权限边界）、`demo`（群聊示意，README“一件活怎么走完”用），各有 `.zh`、`.en`，深色版再加 `.dark`，共 20 个 SVG。图是示意，按代码画，不是实拍。
+产物在 `docs/assets/diagrams/`：`flow`（派活流程）、`layers`（主控、项目经理、负责人）、`gate`（复跑验证）、`boundary`（权限边界），各有 `.zh`、`.en`，深色版再加 `.dark`，共 16 个 SVG。图是示意，按代码画，不是实拍。
 
 ## 重出命令
 
 在仓库根目录运行：
 
 ```bash
-python3 -I docs/assets/source/diagrams/build.py                      # 重出 20 个成品
+python3 -I docs/assets/source/diagrams/build.py                      # 重出 16 个成品
 python3 -I docs/assets/source/diagrams/build.py --proof _tmp/proof   # 另出校样，给 svg-lint 用
 python3 -I docs/assets/source/diagrams/check.py                      # 检查，CI 可直接调，没过退出码 1
 ```
 
-需要 `fonttools` 和系统字体 Noto Sans CJK（Debian/Ubuntu 的 `fonts-noto-cjk`）。重出两次逐字节相同。文案、版面都在 `build.py`；缺字、字超框、字重叠、显示成 400 像素宽时字小于 10 像素，都会报错。`check.py` 在临时目录重出一遍，做上面这些检查，再核对仓库里的 20 个文件与重出的逐字节相同、没有多余或缺少。逐字节相同以字体和 `fonttools` 版本一致为前提（现用 4.46.0），换版本后先重出再提交。
+需要 `fonttools` 和系统字体 Noto Sans CJK（Debian/Ubuntu 的 `fonts-noto-cjk`）。重出两次逐字节相同。文案、版面都在 `build.py`；缺字、字超框、字重叠、显示成 400 像素宽时字小于 10 像素，都会报错。`check.py` 在临时目录重出一遍，做上面这些检查，再核对仓库里的 16 个文件与重出的逐字节相同、没有多余或缺少。逐字节相同以字体和 `fonttools` 版本一致为前提（现用 4.46.0），换版本后先重出再提交。
 
 ## svg-lint
 
@@ -22,7 +22,6 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 - 2026-11-25 实测：原版 svg-lint 查 8 张自带色板的校样，0 错误 0 警告；在临时副本里登记配色后查 16 张成品配色的校样，也是 0 错误 0 警告。
 - 成品是方向 C 的配色，原版 svg-lint 查 16 个成品：0 错误、312 警告（272 条配色不在自带色板，40 条边距）；登记配色后剩 40 条边距。登记配色只在临时副本里做，不改工具。
 - 成品的文字是字形轮廓，svg-lint 看不到，会误报上下边距。文字检查以校样和 `build.py` 的真实字宽检查为准。
-- 群聊示意不是框图：气泡里的字左对齐、可以多行，标签贴在气泡里。svg-lint 的“框内文字居中”“框高等于字号 3 倍”和估算字宽这几条规则对它不适用。2026-11-26 查校样，中文 20 错 6 警、英文 34 错 5 警，都是这几类。以 `build.py` 的真实字宽检查和截图为准。
 
 ## 字体和配色
 
@@ -99,19 +98,6 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 | 沙箱：读得到登录凭据、仓库历史；网络没隔离 | `docs/boundary.md`“已知的残余风险” |
 
 “没有硬拦住”一块用空心竖条，其余用实心。沙箱里的别家智能体看不到 Claude 登录态（`app/tasks.py` `_sandbox`），图上说的是跑 Claude 的定时运行。
-
-### 群聊示意（demo）
-
-| 图上 | 位置 |
-|---|---|
-| 同事 @ 它问代码，不用你批，当场回答 | `docs/usage.md` §1；`README.md`“三个特点”“群里一起用” |
-| 你 @ 它派活，写明验证命令 | `docs/usage.md` §2 |
-| 主控转给这个项目的项目经理 | `docs/architecture.md` 1.1；`docs/usage.md` §2 |
-| 验证没过的退回不进群，图上不画 | `app/tasks.py` `run`（`[验证失败]` 作为下一轮提示，不发聊天） |
-| 回报是主控用自己的话转述，“服务复跑 PASS”标签是图上加的，提示结论来自服务复跑 | `docs/usage.md` §4 最后一条；`app/tasks.py` `run` |
-| 草稿合并请求已建好，合不合你定 | `app/tasks.py` `mr_note`、`first_prompt`（不合并） |
-
-“40 分钟后”是示意时长。人名、仓库、文件路径和错误码都是编的，图下写明。
 
 ## 文档和代码不一致
 
