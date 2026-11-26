@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 3.19.0 · 2026-11-26 · MIT · [中文](README.md) | English
+> 3.19.1 · 2026-11-26 · MIT · [中文](README.md) | English
 
 **Give Claude Code work from a Feishu/Lark or WeCom group chat. A project manager gives each job to one lead agent, the lead does the whole job on its own branch in the background, and the service re-runs your verify command. It reports PASS only if the command passes.**
 
