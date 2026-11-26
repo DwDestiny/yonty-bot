@@ -2017,9 +2017,25 @@ def pm_marks(project, key, owner, text, hop=0, about=None, idem=None, src=None, 
     text, marks = tasks.dl.parse_marks(text)
     for i, (to, kind, body, need) in enumerate(marks):
         extra = {**({"voice": True} if STRICT and base_key(key).startswith("p2p:") else {}), **({"src_im": src} if src else {}), **({"about": about} if about else {}), **({"follow": True} if follow and to == "主控" else {}), **({"idem": f"{idem}:{i}"} if idem else {})}
-        try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need, extra or None, trusted=True)
-        except ValueError as e: log.warning("pm delivery rejected: %s", e)
+        t = tasks.resolve(to.strip())[0] if re.match(r"^[^\s#]*#\d+$", (to or "").strip()) else None
+        box = len(tasks.inbox_items(t["id"])) if t else 0
+        try: r = tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), to, kind, body, hop, need, extra or None, trusted=True)
+        except ValueError as e: log.warning("pm delivery rejected: %s", e); continue
+        if t: parked_answer(project, key, owner, t["id"], box, r, hop)
     return text
+
+def parked_answer(project, key, owner, tid, box, receipt, hop):
+    """项目经理投给本项目任务的话只按留言进了收件箱（主人这一轮没说过话、指令超限、要发版之类），任务又停在等答复：
+    留言叫不醒它，项目经理以为答了，它就一直等；问过主控的，等答复的催办也不再响。把它的提问交给主控（3.19.10）。"""
+    t, new = tasks.load(tid) or {}, tasks.inbox_items(tid)[box:]
+    if t.get("project") != project or t.get("status") != "waiting" or not new or any(x["kind"] != "留言" for x in new): return
+    ref = tasks.ref(t)
+    q = next((e["text"] for e in reversed(tasks.events(tid)) if e["kind"] in ("question", "nudge", "blocked")), "")
+    body = (f"{ref} 在等答复，{project} 的项目经理投给它的话按留言进了收件箱，叫不醒它（{short(receipt or '', 200)}）。"
+            + (f"\n它问的是：{short(q, 300)}" if q else "") + f"\n全文 /task {ref}\n回答写 [任务指令] {ref} 你的回答")
+    tasks.decide("替项目经理投递", task=ref, category="问题", why="投给在等答复的任务的话按留言进了收件箱，叫不醒它（3.19.10）")
+    try: tasks.dl.submit(tasks._me(), tasks.dl.pm_sender(project, key, owner), "主控", "问题", body, hop, None, {"about": tid, "auto": True}, trusted=True)
+    except ValueError as x: log.warning("parked answer for task #%s not passed on: %s", tid, x)
 
 def base_key(k):
     """会话键去掉项目经理前缀：proj:<项目>:p2p:xx -> p2p:xx（投递给主控、别的项目经理时按它找会话）。"""

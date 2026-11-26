@@ -280,6 +280,32 @@ class Lead(TT.Base):
         self.e.tick(); self.flush()
         self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id'])], ['留言']); self.assertEqual(self.t.load(lead['id'])['status'], 'waiting')
         self.assertTrue(any(r['to'].get('to') == '主控' and '要我发 2.2.0' in r['text'] for r in self.t.dl.load(self.t)[recs0:]))
+    def test_parked_answer_goes_to_ctrl(self):
+        """主控办完事转回来的那一轮没有回执：项目经理在那一轮投给在等答复的负责人的话（要发版的、别的也一样）只按留言进了收件箱，
+        叫不醒它；之前问过主控，等答复的催办也不响。服务把它的提问交给主控（3.19.10）。"""
+        for last in ('合并好了\n发版: 只发 beta', '合并好了，补一条回归测试'):
+            with self.subTest(last):
+                self.setUp()
+                self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+                self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+                self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我发 2.2.0 吗？')
+                self.layers(['[转交] proj\n合好了，CI 绿了'], [f'[投递 主控 问题]\n{n} 的合并请求请合并，合完它问要不要发 2.2.0，请问主人\n[/投递]\n', f'[投递 {n} 留言]\n{last}\n[/投递]\n'])
+                self.e.tick(); self.flush(); self.flush()
+                recs = self.t.dl.load(self.t); back = max(r['id'] for r in recs if r['from'].get('ref') == '主控')
+                self.assertEqual(self.t.load(lead['id'])['status'], 'waiting'); self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id'])], ['留言'])
+                self.assertTrue(any(r['id'] > back and r['to'].get('to') == '主控' and r.get('about') == lead['id'] and '要我发 2.2.0' in r['text'] for r in recs))
+
+    def test_woken_answer_not_reported(self):
+        """投成指令、叫醒了的，不再交给主控（3.19.10）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='waiting'); self.t.event(lead['id'], 'question', '合并好了，要我接着做什么？')
+        recs0 = len(self.t.dl.load(self.t))
+        self.layers([], [f'[投递 {n} 留言]\n先补一条回归测试\n[/投递]\n'])
+        self.e.tick(); self.flush()
+        self.assertNotEqual(self.t.load(lead['id'])['status'], 'waiting'); self.assertEqual([x['kind'] for x in self.t.inbox_items(lead['id'])], ['指令'])
+        self.assertEqual([r['text'][:40] for r in self.t.dl.load(self.t)[recs0:] if r['to'].get('to') == '主控'], [])
+
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
         c, hist = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}, [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]
