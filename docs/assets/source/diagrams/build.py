@@ -210,42 +210,42 @@ def boundary(f, t):
 
 
 T = {}
-T["flow.zh"] = dict(title="派活流程：从一句话到合并请求", desc="聊天里说一件事，主控接话，项目经理拆任务，同事派的等主人批，后台开工，服务跑验证，没过在后台退回，合并检查建草稿合并请求，再复跑一次验证；PASS 交回，合并由主人决定。", steps=[
+T["flow.zh"] = dict(title="派活流程：从一句话到合并请求", desc="聊天里说一件事，主控接话，项目经理定版本、派一个负责人，同事派的等主人批，负责人在后台从头做到尾、建草稿合并请求，服务跑验证，没过在后台退回，评审只读看改动；PASS 交回，合并由主人决定。", steps=[
     ("聊天里说一件事", "你或者同事，在飞书、企业微信里说"),
     ("主控接话", "小事当场回答；大活聊清楚，转给项目经理"),
-    ("项目经理拆任务", "读代码、出方案，拆成各改各文件的任务"),
+    ("项目经理定版本", "读代码、出方案，一个版本派一个负责人"),
     ("同事派的，等你批", "你自己派的直接排队"),
-    ("后台开工", "内存够、依赖做完才开；各在各的分支上改"),
+    ("负责人在后台从头做到尾", "调研、写、自测，在自己的分支上建草稿合并请求"),
     ("服务复跑验证命令", "没过就在后台退回给任务改，不往群里发"),
-    ("合并检查", "合分支、跑全量测试、建草稿合并请求，再复跑验证"),
+    ("评审", "只读看改动；要改的退回同一个负责人"),
     ("PASS 交回，合并由你决定", "项目经理验收，主控告诉你结果和要你定的事")],
     foot=["同事的活，主控也能直接派成单个任务：同样等你批，", "由那个任务自己建草稿合并请求，再复跑验证。"])
-T["flow.en"] = dict(title="From one message to a pull request", desc="A chat message goes to the coordinator, then the project manager, who splits it. Teammates' jobs wait for the owner's approval. Work runs in the background; the service runs the check and sends failures back silently. A merge check opens one draft pull request, which has its check re-run. PASS comes back and the owner decides on merging.", steps=[
+T["flow.en"] = dict(title="From one message to a pull request", desc="A chat message goes to the coordinator, then the project manager, who gives each version to one lead. Teammates' jobs wait for the owner's approval. The lead does the whole job in the background and opens one draft pull request; the service runs the check and sends failures back silently. A review reads the diff. PASS comes back and the owner decides on merging.", steps=[
     ("Someone asks in chat", "You or a teammate, in Feishu/Lark or WeCom"),
     ("The coordinator picks it up", "Quick answers now; big jobs are scoped, handed on"),
-    ("The project manager plans", "Reads code, splits work so files never collide"),
+    ("The project manager plans", "Reads code, gives each version one lead"),
     ("Teammate's job? You approve", "Your own jobs go straight into the queue"),
-    ("Work starts in the background", "When memory and dependencies allow; own branch"),
+    ("One lead does the whole job", "Researches, writes, tests, opens a draft PR"),
     ("The service re-runs the check", "Failures go back to the task, not to your chat"),
-    ("Merge check", "Merge, full tests, one draft PR, check re-run"),
+    ("Review", "Reads the diff; fixes go back to the lead"),
     ("PASS comes back; merging is your call", "The manager reviews; the coordinator briefs you")],
     foot=["For a teammate, the coordinator may queue one task:", "you still approve it. It opens its own draft PR,", "then the check is re-run."])
-T["layers.zh"] = dict(title="主控、项目经理、开发", desc="主控跟人对话、做几分钟的小改动，项目经理出方案、派活、验收，开发在后台做任务。授权、花钱、方向直接问主人。服务是普通程序，负责认身份、排队、验证、停工。", cards=[
+T["layers.zh"] = dict(title="主控、项目经理、负责人", desc="主控跟人对话、做几分钟的小改动，项目经理定版本、派负责人、验收，负责人在后台把一个版本从头做到尾，独立检查和评审另开。授权、花钱、方向直接问主人。服务是普通程序，负责认身份、排队、验证、停工。", cards=[
     ("你和同事", ["在群里或私聊里说话"]),
     ("主控 · 每个聊天一个", ["答问题，做几分钟的小改动", "记住你的决定，大活转出去"]),
-    ("项目经理 · 每个项目按聊天分开", ["读代码、出方案、派活、验收", "不写代码"])],
+    ("项目经理 · 每个项目按聊天分开", ["读代码、定版本、派负责人、验收", "不写代码"])],
     links=[("说事", "结果"), ("转交", "完成、问题"), ("派活", "回报、提问")],
-    group="开发 · 后台任务，各有各的分支",
-    workers=[("写代码", ["并行做任务", "各改各的文件"]), ("合并检查", ["合分支、测全量", "建合并请求"]), ("评审", ["只看改动", "只提意见"])],
+    group="后台任务 · 各有各的分支",
+    workers=[("负责人", ["一个版本做到底", "自己建合并请求"]), ("独立检查", ["扫描、装机这类", "跟写的人分开"]), ("评审", ["只看改动", "只提意见"])],
     ask="红虚线：要授权、花钱、定方向时，任务直接问你",
     svc=["服务是普通程序，不是模型", "认身份、排队、跑验证、停工，都由它执行"])
-T["layers.en"] = dict(title="Who does what", desc="The coordinator talks to people and makes few-minute edits, the project manager plans, assigns and reviews, and background tasks do the work. Approvals, spending and direction go straight to the owner. The service is ordinary code that handles identity, queueing, checks and stops.", cards=[
+T["layers.en"] = dict(title="Who does what", desc="The coordinator talks to people and makes few-minute edits, the project manager plans each version and gives it to one lead, and the lead does the whole version in the background; separate checks and a review run beside it. Approvals, spending and direction go straight to the owner. The service is ordinary code that handles identity, queueing, checks and stops.", cards=[
     ("You and your teammates", ["In a group or a direct message"]),
     ("Coordinator · one per chat", ["Answers questions, makes few-minute edits", "Remembers decisions, hands big jobs on"]),
-    ("Project manager · per project and chat", ["Reads code, plans, assigns, reviews", "Writes no code"])],
+    ("Project manager · per project and chat", ["Plans each version, assigns one lead", "Reviews; writes no code"])],
     links=[("request", "result"), ("handover", "done / problem"), ("task", "report / question")],
-    group="Developers · each task on its own branch",
-    workers=[("Coding", ["In parallel,", "own files"]), ("Merging", ["Full tests,", "one PR"]), ("Review", ["Reads diffs,", "comments"])],
+    group="Background tasks · each on its own branch",
+    workers=[("Lead", ["Does the whole", "version, one PR"]), ("Checks", ["Scans, installs,", "kept separate"]), ("Review", ["Reads diffs,", "comments"])],
     ask="Red: approvals, spending, direction come to you",
     svc=["The service is ordinary code, not a model", "It handles identity, queueing, checks and stops"])
 T["gate.zh"] = dict(title="复跑验证：说做完，不算数", desc="任务说做完后，服务在后台自己跑验证命令。过了写 PASS 交项目经理。没过连同输出退回任务。还是没过就换更强的模型或按 BLOCKED 上交。没跑完不退回，直接上交。",

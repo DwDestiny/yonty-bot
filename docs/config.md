@@ -86,7 +86,7 @@
 | `irreversible` | 见 app/config.example.json | 不可逆命令的正则。有没取的追加指令时 `irreversible_gate` 拦它们 |
 | `schedules` | 见说明 | `max_run_min` 120（一次运行从开工算起最长分钟数，续跑的轮次合起来算）、`fail_pause` 3（连续失败几次暂停）、`min_wake_min` 5（探针过线时两次叫醒最短间隔，自定节奏的用它自己的下限）、`probe_timeout_s` 60、`probe_mem_mb` 1024（探针的超时和地址空间上限）、`tick_wait_s` 3（到点处理在单独线程，任务线程最多等它这么久）。见 schedules.md |
 | `routing` | `{"sticky_min": 30, "fast_path": {"max_chars": 20}}` | 路由：粘住项目经理的分钟数；短消息快速路径的字数上限。见 architecture.md |
-| `team` | 见说明 | 组织规矩：`strict` true（主控唯一对话、方案闸门），`max_parallel` 4（每个项目同时几个任务），`max_tasks` 8（一个方案没做完的开发任务数，另加收口、评审两个，超过就退回），`max_reviews` 2（每个方案的评审轮数，再多要主人同意），`brief_check` true（开发、排查活的任务书要有“已核实、边界、验收、交回”，缺了退回） |
+| `team` | 见说明 | 组织规矩：`strict` true（主控唯一对话、方案闸门），`max_parallel` 4（每个项目同时几个任务），`max_tasks` 8（一个版本最多几项：负责人加另开的，做完的也算，评审不算；3.18 及以前登记的老方案按没做完的开发任务数算，另加收口、评审两个；超过就退回），`max_reviews` 2（每个方案的评审轮数，再多要主人同意），`brief_check` true（开发、排查活的任务书要有“已核实、边界、验收、交回”，缺了退回） |
 | `tasks.resources.default_small_gb` | `2` | 方案里的任务没有同类历史时，开工估算按多少 G |
 | `delivery` | 见说明 | 投递：`max_hops` 3、`owner_max_chars` 300、`other_max_chars` 2000、`dedup_min` 30、`progress_gap_min` 10、`progress_max` 5、`owner_per_10min` 4、`owner_per_hour` 12、`pingpong_max` 3 和 `pingpong_min` 10（同一对智能体 10 分钟内来回 3 次后交给主控）、`merge_s` 120（同一发送方发给同一目标，离上次送不到这么多秒就等着合并）。见 architecture.md |
 

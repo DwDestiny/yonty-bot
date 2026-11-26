@@ -52,6 +52,7 @@ class Base(G.Base):
 
 
 class DropPlanTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行
     def test_board_gate_feishu_and_reregister(self):
         self.plan(); t = self.task(status='done')
         self.assertIn('还没派：乙', self.b.team.board(self.t)); self.assertEqual(self.gate(), '')
@@ -190,6 +191,7 @@ class DropPlanTest(Base):
 
 
 class CancelFailedTest(Base):
+    LEGACY = True   # 老方案：几个开发任务并行
     def test_mark_and_command(self):
         for s in ('failed', 'lost'):
             a, c = self.task('甲', status=s), self.task('乙', status=s)

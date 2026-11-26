@@ -1353,7 +1353,7 @@ def dispatch_block(ev, d):
         if pm != tasks.project_of(repo): return f"“{d['title']}”的仓库不是 {pm} 这个项目的"
         if not d["brief"]: return f"“{d['title']}”任务书是空的"
         return team.gate(tasks._me(), pm, d, TEAM) or (team.follow_gate(pm, d) if ev.get("follow") else "")
-    if is_owner(ev): return "主控不派任务，写 [转交] 项目短名（新仓库写路径），下一行起写目标和已定的事，由项目经理出方案、拆任务"
+    if is_owner(ev): return "主控不派任务，写 [转交] 项目短名（新仓库写路径），下一行起写你的理解和已定的事，由项目经理定版本、派负责人"
     return ""
 
 def dispatch_one(ev, d):
@@ -1373,16 +1373,21 @@ def dispatch_one(ev, d):
         why = tasks.cloud_ok(repo, owner) or ("独立验收只在本机做" if d.get("accept") else "")
         if why: ex, cloud_note = "", f"（云端跑不了：{why}，改在本机跑。）"
     redo = bool(d.get("plan") and d["model"]) and any(x["status"] == "failed" and x.get("plan") == d["plan"] and x["title"] == d["title"] and x.get("project") == ev.get("pm") for x in tasks.all_tasks())
-    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], (d.get("forced") or redo) and owner)   # 上一个没达成、重派的：听项目经理写的模型
+    pm = tasks.pick_model(d.get("role", ""), d.get("verify", ""), ex, d["model"], d["effort"], (d.get("forced") or redo) and owner, d.get("craft", ""))   # 上一个没达成、重派的：听项目经理写的模型
     if pm["auto_model"]: pm = task_judge(d, pm)
     if d["model"] and pm["model"] != d["model"]: cloud_note += f"（写的模型是 {d['model']}，实际用 {pm['model']}：这类活由服务定，验证或返工两次没过自动升档。）"
-    ag, ag_why = tasks.agents.pick(tasks._me(), dict(d, repo=repo), pm, owner, ex)
+    if d.get("craft") and pm["model"] == "opus" and d["model"] != "opus": cloud_note += f"（画面活“{d['craft'][:30]}”，从 opus 起步。）"
+    plan = (team.plan_of(ev["pm"], d["plan"]) or {}) if STRICT and ev.get("pm") and d.get("plan") else {}
+    kind = ({"lead": True} if d["title"] == plan["lead"] else {"wait_all": True} if d.get("role") == "评审"
+            else {"extra": (plan.get("extra") or {}).get(d["title"], "")}) if "lead" in plan else {}   # 一个负责人的版本：负责人、评审、另开的各走各的
+    ag, ag_why = tasks.agents.pick(tasks._me(), dict(d, repo=repo, **kind), pm, owner, ex)
     pm = dict(pm, **ag)
     if d.get("agent") == "zcode" and not ag: cloud_note += f"（ZCode 接不了：{ag_why}，改用 Claude。）"
     with team.LK if d["plan"] and ev.get("pm") else contextlib.nullcontext():   # 跟撤方案用同一把锁：撤完的不会再派出去
         if STRICT and ev.get("pm") and team.dropped(ev["pm"], d["plan"]): return (head + f"\n\n（派活没成：方案“{d['plan']}”已撤。）").strip()
         t = tasks.create(title=d["title"], repo=repo, brief=d["brief"], **pm,
-                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d), accept=d.get("accept", False),
+                     verify=d.get("verify", ""), exec=ex, role=d.get("role", ""), thing=plan_thing(ev, d, plan), accept=d.get("accept", False), **kind,
+                     **({"craft": d["craft"]} if d.get("craft") else {}),
                      budget=d.get("budget") or 0, budget_why=d.get("budget_why", ""), v2=True,
                      mem_est=d.get("mem_est") or 0, mem_why=d.get("mem_why", ""), release=d.get("release", ""),
                      status="approved" if owner else "pending", **({"idem": idem} if idem else {}),
@@ -1395,6 +1400,7 @@ def dispatch_one(ev, d):
                              "thread_id": ev.get("thread_id"), "root_id": ev.get("root_id")}, target=d["target"])
     if owner and ev.get("pm") and d["plan"] and ev["chat_type"] == "p2p" and not ev.get("follow"): team.vouch_plan(ev["pm"], d["plan"])   # 主人身份的一轮从这个方案派了活：整份任务单算交代过
     if t.get("jev"): dm.record("task", task=t["id"], model=t["model"], effort=t["effort"], **t["jev"])
+    if t.get("craft"): tasks.decide("画面活起步", task=tasks.ref(t), why=f"{name} 派的，写了“画面: {t['craft'][:60]}”，起步 {t['model']}/{t['effort']}")
     note_briefed(session_key(ev), t["id"])   # 任务书是这个会话自己写的，回报时不用再贴
     n, tid, h = tasks.ref(t), t["id"], tasks.T["approval_hours"]
     log.info("task %s created by %s (%s): %s", n, ev.get("sender_id"), "owner" if owner else "pending", repo)
@@ -1417,8 +1423,14 @@ def dispatch_one(ev, d):
     tasks.update(tid, approval_where=where)
     return (head + f"\n\n这活儿得{OWNER_NAME}批，我已经去问了，批了就开工（任务 {n}）。").strip()
 
-def plan_thing(ev, d):
-    return f"{d['plan']}·{d['title']}" if STRICT and ev.get("pm") else d.get("thing", "")
+def plan_thing(ev, d, plan=None):
+    """方案任务归哪件事。一个负责人的版本：负责人的活是这个版本这件事（项目经理写了“事情:”就接着那件事，档案、会话跟着走），
+    各轮评审共用一份档案（复核轮看得到第一轮的必修），另开的各是一件；老方案一个任务一件。"""
+    if not (STRICT and ev.get("pm")): return d.get("thing", "")
+    if "lead" in (plan or {}):
+        if d["title"] == plan["lead"]: return d.get("thing") or d["plan"]
+        if d.get("role") == "评审": return f"{d['plan']}·评审"
+    return f"{d['plan']}·{d['title']}"
 
 def owner_dm_task(t):
     return tasks.by_owner(t) and t["origin"].get("chat_type") == "p2p"
@@ -1819,7 +1831,7 @@ def _mod(name):
 devices, sch, acts, team = _mod("devices"), _mod("scheduler"), _mod("actions"), _mod("team")
 updates, dm, retro = _mod("updates"), _mod("decide"), _mod("retro")
 TEAM = team.conf(CFG)
-STRICT = TASKS_ON and TEAM["strict"]   # 3.0：主控是唯一跟主人说话的，项目里的活经项目经理按方案拆小并行
+STRICT = TASKS_ON and TEAM["strict"]   # 3.0：主控是唯一跟主人说话的，项目里的活经项目经理按版本派（3.19 起一个版本一个负责人；老方案拆小并行）
 ROUTING = dict({"sticky_min": 30, "fast_path": {"max_chars": 20}}, **CFG.get("routing", {}))
 POSTED_FILE, BIND_FILE = os.path.join(ROOT, "state", "posted.json"), os.path.join(ROOT, "state", "bindings.json")
 posted, bindings, sticky = load(POSTED_FILE, {}), load(BIND_FILE, {}), {}
@@ -2891,7 +2903,7 @@ def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一�
             f"仓库 {t['repo']}，工作树 {t['worktree']}，分支 {t['branch']}"
             + (f"，基于 {base}" if base else "") + f"；{tasks.model_label(t)}\n"
             + ("定时运行的工作树是独立 clone，里面的 git 配置归任务写：别在它里面跑 git 或 Claude，分支已拉回主仓库，看改动、推送都在主仓库做\n" if t.get("clone") else "") +
-            (f"这是方案“{t['plan']}”的小任务：不建合并请求，由收口任务统一建\n" if tasks.part(t) else f"建草稿合并请求：{'跑' if t.get('clone') else '在工作树里跑'} {BT}{tasks.mr_cmd(t, t.get('base', ''), relay=True)}{BT}\n") +
+            (f"这是方案“{t['plan']}”的{tasks.part_note(t)}\n" if tasks.part(t) else f"建草稿合并请求：{'跑' if t.get('clone') else '在工作树里跑'} {BT}{tasks.mr_cmd(t, t.get('base', ''), relay=True)}{BT}\n") +
                         f"本任务已自动追加指令 {t.get('auto_follow', 0)} 次（上限 {RELAY_MAX}，加预算不算）\n"
             f"花费：已用 {t.get('cost') or 0} 美元当量，检查点 {t.get('budget') or tasks.T['budget_default']}（{t.get('budget_why', '')}）；"
             f"同类参考：{tasks.budget_basis(t.get('role'), t.get('model'))[1]}\n"
@@ -3006,7 +3018,7 @@ def pm_relay(ev):
         mine = [r for r in tasks.dl.load(tk) if r["id"] > last_rec and r["from"].get("type") == "pm" and r["from"].get("key") == key
                 and (r["to"]["to"] == "主控" or (e["kind"] == "question" and r["to"]["to"] == "主人"))]
         answered_q = len(tasks.inbox_items(n)) > inbox0
-        if t.get("plan") and not t.get("closing") and e["kind"] == "done" and not absorbed and not mine:
+        if t.get("plan") and not t.get("closing") and not t.get("lead") and e["kind"] == "done" and not absorbed and not mine:   # 负责人做完就是这个版本的合并请求好了，跟收口一样要上报
             tasks.decide("项目经理处理掉", task=ref, why="方案里的小任务做完，看板上有，不逐个报")
         elif not mine and (tasks.load(n).get("cancelled_from") or team.left_over(tasks.load(n))): tasks.decide("项目经理处理掉", task=ref, why="任务取消了，或方案撤了")
         elif e["kind"] in OVERDUE or (e["kind"] == "nudge" and answered_q): pass
@@ -3264,7 +3276,7 @@ def task_judge(d, pm):
     except Exception as e:
         log.warning("task judge failed: %s", type(e).__name__)
         return dict(pm, jev={"error": type(e).__name__, "ms": int((time.time() - t0) * 1000)})
-    return dict(pm, **(dm.pick_task(s) if dc["mode"] == "on" else {}), jev=dict(s, ms=int((time.time() - t0) * 1000)))
+    return dict(pm, **(dm.pick_task(s) if dc["mode"] == "on" and not d.get("craft") else {}), jev=dict(s, ms=int((time.time() - t0) * 1000)))   # 画面活的起步档主人定了，不让打分改回 sonnet
 
 HELD_FILE = os.path.join(STATE, "ambient_held.json")
 amb_held = load(HELD_FILE, {})    # 判了不用叫醒、还没给 Claude 看的群消息

@@ -12,6 +12,7 @@ from test_team import block, PLAN
 
 
 class Version(TT.Base):
+    LEGACY = True   # 老方案的版本规矩；一个负责人的版本见 test_one_lead.py
     def setUp(self):
         super().setUp()
         self.e.meminfo(64, 60)
@@ -174,6 +175,7 @@ class PushHooks(TT.Base):
 
 
 class Alerts(TT.Base):
+    LEGACY = True   # 老方案的版本规矩；一个负责人的版本见 test_one_lead.py
     def setUp(self):
         super().setUp()
         self.now = time.time(); self.dms = []; self.b.owner_dm = lambda ch, s: self.dms.append(s) or True
