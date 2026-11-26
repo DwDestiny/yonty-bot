@@ -27,6 +27,13 @@
 
 ## 一件活怎么走完
 
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/demo.zh.dark.svg">
+  <img src="docs/assets/diagrams/demo.zh.svg" alt="群聊示意：同事 @ 机器人问代码，当场回答。你 @ 它派活并写明验证命令，它转给项目经理。约 40 分钟后它回报：服务复跑 npm test 通过，草稿合并请求已建好，合不合由你定。人名、仓库和对话都是虚构的。" width="560">
+</picture>
+</p>
+
 一件活从头到尾的样子，步骤按真实流程。
 
 1. 你在群里说要做什么，写上验证命令。

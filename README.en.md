@@ -29,6 +29,13 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 
 ## How a job runs
 
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/demo.en.dark.svg">
+  <img src="docs/assets/diagrams/demo.en.svg" alt="Group chat illustration: a teammate asks the bot a code question and gets an answer at once. You give it a job with a verify command, and it hands the job to the project manager. About 40 minutes later it reports: the service re-ran npm test and it passed, a draft pull request is open, and merging is your call. Names, repository and messages are made up." width="560">
+</picture>
+</p>
+
 A job from start to finish. The steps follow the real flow.
 
 1. You say in the group what you want built, with a verify command.
