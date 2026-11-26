@@ -37,8 +37,8 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 
 | 图上 | 位置 |
 |---|---|
-| 1 聊天里说一件事 | `README.md`“它怎么干活”1 |
-| 2 主控接话，1→2、2→3 | `README.md`“它怎么干活”2；`docs/architecture.md` 1.1 |
+| 1 聊天里说一件事 | `README.md`“它怎么干活”分工表“主控”一行 |
+| 2 主控接话，1→2、2→3 | `README.md`“它怎么干活”分工表“主控”一行；`docs/architecture.md` 1.1 |
 | 3 项目经理定版本、派一个负责人，3→4 | `app/team.py` `save_plan`（正好一个负责人，另开的写理由）；`app/roles/项目经理.md` |
 | 4 同事派的等你批；自己派的直接排队，4→5 | `app/bridge.py` `dispatch_one`（`approved` / `pending`）、`task_approve` |
 | 5 负责人在后台从头做到尾，在自己的分支上建草稿合并请求，5→复跑验证 | `app/resources.py` `admit`；`app/team.py` `waits`；`app/tasks.py` `plan_note`、`mr_note`；`docs/tasks.md` §1 |
@@ -52,7 +52,7 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 
 | 图上 | 位置 |
 |---|---|
-| 你和同事；说事、结果箭头 | `README.md`“它怎么干活”1、6 |
+| 你和同事；说事、结果箭头 | `README.md`“它怎么干活”分工表“主控”一行、“回报”一条 |
 | 主控，每个聊天一个；答问题、几分钟的小改动、大活转出去 | `docs/architecture.md` 1.1；`app/rules/base.md`“长任务” |
 | 转交；完成、问题箭头 | `docs/architecture.md` 1.1；`docs/tasks.md` §1 第 8 条 |
 | 项目经理，按项目和受众会话分开，不写代码 | `docs/architecture.md` 1.1；`app/roles/项目经理.md`；`app/hooks/scope_guard.py`（只拦编辑类工具，Bash 仍能写） |

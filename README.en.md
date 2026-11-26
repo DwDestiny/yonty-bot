@@ -2,11 +2,11 @@
 
 > 3.19.10 · 2026-11-26 · MIT · [中文](README.md) | English
 
-**Give Claude Code work from a Feishu/Lark or WeCom group chat. A project manager gives each job to one lead agent, the lead does the whole job on its own branch in the background, and the service re-runs your verify command. It reports PASS only if the command passes.**
+**Give Claude Code work from a Feishu/Lark or WeCom group chat.** A project manager gives each job to one lead agent, and the lead does the whole job on its own branch in the background. The service re-runs your verify command and reports PASS only if the command passes.
 
-Self-hosted, MIT. You and your teammates share one group. A teammate's code question gets an answer on the spot. When a teammate asks for a code change, work starts only after you approve. If a task has no verify command, the service does not re-check it, and the result says so.
-
-Feishu is the Chinese workplace chat from ByteDance (its international version is Lark). WeCom is Tencent's enterprise WeChat. Yonty Bot connects to both. It has no link to either company.
+[![CI](https://img.shields.io/github/actions/workflow/status/DwDestiny/yonty-bot/ci.yml?branch=main&label=CI)](https://github.com/DwDestiny/yonty-bot/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/DwDestiny/yonty-bot?label=release)](https://github.com/DwDestiny/yonty-bot/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <p align="center">
 <picture>
@@ -15,19 +15,23 @@ Feishu is the Chinese workplace chat from ByteDance (its international version i
 </picture>
 </p>
 
-**Once the prerequisites are ready** (a Linux server, Claude Code and `lark-cli` installed and signed in, a published Feishu app; the full list is in [Install](#install)):
+Self-hosted, MIT. You and your teammates share one group: a teammate's code question gets an answer on the spot, and a teammate's code change starts only after you approve. If a task has no verify command, the service does not re-check it, and the result says so.
 
-1. Clone the repo: `git clone https://github.com/DwDestiny/yonty-bot.git && cd yonty-bot`
-2. Open Claude Code in the repo and say: "Follow docs/guide.md and set up a Feishu bot for me."
-3. Follow the acceptance checklist in [docs/guide.md](docs/guide.md) and try each item in a real chat.
+Feishu is the Chinese workplace chat from ByteDance (its international version is Lark). WeCom is Tencent's enterprise WeChat. Yonty Bot connects to both. It has no link to either company.
 
-You use your own Claude subscription. Before you install, read [When not to use it](#when-not-to-use-it), [Cost and subscription](#cost-and-subscription) and [Security boundaries](#security-boundaries).
+<p align="center">
+  <a href="#how-a-job-runs">How a job runs</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#security-boundaries">Security boundaries</a> ·
+  <a href="#docs">Docs</a>
+</p>
 
 ## How a job runs
 
-A job from start to finish. The names are made up, and the steps follow the real flow.
+A job from start to finish. The steps follow the real flow.
 
-1. You say in the group what you want built.
+1. You say in the group what you want built, with a verify command.
 2. The project manager reads the code, decides what this version covers and assigns one lead.
 3. The lead works on its own branch in the background from start to finish: research, code, tests and a draft pull request.
 4. When the lead says it is done, the service re-runs the verify command and sends the task back in the background if it fails. Then a reviewer reads the diff, and fixes go back to the same lead.
@@ -61,7 +65,7 @@ You can copy the lines below as they are. Replace `shop` with your repo name.
 
 > List the tasks running in shop today and say which step each one is on.
 
-## When not to use it
+### When not to use it
 
 - You want a web admin console. There is none here. Everything happens in chat.
 - You have no machine that can stay on.
@@ -70,64 +74,14 @@ You can copy the lines below as they are. Replace `shop` with your repo name.
 - Your group has people you don't trust, and you cannot narrow the app's availability scope. The bot has no allow-list of senders. Anyone who can reach it can make it read code and run commands on your machine.
 - You want to run it on someone else's account.
 
-## How it works
+## Quick start
 
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/flow.en.dark.svg">
-  <img src="docs/assets/diagrams/flow.en.svg" alt="Job flow: you ask in chat, work starts in the background, the service re-runs verification, then it reports back" width="480">
-</picture>
-</p>
+You use your own Claude subscription. Before you install, read [When not to use it](#when-not-to-use-it), [Cost and subscription](#cost-and-subscription) and [Security boundaries](#security-boundaries).
 
-**A job you give** (you are the person who installed the bot, called the "owner" in the docs):
+Prepare an always-on machine (a Linux server is recommended), Claude Code and `lark-cli` installed and signed in, and a published Feishu custom app. The list below has the version requirements and the optional parts.
 
-1. You say something in chat. The controller is the agent that talks with you in chat. It does a small job on the spot. For a big job, it first asks for the goal, the scope and what counts as done.
-2. The controller hands the big job to the project's project manager, together with your original words. The project manager reads the code, writes a plan and assigns one lead.
-3. The lead works in the background in its own worktree on its own `bot/` branch, from research to code to tests to a draft pull request. Independent checks (for example a secret scan, or a clean install that follows the docs) run as separate tasks on their own branches, and the lead merges them in. Tasks that touch the same files, or that wait on an earlier task, queue.
-4. When the lead is done, the project manager starts a review that only reads the diff. Fixes go back to the same lead. Each version gets one draft pull request.
-5. When a task says it is done, the service re-runs the verify command. The first line of the report is the result: PASS, or where it got stuck.
-6. The controller tells you the result and anything you need to decide, in a few lines.
-
-**A job a teammate gives:** the controller writes the task brief, and work starts only after you approve.
-
-**Draft pull request versus verification:** a default Claude task pushes its branch and opens the draft pull request first, and the service re-runs verification after that. So a draft does not mean the work was verified. Read the result. Tasks that run in the Claude cloud and ZCode tasks work the other way around: the service opens the draft only after the re-run passes. Opening drafts works with GitHub and Alibaba Cloud Codeup. On other platforms you get the branch name.
-
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/gate.en.dark.svg">
-  <img src="docs/assets/diagrams/gate.en.svg" alt="Re-run verification: the service runs the command when a task says it is done, sends it back on failure, writes BLOCKED if it still fails, and states that nothing was re-checked when there is no verify command" width="480">
-</picture>
-</p>
-
-### What the controller, project manager and lead each do
-
-| Who | What they do |
-|---|---|
-| Controller | Talks with you and your teammates, answers questions, does small changes that take a few minutes, hands big jobs on |
-| Project manager | Plans each version, assigns one lead and accepts results. Does not write code |
-| Lead | Does the whole version on an isolated branch in the background: research, code, tests and a draft pull request |
-| Checks and review | Kept apart from the writer: secret scans, clean installs and similar checks. The review reads the diff and comments |
-
-<p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.en.dark.svg">
-  <img src="docs/assets/diagrams/layers.en.svg" alt="Who does what: controller, project manager and lead, and what the service handles: identity, queueing, verification and stop" width="480">
-</picture>
-</p>
-
-## More features
-
-- **A fixed owner and a record.** A long-running area of work (for example login, or payment reconciliation) has a fixed owner. If it can continue the last session, it does. With a new session, it first reads the record: current status, open items and what was decided last time. See [docs/tasks.md](docs/tasks.md).
-- **Write the acceptance tests first.** Write `验收: 独立` (independent acceptance) when you give the task. Before work starts, another role reads the task brief and the existing code and writes tests. If a developer changes these new tests and the task has a verify command, the task is sent back, and you can lift that rule. If the tests could not be written, work starts as usual and the result says so. See [docs/tasks.md](docs/tasks.md).
-- **Scheduled tasks.** Each scheduled task has its own permission scope, never wider than its creator's. By default it pauses after 3 failures in a row. A task with a limited read scope needs bwrap, and does not run without it. See [docs/schedules.md](docs/schedules.md).
-- **Start only when memory allows.** The service looks at free memory and pressure to decide whether to start a new task. Send `/why shop#3` to see the reason (`shop#3` is a task ID). See [docs/tasks.md](docs/tasks.md).
-- **Listen mode.** About every 40 seconds it pulls group messages with your Feishu identity, and handles them with the permissions of "not the owner". After it speaks, it cools down for 10 minutes. See [docs/boundary.md](docs/boundary.md).
-- **Saving tokens.** A fixed prompt prefix, continuing sessions that have not expired, compacting before the cache expires, and cheaper models for cheap jobs. See [docs/cache.md](docs/cache.md).
-- **Feishu Tasks sync.** Off by default, and it needs extra permissions. See [docs/config.md](docs/config.md).
-
-## Install
-
-Prepare these first:
+<details>
+<summary><b>Prerequisites</b>: machine, command-line tools, Feishu app, Node.js versions, optional parts</summary>
 
 | What | Notes |
 |---|---|
@@ -141,7 +95,10 @@ Prepare these first:
 | bwrap (optional) | Needed for scheduled tasks with a limited read scope, and for ZCode tasks |
 | WeCom (optional) | `wecom-cli` 1.3.4 needs Node 18 or later. You scan a QR code to create a smart bot. One bot can have only one long connection. See [docs/wecom.md](docs/wecom.md) |
 
-> **Note:** Before you add the bot to a group, narrow the app's availability scope in the Feishu console. The bot accepts every private message, and accepts a group message when someone @-mentions it.
+</details>
+
+> [!IMPORTANT]
+> Before you add the bot to a group, narrow the app's availability scope in the Feishu console. The bot accepts every private message, and accepts a group message when someone @-mentions it.
 
 When the prerequisites are ready:
 
@@ -152,7 +109,7 @@ When the prerequisites are ready:
    ```
 
 2. Open Claude Code in the repo and say "Follow docs/guide.md and set up a Feishu bot for me". It asks you a few things as the guide says, then generates the instance.
-3. The script only generates files and prints commands. It does not start the service for you. Install the service with the commands it prints.
+3. Install the service with the commands that the script prints. The script only generates files and prints commands. It does not start the service for you.
 4. Follow the acceptance checklist in [docs/guide.md](docs/guide.md) and try each item in a real chat.
 
 Cloning and generating an instance have been run in an isolated environment. Letting Claude Code do the install, and real Feishu and WeCom message flow, have not been re-tested from scratch.
@@ -161,12 +118,74 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 
 **Patch versions install automatically by default.** Yonty Bot, `lark-cli`, `wecom-cli` and `mcporter` update on their own for patch versions. For Claude Code updates and non-patch versions, it asks you first. Set `updates.enabled` to `false` to turn this off.
 
+## How it works
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/flow.en.dark.svg">
+  <img src="docs/assets/diagrams/flow.en.svg" alt="Job flow: you ask in chat, work starts in the background, the service re-runs verification, then it reports back" width="640">
+</picture>
+</p>
+
+You are the person who installed the bot, called the "owner" in the docs. The roles split the work like this:
+
+| Who | What they do |
+|---|---|
+| Coordinator | The agent that talks with you and your teammates in chat. Answers questions and makes changes that take a few minutes. For a big job, it first asks for the goal, the scope and what counts as done, then hands the job and your original words to the project's project manager |
+| Project manager | Reads the code, writes the plan, sets the version, assigns one lead and accepts the result. Does not write code |
+| Lead | Works in the background in its own worktree on its own `bot/` branch, and takes one version from research to code to tests to a draft pull request |
+| Review | Started by the project manager when the lead is done. Only reads the diff. Fixes go back to the same lead |
+| Independent checks | Checks kept apart from the writer, such as a secret scan, or a clean install that follows the docs. Each pushes its own branch, and the lead merges them in |
+| The service | Ordinary code, not a model. It handles identity, queueing, the verify re-run and stops |
+
+- **A job a teammate gives:** the coordinator writes the task brief, and work starts only after you approve.
+- **Queueing:** tasks that touch the same files, or that wait on an earlier task, queue.
+- **Reports:** when a task says it is done, the service re-runs the verify command. The first line of the report is the result: PASS, or where it got stuck. The coordinator tells you the result and anything you need to decide, in a few lines.
+- **Pull requests:** each version gets one draft pull request, and you decide whether to merge.
+
+> [!NOTE]
+> A draft pull request does not mean the work was verified. Read the result. A default Claude task pushes its branch and opens the draft pull request first, and the service re-runs verification after that. Tasks that run in the Claude cloud and ZCode tasks work the other way around: the service opens the draft only after the re-run passes. Opening drafts works with GitHub and Alibaba Cloud Codeup. On other platforms you get the branch name.
+
+<details>
+<summary><b>Verify re-run outcomes</b>: passed, failed, still failing, couldn't finish</summary>
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/gate.en.dark.svg">
+  <img src="docs/assets/diagrams/gate.en.svg" alt="Re-run verification: the service runs the command when a task says it is done, sends it back on failure, writes BLOCKED if it still fails, and states that nothing was re-checked when there is no verify command" width="640">
+</picture>
+</p>
+
+</details>
+
+<details>
+<summary><b>Who does what</b>: coordinator, project manager, lead, and what the service handles</summary>
+
+<p align="center">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.en.dark.svg">
+  <img src="docs/assets/diagrams/layers.en.svg" alt="Who does what: coordinator, project manager and lead, and what the service handles: identity, queueing, verification and stop" width="640">
+</picture>
+</p>
+
+</details>
+
+## More features
+
+- **Fixed leads and records.** A long-running area of work (for example login, or payment reconciliation) has a fixed lead. If it can continue the last session, it does. With a new session, it first reads the record: current status, open items and what was decided last time. See [docs/tasks.md](docs/tasks.md).
+- **Acceptance tests written first.** Write `验收: 独立` (independent acceptance) when you give the task. Before work starts, another role reads the task brief and the existing code and writes tests. If a developer changes these new tests and the task has a verify command, the task is sent back, and you can lift that rule. If the tests could not be written, work starts as usual and the result says so. See [docs/tasks.md](docs/tasks.md).
+- **Scheduled tasks.** Each scheduled task has its own permission scope, never wider than its creator's. By default it pauses after 3 failures in a row. A task with a limited read scope needs bwrap, and does not run without it. See [docs/schedules.md](docs/schedules.md).
+- **Start only when memory allows.** The service looks at free memory and pressure to decide whether to start a new task. Send `/why shop#3` to see the reason (`shop#3` is a task ID). See [docs/tasks.md](docs/tasks.md).
+- **Listen mode.** About every 40 seconds it pulls group messages with your Feishu identity, and handles them with the permissions of "not the owner". After it speaks, it cools down for 10 minutes. See [docs/boundary.md](docs/boundary.md).
+- **Saving tokens.** A fixed prompt prefix, continuing sessions that have not expired, compacting before the cache expires, and cheaper models for cheap jobs. See [docs/cache.md](docs/cache.md).
+- **Feishu Tasks sync.** Off by default, and it needs extra permissions. See [docs/config.md](docs/config.md).
+
 ## Cost and subscription
 
 - Yonty Bot is free, under the MIT license.
 - You need your own Claude subscription. No matter who @-mentions it, it uses the Claude account and quota that is signed in on this machine.
 - Anthropic currently counts `claude -p` against your subscription quota. Its wording is "For now", so the rule may change. See the [official note](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan) (checked 2026-11-25).
-- A background task stops at its estimated cost and hands back, and the controller can decide whether to continue. Chat has no such cap.
+- A background task stops at its estimated cost and hands back, and the coordinator can decide whether to continue. Chat has no such cap.
 - If subscription quota is being used fast, or a plan has gone over its estimate, it sends you a private message. It only warns. It does not stop work.
 - When any quota window reaches 95%, or a limit is hit, the service pauses Claude tasks automatically, tells you in a private chat, and resumes when the quota refreshes. Tasks running in the Claude cloud cannot be paused. `tasks.quota_pause` sets this line, and 0 turns it off.
 - The optional decision API is off by default, and its default backend is an external paid API. ZCode tasks use your own configuration.
@@ -176,7 +195,7 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 <p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/boundary.en.dark.svg">
-  <img src="docs/assets/diagrams/boundary.en.svg" alt="Permission boundaries: what hooks block, what needs your approval, what has no hard block, and what scheduled-task sandboxes can still read" width="480">
+  <img src="docs/assets/diagrams/boundary.en.svg" alt="Permission boundaries: what hooks block, what needs your approval, what has no hard block, and what scheduled-task sandboxes can still read" width="640">
 </picture>
 </p>
 
@@ -189,7 +208,8 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 - Hooks block these by default: sending, editing or recalling Feishu messages as you, and sending WeCom messages and email as you. Setting `identity.owner` to `user` lifts the Feishu one.
 - Reading private paths outside your private chat is blocked by hooks and a deny list. You configure what counts as private.
 
-> **Warning:** When a teammate triggers it, it can by default read Feishu chat history with your identity. It does not pass that on, but that rests on the rules file only. If you cannot accept this, change `identity.others` to `bot`.
+> [!WARNING]
+> If you do not want sessions that teammates trigger to read Feishu chat history with your identity, change `identity.others` to `bot`. With the default setting they can, and only the rules file keeps them from passing it on.
 
 ### What is blocked and what is not
 
@@ -203,7 +223,8 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 - It checks for updates once a day, which reaches the official npm registry, GitHub and the source repository.
 - The optional decision API (called `decide` in the config) is off by default. As soon as `decide.enabled` is changed to `true`, the template has `points.ambient` set to `shadow`, and **listen-mode decisions start going out**. `shadow` means the result is only recorded and has no effect, but the content is still sent.
 
-What goes out once the decision API is on:
+<details>
+<summary><b>What the decision API sends, where it goes, and how to turn it off</b></summary>
 
 | Setting | What is sent |
 |---|---|
@@ -213,6 +234,8 @@ What goes out once the decision API is on:
 - Secrets in message text and task briefs are replaced by pattern. Phone numbers, email addresses and IPs are sent as they are.
 - The `jev` backend sends to an external API, and this is the default. `openai` sends to the address you set. With `haiku`, listen-mode content is sent to Anthropic by the local `claude`. `rules` decides locally only.
 - To turn it off: set `decide.enabled` to `false`, or set the matching `points.*` to `off`, then restart the service.
+
+</details>
 
 ### Sign-in and terms
 
@@ -226,7 +249,7 @@ Details are in [docs/boundary.md](docs/boundary.md). Config, chat state and task
 
 - Claude Code is the main supported agent. Background development tasks also have a ZCode pilot that is off by default, and you have to supply the launcher. Codex is not implemented yet.
 - A task with no verify command is not re-checked by the service. A read-only role that made no commit also gets no verification run.
-- Data from real projects on fixed-owner records and on writing acceptance tests first is still being collected.
+- Data from real projects on fixed-lead records and on writing acceptance tests first is still being collected.
 - The Mac is not tested in practice. The alert when the service dies and the `/upgrade` command rely on systemd, which a Mac does not have.
 - There is no web console.
 - The docs are mostly in Chinese.
@@ -240,24 +263,24 @@ This covers only projects whose README was read on 2026-11-25. A feature missing
 - For multi-agent division of work or review by another vendor's model, see [orcha](https://github.com/Ink-dark/orcha) and [cc-lark](https://github.com/yixin-1024/feishu-claude-code).
 - Yonty Bot covers the path from a chat request to verification: a project manager gives each version to one lead, work runs on isolated branches in the background, the service re-runs the command that was set when the job was given, and a draft pull request comes back.
 
-## Docs, contributing, license
+## Docs
 
-| Doc | Covers |
+Most docs are in Chinese.
+
+| To do this | Read |
 |---|---|
-| `docs/README.md` | Index of all docs |
-| `docs/quickstart.md` | Manual install, from zero to the first reply |
-| `docs/usage.md` | How to ask, assign, approve and check progress, with a command table |
-| `docs/troubleshooting.md` | Look up problems by symptom |
-| [docs/guide.md](docs/guide.md) | Setup steps, acceptance checklist, operations |
-| [docs/setup.md](docs/setup.md) | Feishu console setup |
-| [docs/wecom.md](docs/wecom.md) | WeCom setup |
-| [docs/tasks.md](docs/tasks.md) | Background tasks, IDs, approval, re-run verification |
-| [docs/schedules.md](docs/schedules.md) | Scheduled tasks and permission scope |
-| [docs/boundary.md](docs/boundary.md) | Identity, private content, permission boundaries |
-| [docs/config.md](docs/config.md) | All settings |
-| [docs/architecture.md](docs/architecture.md) | Architecture and roadmap |
-| [docs/cache.md](docs/cache.md) | How caching saves tokens and how to check it |
+| Set it up step by step, run the acceptance checklist, operate it | [docs/guide.md](docs/guide.md) |
+| Install by hand, from zero to the first reply | [docs/quickstart.md](docs/quickstart.md) |
+| Set up the Feishu console | [docs/setup.md](docs/setup.md) |
+| Connect WeCom | [docs/wecom.md](docs/wecom.md) |
+| Learn how to ask, assign, approve and check progress, with a command table | [docs/usage.md](docs/usage.md) |
+| Understand background tasks, IDs, approval and the verify re-run | [docs/tasks.md](docs/tasks.md) |
+| Create scheduled tasks and set permission scopes | [docs/schedules.md](docs/schedules.md) |
+| Check identity, private content and permission boundaries | [docs/boundary.md](docs/boundary.md) |
+| Look up every setting | [docs/config.md](docs/config.md) |
+| Read the architecture and roadmap | [docs/architecture.md](docs/architecture.md) |
+| See how caching saves tokens and how to check it | [docs/cache.md](docs/cache.md) |
+| Look up a problem by symptom | [docs/troubleshooting.md](docs/troubleshooting.md) |
+| Browse the index of all docs | [docs/README.md](docs/README.md) |
 
-For contributing, see `CONTRIBUTING.md`. For security problems, see `SECURITY.md`. For changes between versions, see `CHANGELOG.md`.
-
-License: [MIT](LICENSE).
+For contributing, see [CONTRIBUTING.md](CONTRIBUTING.md). For security problems, see [SECURITY.md](SECURITY.md). For changes between versions, see [CHANGELOG.md](CHANGELOG.md). License: [MIT](LICENSE).
