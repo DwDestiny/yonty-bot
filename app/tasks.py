@@ -1900,6 +1900,9 @@ def plan_note(t):
     else:
         own = (f"你只做“{t['title']}”这一个小任务，只改这些文件：{'、'.join(t.get('files') or [])}。别的任务同时在改别的文件；要动范围外的文件，先用 [提问] 找项目经理。"
                "只跑跟改动有关的检查，不跑全量测试；提交并推送分支，不建合并请求，收口任务统一建。任务书写的验收就是全部：不另加检查、评审和复核轮；别的地方有问题，写进交回。")
+    if t.get("closing") or t.get("lead"):   # 别的版本先发了，或者版本号记成了发过的：先别写版本号，问项目经理（3.19.2）
+        s = _mod_team().shipped(t.get("repo"), (_mod_team().plan_of(t.get("project"), t["plan"]) or {}).get("version") or "")
+        if s: own += f"注意：{s}。先别写版本号和更新日志，用 [提问] 请项目经理把方案改成新的版本号。"
     return (f"\n这是方案“{t['plan']}”里的一个任务。整份方案（给你看上下文，不是都让你做）：\n{t.get('plan_text') or ''}\n"
             + (f"开工先把这些分支合进来：{'、'.join('git merge --no-edit ' + x for x in br)}。\n" if br else "") + own + "\n")
 

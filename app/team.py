@@ -5,7 +5,7 @@ Output: 方案登记和闸门结论、看板文字、哪些任务先别开
 Pos:    bridge.py 用。结构：主控（唯一跟主人说话）→ 项目经理（定版本、派负责人、验收）→ 负责人（一个版本一个，从头做到尾；独立检查、换机器换工具的块另开，评审另派）。
         项目类的活一个版本一个方案、一个合并请求。3.19 以前登记的老方案（没有 lead）照老规矩：开发任务并行，各改各的文件，收口合到一起。看板按任务状态生成，不靠模型回忆
 """
-import importlib.util, json, os, re, threading, time
+import importlib.util, json, os, re, subprocess, threading, time
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 F = os.path.join(ROOT, "state", "team3.json")
@@ -225,6 +225,27 @@ def version_of(body):
     v = re.split(r"[（(]", _line(body, "版本"), maxsplit=1)[0].strip(" *`")
     return ADHOC if v.startswith(ADHOC) else v
 
+SEMVER = re.compile(r"v?(\d+)\.(\d+)\.(\d+)")
+
+def repo_of(tk, project):
+    """项目的仓库：这个项目最近一个任务的仓库；还没有任务的返回空串。"""
+    ts = [t for t in tk.all_tasks() if t.get("project") == project and t.get("repo")] if tk else []
+    return max(ts, key=lambda t: t["id"])["repo"] if ts else ""
+
+def shipped(repo, ver):
+    """版本号发过没有：仓库里有这个版本的标签，或者比最大的版本标签还旧。返回一句说明，没发过返回空串。
+    只认 x.y.z（日期-主题、两段的不查）；仓库取不到、git 出错都不拦。起因（2026-11-26）：发版占了老方案登记的版本号，项目经理凭记忆重发方案会把版本号改回去。"""
+    m = SEMVER.fullmatch(ver or "")
+    if not m or not repo: return ""
+    try: out = subprocess.run(["git", "-C", os.path.expanduser(str(repo)), "tag", "-l"], capture_output=True, text=True, timeout=10).stdout
+    except Exception: return ""
+    tags = [(tuple(map(int, x.groups())), x.group(0)) for x in map(SEMVER.fullmatch, out.split()) if x]
+    if not tags: return ""
+    me, top = tuple(map(int, m.groups())), max(tags)
+    hit = next((s for v, s in tags if v == me), "")
+    if hit: return f"版本 {ver} 已经发过（标签 {hit}）"
+    return f"版本 {ver} 比已经发的 {top[1]} 旧" if me < top[0] else ""
+
 def budget_of(body):
     m = re.match(r"\$?\s*(\d+(?:\.\d+)?)", _line(body, "预算"))
     return float(m.group(1)) if m and float(m.group(1)) > 0 else 0
@@ -252,7 +273,9 @@ def plan_check(tk, project, name, body):
         if ver == ADHOC: return f"方案“{name}”不是临时活，不能改成“版本: {ADHOC}”：小活另起一个方案名"
         if ver and was and ver != was and not on: return f"方案“{name}”是版本 {was} 用过的，已经收口：新版本 {ver} 换个方案名"
         same = next((n for n, p in plans.items() if n != name and ver and ver != was and p.get("version") == ver), "")
-        return f"版本 {ver} 已经有方案“{same}”：一个版本只用一个方案" if same else ""
+        if same: return f"版本 {ver} 已经有方案“{same}”：一个版本只用一个方案"
+        s = shipped(repo_of(tk, project), ver or was) if on and not why else ""   # 记着旧版本号重发的、别的版本先发了的：改成没发过的新版本号
+        return f"{s}：方案“{name}”改成一个没发过、比它新的版本号再发（正文写“版本: x.y.z”）；真要补发旧版本，写一行“另开: 理由”" if s else ""
     if not name: return ""
     if not ver: return f"方案“{name}”没写版本：正文里写一行“版本: x.y.z”（没有版本号写“日期-主题”）；一个任务就做完的小活写“版本: {ADHOC}”"
     if ver == ADHOC:
@@ -261,17 +284,15 @@ def plan_check(tk, project, name, body):
         return f"{project} 一天里已经有 {day} 个临时活：攒成一个版本做；真要单独做，写一行“另开: 理由”" if day >= ADHOC_DAY and not why else ""
     same = next((n for n, p in plans.items() if p.get("version") == ver), "")
     if same and not why: return f"版本 {ver} 已经有方案“{same}”：这个版本的活（返修、预发、发版也算）都写进它的任务单，再发一次 [方案] {same}；要做下一个版本就换版本号"
-    op = sorted((p.get("at") or 0, n) for n, p in plans.items() if p.get("version") != ADHOC and plan_open(tk, project, n))
-    if not op or why: return ""
+    s = "" if why else shipped(repo_of(tk, project), ver)
+    if s: return f"{s}：换一个没发过、比它新的版本号；真要补发旧版本，写一行“另开: 理由”"
+    op = sorted((p.get("at") or 0, n) for n, p in plans.items() if p.get("version") != ADHOC and "lead" in p and plan_open(tk, project, n))
+    if not op or why: return ""   # 开着的只有 3.19 以前登记的老方案：新需求另登一个负责人的版本，老方案照老规矩收完（3.19.2）
     o = op[-1][1]
-    v = plans[o].get("version")
-    if "lead" in plans[o]:
-        lt = lead_task(tk, project, o)
-        return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没做完，同一个项目一次只做一个版本：新需求点交给它的负责人"
-                + (f" {tk.ref(lt)}，用 [任务指令] {tk.ref(lt)} 补（正文加一行 原因: 需求变）" if lt else f"“{plans[o]['lead']}”，写进它的任务书再派")
-                + f"；是检查、互不相干的块，就加进 [方案] {o}，第四栏写理由。一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
-    return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没收口，同一个项目一次只做一个版本：把这些需求点加进它的任务单，再发一次 [方案] {o}（已经派出去的不用重写）。"
-            f"一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
+    v, lt = plans[o].get("version"), lead_task(tk, project, o)
+    return (f"{project} 的方案“{o}”{f'（版本 {v}）' if v else ''}还没做完，同一个项目一次只做一个版本：新需求点交给它的负责人"
+            + (f" {tk.ref(lt)}，用 [任务指令] {tk.ref(lt)} 补（正文加一行 原因: 需求变）" if lt else f"“{plans[o]['lead']}”，写进它的任务书再派")
+            + f"；是检查、互不相干的块，就加进 [方案] {o}，第四栏写理由。一个任务就做完的小活写“版本: {ADHOC}”；真要另开一个版本（线上急修、互不相干的仓库）写一行“另开: 理由”")
 
 def drop_plan(tk, project, name, why, who, key=""):
     """[撤方案]：打上已撤标记，文字和任务都不动；同名重登就恢复。返回 (没办成的原因, 是不是重送)。"""
@@ -311,6 +332,9 @@ def gate(tk, project, d, c):
     p = plan_of(project, d["plan"])
     if not p: return f"没有登记过方案“{d['plan']}”：先写 [方案] {d['plan']}"
     if p.get("dropped"): return f"方案“{d['plan']}”已撤（{p['dropped'].get('why', '')[:80]}），不派；要接着做就重新登记 [方案] {d['plan']}"
+    v = p.get("version") or ""
+    if v != ADHOC and not _line(p.get("text"), "另开", 600) and (s := shipped(d.get("repo") or repo_of(tk, project), v)):
+        return f"{s}：方案“{d['plan']}”先改成一个没发过、比它新的版本号（重发 [方案] {d['plan']}，正文写“版本: x.y.z”），再派"
     if d.get("swallowed"): return f"“{d['title']}”的任务书里有一行“{d['swallowed']}”，没写 [/派活]，分不清是任务书的字还是要执行的标记：任务书结尾单独一行写 [/派活]，要执行的标记写在它后面"
     raw, got = d.get("deps_raw") or "", []
     for it in sorted((i for i in p["items"] if re.search(r"[,，、;；]", i)), key=len, reverse=True):   # 标题里带顿号、逗号的先整条认出来，再拆剩下的
@@ -436,5 +460,5 @@ def board(tk, project=None, limit=1800):
         for n, items in rest.items():
             if items: out.append(f"· 方案“{n}”还没派：{'、'.join(items)[:120]}")
         old = [n for n, x in ((st.get("plans") or {}).get(p) or {}).items() if "lead" not in x and x.get("version") != ADHOC and not x.get("dropped") and plan_open(tk, p, n)]
-        if old: out.append(f"· 老规矩的方案（3.19 升级前登记的，照原来的办法收完，不用改成一个负责人）：{'、'.join(old)[:120]}")
+        if old: out.append(f"· 老规矩的方案（3.19 升级前登记的，照原来的办法收完，不用改成一个负责人；新需求另登一个新版本）：{'、'.join(old)[:120]}")
     return "\n".join(out)[:limit]
