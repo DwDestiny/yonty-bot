@@ -1,0 +1,9 @@
+A tall infographic card, 1024x1536. Premium editorial infographic style. Warm cream paper background (#f4efe6) with very subtle paper grain. Charcoal text (#1c1a17). Soft matte 3D clay icons with rounded edges, made only of charcoal, cream and warm white (no yellow, no blue, no purple, no orange). Gentle studio light from the top left, soft contact shadows. Brick red (#d6382b) appears only where the prompt says red; sage green (#5f8f6b) only where it says green. No decorative marks or sparkles. Bold modern sans-serif typography, generous spacing, clear hierarchy, crisp text.
+Title at top, large bold: "权限边界：哪些拦得住，哪些拦不住".
+Under the title, a slim charcoal banner with a small cream clay ID-badge icon: bold "先认人", then "看飞书、企业微信给的账号，不看消息里怎么自称".
+Then four stacked panels, each with a small 3D clay icon at the left of its heading and bullet lines below:
+Panel 1, solid charcoal border, icon a closed charcoal-and-cream padlock: heading "钩子当场拦下（看命令和参数）". Bullets: "以你的名义在飞书、企业微信发消息（默认设置）" / "不在你的私聊里，却要读你标成私密的目录" / "直接读代码平台凭据，直接绕过 git 钩子" / "同事的活：推 bot/ 以外的分支，合并，发版" / "推送的新增提交里有密钥：本机会话都查，你的也查" / "在登记过的设备上运行 claude".
+Panel 2, brick red border, icon a rubber stamp: heading "要你批（服务卡着，不批不动）". Bullets: "同事派的任务，默认 24 小时没批就作废" / "批了也只按同事的权限跑" / "登记成“授权”类的动作".
+Panel 3, dashed brick red border, icon an open charcoal-and-cream padlock: heading "没有硬拦住（靠规矩，或者拦不全）". Bullets: "你派的任务不合并、不推主干、不发版，靠规矩；git 命令只拦强推和删除 main/master，外加密钥扫描" / "密钥扫描会漏报，出错放行；云端任务不过这道" / "写成脚本再执行，钩子看不出来" / "同事问话时能读到别处的聊天，不转述靠规矩" / "主干要在 GitHub 上开分支保护兜底".
+Panel 4, light grey border, icon a small cream sand tray: heading "沙箱（定时运行用，普通 Claude 任务没有）". Bullets: "能写的：自己的工作树、发件箱、会话记录，加上你在配置里放开的目录" / "仍读得到本机的 Claude 登录凭据" / "仍读得到这个仓库的全部历史" / "网络没隔离：连得上本机端口和外网".
+All text exactly as quoted, in Simplified Chinese. No other text, no numbers that are not quoted, no logos, no watermark.

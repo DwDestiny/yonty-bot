@@ -9,10 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/hero.zh.dark.svg">
-  <img src="docs/assets/hero/hero.zh.svg" alt="说做完，不算数。任务说做完后，服务复跑验证命令，没过就退回，PASS 之后由你决定合并。没写验证命令时服务不复核。" width="100%">
-</picture>
+<img src="docs/assets/hero/hero.zh.webp" alt="说做完，不算数。服务自己复跑一遍验证命令，没过就退回。图里的路上立着“聊天派活”“开工”“说做完了”三块牌子，红色道闸拦下了任务，旁边的小票写着 npm test · 1 failed, 11 passed，闸后的“PASS”和“你来合并”还过不去。" width="100%">
 </p>
 
 自己部署，MIT 许可。你和同事在同一个群里用：同事问代码，它当场回答，同事要改代码，你批了才开工。没写验证命令的任务，服务不复核，结论里会写明。
@@ -125,10 +122,7 @@
 ## 它怎么干活
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/flow.zh.dark.svg">
-  <img src="docs/assets/diagrams/flow.zh.svg" alt="派活流程：聊天里说一件事，到后台开工、服务复跑验证、汇报" width="640">
-</picture>
+<img src="docs/assets/diagrams/flow.zh.webp" alt="派活流程：聊天里说一件事，主控接话，项目经理定版本、派一个负责人；同事派的要你批；负责人在后台做完，建草稿合并请求；服务复跑验证命令，没过退回；评审之后 PASS 交回，合并由你决定。" width="640">
 </p>
 
 你是装机器人的人，文档里叫“主人”。各个角色这样分工：
@@ -154,10 +148,7 @@
 <summary><b>复跑验证的几种结果</b>：过了、没过、还是没过、没跑完</summary>
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/gate.zh.dark.svg">
-  <img src="docs/assets/diagrams/gate.zh.svg" alt="复跑验证：说做完后服务跑命令，没过退回，再不过写 BLOCKED，没写验证命令则写明没复核" width="640">
-</picture>
+<img src="docs/assets/diagrams/gate.zh.webp" alt="复跑验证：任务说做完了先不算，服务在后台自己跑验证命令。过了写 PASS；没跑完不返工，写 BLOCKED；没过带着失败输出退回，默认最多 2 次，还是没过就换更强的模型，不能换就写 BLOCKED。没定验证命令的不复核，结论里写明。" width="640">
 </p>
 
 </details>
@@ -166,10 +157,7 @@
 <summary><b>分工图</b>：主控、项目经理、负责人，以及服务管的事</summary>
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.zh.dark.svg">
-  <img src="docs/assets/diagrams/layers.zh.svg" alt="主控、项目经理、负责人的分工，以及服务负责的身份、排队、验证和停工" width="640">
-</picture>
+<img src="docs/assets/diagrams/layers.zh.webp" alt="分工：你和同事说事；每个聊天一个主控；项目经理按项目和聊天分开，不写代码；后台任务各有分支，有负责人、独立检查和评审。要授权、花钱、定方向时，任务直接问你。服务是普通程序，负责认身份、排队、跑验证和停工。" width="640">
 </p>
 
 </details>
@@ -196,10 +184,7 @@
 ## 安全边界
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/boundary.zh.dark.svg">
-  <img src="docs/assets/diagrams/boundary.zh.svg" alt="权限边界：钩子拦的、要你批的、没有硬拦的、定时任务沙箱里仍然读得到的" width="640">
-</picture>
+<img src="docs/assets/diagrams/boundary.zh.webp" alt="权限边界：先按飞书、企业微信的账号认人；钩子当场拦下的，要你批的，没有硬拦住的，以及定时运行的沙箱里仍然读得到的。" width="640">
 </p>
 
 ### 谁能让它干什么
@@ -280,4 +265,4 @@ Yonty Bot 是独立项目，与 Anthropic 无关。它是驱动本机官方命�
 - 按现象查问题：[docs/troubleshooting.md](docs/troubleshooting.md)
 - 看全部文档的索引：[docs/README.md](docs/README.md)
 
-贡献见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。许可：[MIT](LICENSE)。
+贡献见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。许可：[MIT](LICENSE)。README 里的主视觉和示意图是 AI 生成的，不在 MIT 许可范围内，见 [docs/assets/README.md](docs/assets/README.md#来源与许可)。

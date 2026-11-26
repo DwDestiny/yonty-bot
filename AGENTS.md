@@ -17,7 +17,7 @@
 | `scripts/` | `scaffold.py` 生成或升级实例；`ids.sh` 查飞书 ID；`device-wrapper.sh` 装在设备上的命令入口，拒绝运行 claude | 是 |
 | `scripts/ci/` | CI 的测试分法：`sandbox-tests.txt`（要起沙箱、放 GitHub 自带机器跑的测试编号）、`split_tests.py`（核对分法、分两边跑）。说明见 [docs/ci.md](docs/ci.md) | 是 |
 | `docs/` | 文档，入口 [docs/README.md](docs/README.md) 按上手、场景、原理、参考、排障分类：上手（`quickstart.md`、`setup.md`、`guide.md`）、场景（`usage.md`、`tasks.md`、`schedules.md`、`wecom.md`）、原理（`architecture.md`、`boundary.md`、`cache.md`）、参考（`config.md`、`releasing.md`、`ci.md`）、排障（`troubleshooting.md`）。`archive/` 放已实现的方案（`plan-2.0.md` 原路径是跳转页）。成员见 [docs/AGENTS.md](docs/AGENTS.md) | 是 |
-| `docs/assets/` | README 和文档的图片、示意图、截图（`hero/`、`diagrams/`、`screenshots/`）和源文件（`source/`）。单个不超过 5 MB，合计不超过 15 MB，更大走 Release 附件。见 [docs/assets/README.md](docs/assets/README.md) | 是 |
+| `docs/assets/` | README 和文档的图片：主视觉和示意图（生成的插画，`hero/`、`diagrams/`）、截图（`screenshots/`），以及生成记录（`source/generated/`）。单个不超过 5 MB，合计不超过 15 MB，更大走 Release 附件。见 [docs/assets/README.md](docs/assets/README.md) | 是 |
 | `CHANGELOG.md` / `CONTRIBUTING.md` / `SECURITY.md` / `CODE_OF_CONDUCT.md` | 更新日志；协作指南；安全问题怎么报；行为准则 | 是 |
 | `.github/` | `workflows/ci.yml`（唯一的 CI 工作流）、议题和合并请求模板 | 是 |
 | `tests/` | 行为测试，不连 IM、不调真 Claude | 是 |

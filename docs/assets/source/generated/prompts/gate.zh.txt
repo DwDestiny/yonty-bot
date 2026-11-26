@@ -1,0 +1,11 @@
+A tall infographic card, 1024x1536. Premium editorial infographic style. Warm cream paper background (#f4efe6) with very subtle paper grain. Charcoal text (#1c1a17). Soft matte 3D clay icons with rounded edges, made only of charcoal, cream and warm white (no yellow, no blue, no purple, no orange). Gentle studio light from the top left, soft contact shadows. Brick red (#d6382b) appears only where the prompt says red; sage green (#5f8f6b) only where it says green. No decorative marks or sparkles. Bold modern sans-serif typography, generous spacing, clear hierarchy, crisp text.
+Title at top, large bold, with a thin charcoal rule under it: "复跑验证：说做完，不算数".
+Top card, cream with a charcoal border, icon a paper task card with a small speech bubble: "任务说：做完了" / "先不算，等服务自己查".
+A charcoal down arrow to a solid red card with cream text and a clay barrier-gate icon: "服务在后台自己跑验证命令" / "独立验收的测试被改过，也算没过".
+Below the red card, a row of three outcome cards side by side, each with its own short arrow coming down from the red card (left arrow charcoal, middle arrow charcoal, right arrow red):
+Left card, charcoal border, green check-mark icon: "过了" / "结论写 PASS" / "交给项目经理验收".
+Middle card, charcoal border, charcoal pause-sign icon: "没跑完" / "被叫停、被护栏拦了等" / "不返工，BLOCKED 上交".
+Right card, red border, red cross icon, red title: "没过" / "带着失败输出退回任务" / "默认最多退 2 次". A dashed red curved arrow goes from the right side of this card up along the right margin back to the right side of the top card.
+Under the right card, a red arrow down to one more card with a red border, red cross icon, red title: "还是没过" / "能换更强的模型就换" / "不能就 BLOCKED 上交".
+Footer, small centered grey text on two lines: "没定验证命令的活，服务不复核，结论里会写明。" / "只读角色没有提交改动的，不复跑验证。"
+All text exactly as quoted, in Simplified Chinese except "PASS" and "BLOCKED". Use the full-width comma "，" exactly where quoted. No other text, no logos, no watermark.

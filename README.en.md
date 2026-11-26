@@ -9,10 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/hero/hero.en.dark.svg">
-  <img src="docs/assets/hero/hero.en.svg" alt="&quot;Done&quot; doesn't count. When a task says it is done, the service re-runs the verify command and sends the task back if it fails. After PASS, you decide whether to merge. Without a verify command, the service does not re-check." width="100%">
-</picture>
+<img src="docs/assets/hero/hero.en.webp" alt="“Done” doesn't count. The service re-runs the check itself. Fail, and it goes back. Signs along a road read Chat request, Start and Says done. A red barrier stops the task, a receipt reads npm test · 1 failed, 11 passed, and PASS and You merge wait beyond the barrier." width="100%">
 </p>
 
 Self-hosted, MIT. You and your teammates share one group: a teammate's code question gets an answer on the spot, and a teammate's code change starts only after you approve. If a task has no verify command, the service does not re-check it, and the result says so.
@@ -127,10 +124,7 @@ The full manual install commands are in [docs/quickstart.md](docs/quickstart.md)
 ## How it works
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/flow.en.dark.svg">
-  <img src="docs/assets/diagrams/flow.en.svg" alt="Job flow: you ask in chat, work starts in the background, the service re-runs verification, then it reports back" width="640">
-</picture>
+<img src="docs/assets/diagrams/flow.en.webp" alt="Job flow: someone asks in chat, the coordinator picks it up, the project manager plans and assigns one lead, you approve teammates' jobs, the lead does the job in the background and opens a draft PR, the service re-runs the check and sends failures back, review, then PASS comes back and merging is your call." width="640">
 </p>
 
 You are the person who installed the bot, called the "owner" in the docs. The roles split the work like this:
@@ -156,10 +150,7 @@ How jobs move and report back:
 <summary><b>Verify re-run outcomes</b>: passed, failed, still failing, couldn't finish</summary>
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/gate.en.dark.svg">
-  <img src="docs/assets/diagrams/gate.en.svg" alt="Re-run verification: the service runs the command when a task says it is done, sends it back on failure, writes BLOCKED if it still fails, and states that nothing was re-checked when there is no verify command" width="640">
-</picture>
+<img src="docs/assets/diagrams/gate.en.webp" alt="Re-run check: when a task says it is done, the service runs the check itself. Passed: marked PASS. Couldn't finish: BLOCKED, no rework. Failed: sent back with the output, twice at most by default. Still failing: a stronger model if there is one, otherwise BLOCKED. With no check command, the report says so." width="640">
 </p>
 
 </details>
@@ -168,10 +159,7 @@ How jobs move and report back:
 <summary><b>Who does what</b>: coordinator, project manager, lead, and what the service handles</summary>
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/layers.en.dark.svg">
-  <img src="docs/assets/diagrams/layers.en.svg" alt="Who does what: coordinator, project manager and lead, and what the service handles: identity, queueing, verification and stop" width="640">
-</picture>
+<img src="docs/assets/diagrams/layers.en.webp" alt="Who does what: you and your teammates, one coordinator per chat, a project manager per project and chat who writes no code, and background tasks on their own branches: lead, checks and review. Approvals, spending and direction come straight to you. The service is ordinary code that handles identity, queueing, checks and stops." width="640">
 </p>
 
 </details>
@@ -198,10 +186,7 @@ How jobs move and report back:
 ## Security boundaries
 
 <p align="center">
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/diagrams/boundary.en.dark.svg">
-  <img src="docs/assets/diagrams/boundary.en.svg" alt="Permission boundaries: what hooks block, what needs your approval, what has no hard block, and what scheduled-task sandboxes can still read" width="640">
-</picture>
+<img src="docs/assets/diagrams/boundary.en.webp" alt="What is blocked and what isn't: first, who is asking; what hooks block, what waits for your approval, what is not enforced, and what a scheduled run's sandbox can still read." width="640">
 </p>
 
 ### Who can make it do what
@@ -284,4 +269,4 @@ Most docs are in Chinese.
 - Look up a problem by symptom: [docs/troubleshooting.md](docs/troubleshooting.md)
 - Browse the index of all docs: [docs/README.md](docs/README.md)
 
-For contributing, see [CONTRIBUTING.md](CONTRIBUTING.md). For security problems, see [SECURITY.md](SECURITY.md). For changes between versions, see [CHANGELOG.md](CHANGELOG.md). License: [MIT](LICENSE).
+For contributing, see [CONTRIBUTING.md](CONTRIBUTING.md). For security problems, see [SECURITY.md](SECURITY.md). For changes between versions, see [CHANGELOG.md](CHANGELOG.md). License: [MIT](LICENSE). The hero image and diagrams in this README are AI-generated and are not covered by the MIT license; see [docs/assets/README.md](docs/assets/README.md#来源与许可).

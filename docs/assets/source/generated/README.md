@@ -1,35 +1,60 @@
-# 正文配图源文件
+# 生成图的记录
 
 > 2026-11-26 · 维护：Yonty Bot contributors
 
-产物在 `docs/assets/diagrams/`：`flow`（派活流程）、`layers`（主控、项目经理、负责人）、`gate`（复跑验证）、`boundary`（权限边界），各有 `.zh`、`.en`，深色版再加 `.dark`，共 16 个 SVG。图是示意，按代码画，不是实拍。
+`docs/assets/hero/` 和 `docs/assets/diagrams/` 里的图都是用生图模型生成的插画。本目录记录每张图怎么来的、图上写了哪些字、这些字对应哪段代码。
 
-## 重出命令
+| 文件 | 放什么 |
+|---|---|
+| `manifest.json` | 每张图一条：文件、sha256、字节数、像素、模型、生成方式（`gen` 按文字出图，`edit` 照参考图改）、参考图、提示词文件、生成后的处理 |
+| `prompts/` | 每张图的提示词全文，生成时原样发出 |
+| `strings.md` | 每张图上的字，逐字核对用 |
+| `check.py` | 检查脚本，见下面“检查” |
 
-在仓库根目录运行：
+## 怎么做的
+
+1. 中文图用 `gen` 出图。示意图 1024×1536，主视觉 1536×1024。字多的示意图用 `gpt-image-2.5`，试下来它错字少；主视觉用 `gpt-image-2.6`。
+2. 英文图用 `edit`：以定稿的中文图为参考，提示词要求版面、图标、配色不变，只把字换成英文。中英两张因此长得一样。
+3. 每张图按原尺寸分块看，逐行对照 `strings.md`。错一个字、一个标点、一根箭头就重出。
+4. 定稿的图转成 WebP（质量 90）。主视觉裁掉上下空白，从 1536×1024 裁成 1536×820，首屏少占一点高度。
+5. 更新 `manifest.json`，然后运行检查。
+
+2026-11-26 这一批共生成 30 张，留用 10 张。
+
+生成后在本地改过的只有一处：`diagrams/gate.zh` 的红虚线弯钩原本连在“还是没过”上。退回发生在“没过”这一步，所以把弯钩挪到“没过”右侧，擦掉下面那段虚线。`gate.en` 是照改过的中文图生成的。
+
+社交卡片 `hero/social-card.jpg` 由英文主视觉裁成 2:1，缩到 1280×640，右上角加上“Yonty Bot”（字体 Noto Sans CJK SC Bold，SIL Open Font License 1.1）。仓库的社交预览要在 GitHub 仓库设置里手动上传这张图。
+
+## 画法
+
+- 浅米色纸面底 `#f4efe6`，炭黑字 `#1c1a17`。砖红 `#d6382b` 只给复跑验证、没过、要你批和没拦住的事；“过了”用绿色。
+- 软陶质感的立体小图标，只用炭黑、米色和暖白。
+- 提示词要求只写引号里的字，不加别的字、数字和标志。
+- 没有深色版。图自带米色底，GitHub 深色主题下照样能看。
+
+## 手机上的字号
+
+示意图原图宽 1024 像素。手机上 README 正文约 358 像素宽，图里最小的字只有 7 到 9 像素高，要看清得点开原图。旧的 SVG 示意图有一条检查：显示成 400 像素宽时，字不能小于 10 像素。这条检查随 SVG 一起去掉了，换来的是画面质感。以后要改回去，就把字多的图拆成两张。
+
+## 检查
 
 ```bash
-python3 -I docs/assets/source/diagrams/build.py                      # 重出 16 个成品
-python3 -I docs/assets/source/diagrams/build.py --proof _tmp/proof   # 另出校样，给 svg-lint 用
-python3 -I docs/assets/source/diagrams/check.py                      # 检查，CI 可直接调，没过退出码 1
+python3 -I docs/assets/source/generated/check.py
 ```
 
-需要 `fonttools` 和系统字体 Noto Sans CJK（Debian/Ubuntu 的 `fonts-noto-cjk`）。重出两次逐字节相同。文案、版面都在 `build.py`；缺字、字超框、字重叠、显示成 400 像素宽时字小于 10 像素，都会报错。`check.py` 在临时目录重出一遍，做上面这些检查，再核对仓库里的 16 个文件与重出的逐字节相同、没有多余或缺少。逐字节相同以字体和 `fonttools` 版本一致为前提（现用 4.46.0），换版本后先重出再提交。
+只用 Python 标准库。没过时逐条打印原因，退出码 1。CI 改到 `docs/assets/` 时会运行它。它查这几件事：
 
-## svg-lint
+- `manifest.json` 里每张图都在，sha256 和字节数对得上。换了图要同时改清单。
+- `hero/`、`diagrams/` 里的每个文件都登记在清单里。
+- 生成的图都有提示词文件，在 `strings.md` 里有逐字记录。
+- `docs/assets/` 里单个文件不超过 5 MB，合计不超过 15 MB。
+- 两份 README 引用的 `docs/assets/` 路径都存在。
 
-- 校样和成品坐标相同，只是文字用 `<text>`。每张图三份：默认用工具自带色板，`.light`、`.dark` 用成品配色。
-- 2026-11-25 实测：原版 svg-lint 查 8 张自带色板的校样，0 错误 0 警告；在临时副本里登记配色后查 16 张成品配色的校样，也是 0 错误 0 警告。
-- 成品是方向 C 的配色，原版 svg-lint 查 16 个成品：0 错误、312 警告（272 条配色不在自带色板，40 条边距）；登记配色后剩 40 条边距。登记配色只在临时副本里做，不改工具。
-- 成品的文字是字形轮廓，svg-lint 看不到，会误报上下边距。文字检查以校样和 `build.py` 的真实字宽检查为准。
-
-## 字体和配色
-
-- 文字转成路径，GitHub 上不依赖系统字体。字体 Noto Sans CJK SC，Google 与 Adobe 出品，SIL Open Font License 1.1，允许商用和嵌入。
-- 配色跟主视觉同一套：浅色底 `#f4efe6`、字 `#1c1a17`、红 `#d6382b`；深色底 `#1a1814`、字 `#f4efe6`、红 `#ff5f4f`。红只给复跑验证、没过、要主人点头和没拦住的事。
-- 不含脚本、外链、位图和第三方标志。英文按英文读者的说法重写，不逐句对译。
+图上的字对不对，脚本查不了，要人按第 3 步看。
 
 ## 对照表
+
+图上每一句话对应的代码和文档。
 
 代码按函数找，行号会变。文档和代码不一致的，图按代码画。
 
@@ -59,7 +84,7 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 | 派活；回报、提问箭头 | `app/team.py` `gate`；`docs/tasks.md` §1 第 8 条 |
 | 后台任务：负责人、独立检查、评审，各有分支 | `docs/architecture.md` 1.1；`app/tasks.py` `plan_note`、`part_note`；`app/roles/评审.md` |
 | 红虚线：授权、花钱、方向直接问主人 | `app/delivery.py` `OWNER_CATS`；`docs/tasks.md` §2 投递规则 |
-| 服务：身份、排队、验证、停工 | `app/bridge.py` `is_owner`；`app/resources.py` `admit`；`app/tasks.py` `run_verify`；`app/team.py` `set_held` |
+| 服务：认身份、排队、跑验证和停工 | `app/bridge.py` `is_owner`；`app/resources.py` `admit`；`app/tasks.py` `run_verify`；`app/team.py` `set_held` |
 
 ### 复跑验证（gate）
 
@@ -94,10 +119,10 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 | 没硬拦：写脚本再执行；分支保护兜底 | `docs/tasks.md` §3 警告；`docs/boundary.md` §4.1 |
 | 没硬拦：转述别处聊天 | `docs/boundary.md` §3 警告（`bot_read_im`） |
 | 沙箱：只包定时运行，普通 Claude 任务没有 | `app/tasks.py` `sandbox`（没有 `scope` 返回空） |
-| 沙箱：能写的 | `app/tasks.py` `_sandbox`；`docs/boundary.md`“定时运行的沙箱” |
+| 沙箱：能写的（英文图写 Writes only） | `app/tasks.py` `_sandbox`；`docs/boundary.md` §1 威胁表“定时运行逃出范围”：箱里除工作树、发件箱、会话记录外没有可写的。箱里的临时目录是用完即弃的 tmpfs，`~/.claude.json` 是这个任务自己的副本 |
 | 沙箱：读得到登录凭据、仓库历史；网络没隔离 | `docs/boundary.md`“已知的残余风险” |
 
-“没有硬拦住”一块用空心竖条，其余用实心。沙箱里的别家智能体看不到 Claude 登录态（`app/tasks.py` `_sandbox`），图上说的是跑 Claude 的定时运行。
+“没有硬拦住”一块用红色虚线框，其余用实线框。沙箱里的别家智能体看不到 Claude 登录态（`app/tasks.py` `_sandbox`），图上说的是跑 Claude 的定时运行。
 
 ## 文档和代码不一致
 
@@ -106,4 +131,3 @@ python3 -I docs/assets/source/diagrams/check.py                      # 检查，
 | README“过了开草稿合并请求” | 普通任务和负责人在自己那一轮里建草稿合并请求，早于复跑验证（`mr_note`）；只有沙箱和云端任务是验证过了由服务建（`agent_publish`、`create_mr`） | 合并请求画在负责人那一步里，之后才是复跑验证、评审和 PASS |
 | README“推主干由钩子直接拦下” | 只对同事的活成立；主人派的只拦强推和删除 main/master（`git_guard.py`） | 放在“没有硬拦住” |
 | 分镜“验证失败”卡片像群消息 | 退回是给任务的下一轮提示 | 画成后台退回 |
-| 分镜深色底 `#14120f`、红 `#d6382b` | 主视觉用 `#1a1814`、`#ff5f4f` | 跟主视觉 |

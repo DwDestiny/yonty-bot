@@ -1,0 +1,12 @@
+Keep exactly the same infographic as the reference image: same layout, cards, icons, arrows, colors, lighting and style. Replace all Chinese text with this English text, in the same places, same hierarchy:
+Title, one line in one font size and weight: "From one message to a pull request".
+Row 1: "Someone asks in chat" / "You or a teammate, in Feishu/Lark or WeCom".
+Row 2: "The coordinator picks it up" / "Quick answers now; big jobs are scoped, handed on".
+Row 3: "The project manager plans" / "Reads code, gives each version one lead".
+Row 4 (red title): "Teammate's job? You approve" / "Your own jobs go straight into the queue".
+Row 5: "One lead does the whole job" / "Researches, writes, tests, opens a draft PR".
+Red row without number: "The service re-runs the check" / "Failures go back to the task, not to your chat".
+Row 6: "Review" / "Reads the diff; fixes go back to the lead".
+Row 7: "PASS comes back; merging is your call" / "The manager reviews; the coordinator briefs you".
+Footer, three short centered lines: "For a teammate, the coordinator may queue one task:" / "you still approve it. It opens its own draft PR," / "then the check is re-run."
+No period at the end of any line. No Chinese text left anywhere. All text exactly as quoted. No other text, no logos, no watermark.

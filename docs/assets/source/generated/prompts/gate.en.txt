@@ -1,0 +1,10 @@
+Keep exactly the same infographic as the reference image: same layout, cards, icons, arrows, colors, lighting and style. Replace all Chinese text with this English text, in the same places, same hierarchy:
+Title: "Re-run check: “done” doesn't count".
+Top card: "The task says it is done" / "Nothing counts until the service looks".
+Red card: "The service runs the check itself" / "Edited acceptance tests fail it too".
+Left card: "Passed" / "Marked PASS" / "The manager reviews it".
+Middle card: "Couldn't finish" / "Stopped, or blocked by a guard" / "No rework: BLOCKED".
+Right card, red title: "Failed" / "Sent back with the output" / "Twice at most by default".
+Bottom card, red title: "Still failing" / "Stronger model, if there is one" / "Otherwise BLOCKED".
+Footer, two centered lines: "No check command set? The report says so." / "Read-only roles that commit nothing skip this check."
+No period at the end of card lines. No Chinese text left anywhere. All text exactly as quoted. No other text, no logos, no watermark.

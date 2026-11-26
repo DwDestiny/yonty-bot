@@ -1,0 +1,13 @@
+A tall infographic card, 1024x1536. Premium editorial infographic style. Warm cream paper background (#f4efe6) with very subtle paper grain. Charcoal text (#1c1a17). Soft matte 3D clay icons with rounded edges, made only of charcoal, cream and warm white (no yellow, no blue, no purple, no orange). Gentle studio light from the top left, soft contact shadows. Brick red (#d6382b) appears only where the prompt says red; sage green (#5f8f6b) only where it says green. No decorative marks or sparkles. Bold modern sans-serif typography, generous spacing, clear hierarchy, crisp text.
+Title at top, large bold, with a thin charcoal rule under it: "主控、项目经理、负责人".
+Below, a stack of rounded 3D clay slabs from top to bottom, each a card with a bold title and smaller lines, with a pair of small arrows between neighbouring cards (a down arrow with its label on the left, an up arrow with its label on the right):
+Card 1, cream, icon two small chat bubbles: "你和同事" / "在群里或私聊里说话".
+Arrows: down "说事", up "结果".
+Card 2, cream, icon a charcoal headset beside a charcoal laptop: "主控 · 每个聊天一个" / "答问题，做几分钟的小改动" / "记住你的决定，大活转出去".
+Arrows: down "转交", up "完成、问题".
+Card 3, cream, icon a clipboard with a plan: "项目经理 · 每个项目按聊天分开" / "读代码、定版本、派负责人、验收" / "不写代码".
+Arrows: down "派活", up "回报、提问".
+A dashed charcoal frame titled "后台任务 · 各有各的分支" holding three small cards side by side: "负责人" / "一个版本做到底" / "自己建合并请求"; "独立检查" / "扫描、装机这类" / "跟写的人分开"; "评审" / "只看改动" / "只提意见". Each small card has a tiny clay icon in charcoal and cream only (no wood, no brown): a charcoal laptop on a cream desk, a charcoal shield with a check mark, a charcoal magnifying glass.
+A dashed red curved arrow runs from the right edge of the dashed frame up to card 1. Under the dashed frame, red text: "红虚线：要授权、花钱、定方向时，任务直接问你".
+At the bottom, a solid charcoal base slab with cream text on two lines: "服务是普通程序，不是模型" / "它负责认身份、排队、跑验证和停工".
+All text exactly as quoted, in Simplified Chinese, with the punctuation exactly as quoted. No other text, no logos, no watermark.
