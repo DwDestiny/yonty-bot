@@ -156,6 +156,7 @@ class DropPlanTest(Base):
         reg = lambda name, body: self.b.pm_notes('proj', 'k', f'[方案] {name}\n{body}\n[/方案]')[1]
         items = lambda: self.b.team.plan_of('proj', '甲版')['items']
         self.assertEqual(reg('甲版', '版本: 1.0\n任务:\n- 甲 | a |\n- 乙 | b |'), [])
+        self.b.team._change(lambda st: st['plans']['proj']['甲版'].__setitem__('lead', '甲'))   # 3.19.2 起挡新版本的只有一个负责人的版本，老方案开着不挡
         self.assertTrue(reg('乙版', '版本: 1.1\n任务:\n- 丙 | a |'), '没收口的挡住新版本')
         self.task(title='甲', plan='甲版'); self.drop('[撤方案] 甲版\n理由：不做了'); self.assertTrue(self.gone('甲版'))
         self.assertFalse(self.b.team.plan_open(self.t, 'proj', '甲版'))

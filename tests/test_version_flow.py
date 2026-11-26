@@ -35,9 +35,7 @@ class Version(TT.Base):
 
     def test_new_points_go_into_the_open_version(self):
         self.pm(PLAN + block(self.e.repo, '甲', 'src/a') + block(self.e.repo, '收口', deps='甲', closing=True))
-        r = self.pm(self.plan('加按钮', ['丁', '收口'], '1.1') + block(self.e.repo, '丁', 'src/d', plan='加按钮'), '[不回]')
-        self.assertIn('同一个项目一次只做一个版本', r); self.assertIn('[方案] 整改', r); self.assertEqual({t['title'] for t in self.new()}, {'甲', '收口'})
-        # 照回执补进去：只写了新的一条，已经派出去的不丢；收口自动等它
+        # 往开着的老方案里补：只写了新的一条，已经派出去的不丢；收口自动等它。3.19.2 起新需求另登一个负责人的版本，见 test_one_lead
         self.assertEqual(self.pm("[方案] 整改\n任务:\n- 丁 | src/d |\n[/方案]\n" + block(self.e.repo, '丁', 'src/d')), '')
         p = self.b.team.plan_of('proj', '整改'); self.assertEqual((p['items'], p['version']), (['甲', '乙', '丙', '收口', '丁'], '1.0'))   # 没派的乙、丙也留着
         self.assertIn('先定底座', p['text']); self.assertIn('[补充]', p['text'])   # 定性那段不丢，新任务也看得到补充

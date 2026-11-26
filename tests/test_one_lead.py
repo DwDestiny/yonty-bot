@@ -4,7 +4,7 @@ Input:  test_team 的临时实例（Claude、systemd、lark-cli 都是假的）�
 Output: unittest 结果
 Pos:    tests/ 下的行为测试，内容全是虚构的。3.19 以前登记的老方案（几个开发任务并行、收口）见 test_team、test_version_flow
 """
-import importlib.util, json, os, sys, time, unittest
+import importlib.util, json, os, subprocess, sys, time, unittest
 from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import test_accept_flow as A
@@ -161,6 +161,32 @@ class Lead(TT.Base):
         p = T.plan_of('proj', '旧'); self.assertNotIn('lead', p); self.assertEqual(p['items'], ['甲', '乙', '收口', '评审', '丙'])
         self.assertTrue(self.by('收口')['closing']); self.assertEqual(self.by('甲')['thing'], '旧·甲'); self.assertTrue(self.t.part(self.by('甲')))
         self.assertIn('老规矩的方案（3.19 升级前登记的', self.b.team.board(self.t, 'proj'))   # 项目经理照看板认老方案，跟服务认的一样
+
+    def test_new_version_beside_old_plans(self):
+        """开着的只有升级前的老方案：新需求另登一个负责人的版本，不用写另开；老方案照老写法往里补；负责人的版本开着时再登记别的照样退回（3.19.2）。"""
+        T = self.b.team
+        T._change(lambda st: st.setdefault('plans', {}).setdefault('proj', {}).__setitem__('旧', {'items': ['甲', '乙', '收口'], 'text': '版本: 1.9\n老', 'at': time.time(), 'version': '1.9'}))
+        self.assertEqual(self.pm(block(self.e.repo, '甲', 'src/a', plan='旧')), ''); self.assertTrue(T.plan_open(self.t, 'proj', '旧'))   # 老方案在做
+        lead, _, _ = self.go(); self.assertEqual(self.plan()['lead'], '文档')   # 新需求照登，不用写另开
+        self.assertEqual(self.pm("[方案] 旧\n任务:\n- 丙 | src/c |\n[/方案]\n"), '')   # 老方案照老写法补
+        self.assertNotIn('lead', T.plan_of('proj', '旧')); self.assertIn('丙', T.plan_of('proj', '旧')['items'])
+        r = self.pm("[方案] 再一版\n版本: 2.2\n任务:\n- 主 | src/m |\n[/方案]\n", '[不回]')   # 负责人的版本开着：照样一次一个
+        self.assertIn('同一个项目一次只做一个版本', r); self.assertIn(self.t.ref(lead), r); self.assertEqual(self.plan('再一版'), {})
+
+    def test_shipped_versions_refused(self):
+        """版本号发过的、比发过的旧的：登记、重发、派活都退回，负责人开工时也提醒它先问（2026-11-26：发版占了老方案登记的版本号）。"""
+        git = lambda *a: subprocess.run(['git', '-C', str(self.e.repo), '-c', 'user.name=t', '-c', 'user.email=t@example.com', *a], check=True, capture_output=True)
+        git('commit', '--allow-empty', '-m', '发版'); git('tag', 'v2.0.0')
+        for ver, why in (('2.0.0', '版本 2.0.0 已经发过（标签 v2.0.0）'), ('1.9.9', '版本 1.9.9 比已经发的 v2.0.0 旧')):
+            with self.subTest(ver):
+                self.assertIn(why, self.pm(ONE.replace('版本: 2.0', f'版本: {ver}'), '[不回]')); self.assertEqual(self.plan(), {})
+        self.assertEqual(self.pm(ONE.replace('版本: 2.0', '版本: 2.0.1') + block(self.e.repo, '文档', 'docs', plan='推广')), '')
+        self.assertIn('版本 2.0.0 已经发过', self.pm(ONE.replace('版本: 2.0', '版本: 2.0.0'), '[不回]'))   # 凭记忆写回发过的版本号：退回，存的不动
+        self.assertEqual(self.plan()['version'], '2.0.1')
+        git('tag', 'v2.0.1')   # 这个版本号被别的发版占了
+        self.assertIn('版本 2.0.1 已经发过（标签 v2.0.1）', self.pm(block(self.e.repo, '公开前检查', '_tmp/scan', plan='推广'), '[不回]'))
+        self.assertFalse([t for t in self.new() if t['title'] == '公开前检查'])
+        self.assertIn('先别写版本号', self.t.plan_note(self.by('文档')))
 
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
