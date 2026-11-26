@@ -188,6 +188,21 @@ class Lead(TT.Base):
         self.assertFalse([t for t in self.new() if t['title'] == '公开前检查'])
         self.assertIn('先别写版本号', self.t.plan_note(self.by('文档')))
 
+    def test_closed_plan_not_blocked_by_tags(self):
+        """评审开工、这个版本收口以后才有的标签（别的版本先发了，或者自己发了）：评审复核照派，派活不拿版本号拦；负责人的说明里提醒它问项目经理用哪个版本号（3.19.3）。"""
+        git = lambda *a: subprocess.run(['git', '-C', str(self.e.repo), '-c', 'user.name=t', '-c', 'user.email=t@example.com', *a], check=True, capture_output=True)
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主')
+        self.t.update(lead['id'], status='done'); self.t.event(lead['id'], 'done', '结论：PASS\n合并请求 https://example.com/pr/1')
+        self.layers([], ['过\n' + rv(self.e.repo, deps='主', plan='修')]); self.e.tick(); self.flush()
+        r = self.by('评审'); self.t.update(lead['id'], _force=True, finished=time.time() - 10); self.e.tick()
+        self.assertEqual(self.t.load(r['id'])['status'], 'running'); self.assertFalse(self.b.team.plan_open(self.t, 'proj', '修'))
+        git('commit', '--allow-empty', '-m', '发版'); git('tag', 'v2.3.0')   # 别的版本先发了
+        self.t.update(r['id'], status='done'); self.t.event(r['id'], 'done', '结论：PASS\n必修 1：空输入会崩')
+        self.assertEqual(self.pm("[方案] 修\n任务:\n- 评审复核 | | 主\n[/方案]\n" + rv(self.e.repo, title='评审复核', deps='主', plan='修')), '')
+        self.assertEqual(self.by('评审复核')['plan'], '修')
+        self.assertIn('问项目经理用哪个版本号', self.t.plan_note(lead))
+
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
         c, hist = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}, [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]

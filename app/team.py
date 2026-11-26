@@ -333,8 +333,8 @@ def gate(tk, project, d, c):
     if not p: return f"没有登记过方案“{d['plan']}”：先写 [方案] {d['plan']}"
     if p.get("dropped"): return f"方案“{d['plan']}”已撤（{p['dropped'].get('why', '')[:80]}），不派；要接着做就重新登记 [方案] {d['plan']}"
     v = p.get("version") or ""
-    if v != ADHOC and not _line(p.get("text"), "另开", 600) and (s := shipped(d.get("repo") or repo_of(tk, project), v)):
-        return f"{s}：方案“{d['plan']}”先改成一个没发过、比它新的版本号（重发 [方案] {d['plan']}，正文写“版本: x.y.z”），再派"
+    if v != ADHOC and not _line(p.get("text"), "另开", 600) and plan_open(tk, project, d["plan"]) and (s := shipped(d.get("repo") or repo_of(tk, project), v)):   # 收口过的不查：版本号改不了，评审复核、返修照派（3.19.3）
+        return f"{s}：方案“{d['plan']}”先改成一个没发过、比它新的版本号（重发 [方案] {d['plan']}，正文写“版本: x.y.z”），再派；真要用这个版本号，方案里写一行“另开: 理由”"
     if d.get("swallowed"): return f"“{d['title']}”的任务书里有一行“{d['swallowed']}”，没写 [/派活]，分不清是任务书的字还是要执行的标记：任务书结尾单独一行写 [/派活]，要执行的标记写在它后面"
     raw, got = d.get("deps_raw") or "", []
     for it in sorted((i for i in p["items"] if re.search(r"[,，、;；]", i)), key=len, reverse=True):   # 标题里带顿号、逗号的先整条认出来，再拆剩下的
