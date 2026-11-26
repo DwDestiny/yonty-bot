@@ -211,16 +211,36 @@ class Lead(TT.Base):
         r = self.pm("[方案] 推广\n任务:\n- 发版 | | 评审\n[/方案]\n", '[不回]')
         self.assertIn(n, r); self.assertNotIn('发版', self.plan()['items'])
 
-    def test_release_held_in_report_round(self):
-        """任务回报那一轮主人没说过话：给负责人的发版指令不转，项目经理收到提醒；别的指令照转（3.19.6）。"""
+    def test_release_needs_the_line_and_the_owner(self):
+        """负责人只认“发版:”那一行（3.19.7）。任务回报那一轮主人没说过话：带这一行的、明说发版的不转，项目经理收到提醒；只提到发版说明、
+        打标签功能、说先不要发的照转。主人说过话的那一轮：明说发版却没写这一行的退回让补，补上了照转。主控、项目经理转的不标主人本人。"""
         self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
         self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
         self.t.update(lead['id'], status='done'); self.t.event(lead['id'], 'done', '结论：PASS\n合并请求 https://example.com/pr/1')
-        self.layers([], [f'[任务指令] {n} 合并以后打 v2.2.0 标签、发 Release\n原因: 下一步\n[/任务指令]\n[任务指令] {n} 顺手补一条回归测试\n原因: 没做全\n[/任务指令]\n'])
+        p = os.path.join(self.t.tdir(lead['id']), 'inbox.jsonl')
+        def box():
+            if not os.path.exists(p): return ''
+            with open(p) as f: return f.read()
+        self.layers([], [f'[任务指令] {n} 合并好了\n发版: 照仓库的规矩走完\n原因: 下一步\n[/任务指令]\n'
+                         f'[任务指令] {n} 合并以后打 v2.2.0 标签、发 Release\n原因: 下一步\n[/任务指令]\n'
+                         f'[任务指令] {n} 补 2.2.0 的发版说明，客户列表打标签的弹窗溢出也修了；先不要打 v2.2.0 标签和发 Release\n原因: 没做全\n[/任务指令]\n'])
         self.e.tick(); self.flush()
-        with open(os.path.join(self.t.tdir(lead['id']), 'inbox.jsonl')) as f: box = f.read()
-        self.assertNotIn('发 Release', box); self.assertIn('补一条回归测试', box)
-        self.assertTrue(any('发版指令没转' in str(e) for e in self.t.events(lead['id'])))
+        self.assertNotIn('规矩走完', box()); self.assertNotIn('合并以后打', box()); self.assertIn('补 2.2.0 的发版说明', box())
+        self.assertTrue(any('要发版' in str(e) and '没转' in str(e) for e in self.t.events(lead['id'])))
+        r = self.pm(f'[任务指令] {n} 主人点过头了：打 v2.2.0 标签、发 Release\n原因: 下一步\n[/任务指令]\n',
+                    f'[任务指令] {n} 主人点过头了\n发版: 打 v2.2.0 标签、发 Release\n原因: 下一步\n[/任务指令]\n')
+        self.assertIn('发版: 发到哪一步', r)
+        self.assertEqual(box().count('打 v2.2.0 标签、发 Release'), 1); self.assertIn('发版: 打 v2.2.0', box())
+        self.assertIn(self.t.load(lead['id'])['status'], ('approved', 'running'))
+        self.assertNotIn('本人', self.t.format_inbox(self.t.inbox_items(lead['id'])))
+
+    def test_owner_typed_is_marked(self):
+        """主人亲手发的“短名#N 内容”在收件箱里标主人本人：负责人凭它认主人亲自叫它发版（3.19.7）。"""
+        self.assertEqual(self.pm("[方案] 修\n版本: 2.2.0\n任务:\n- 主 | src |\n- 评审 | | 主\n[/方案]\n" + block(self.e.repo, '主', 'src', plan='修')), '')
+        self.e.tick(); lead = self.by('主'); n = self.t.ref(lead)
+        self.t.update(lead['id'], status='done')
+        self.say(f'{n} 发 beta')
+        self.assertIn('本人）：发 beta', self.t.format_inbox(self.t.inbox_items(lead['id'])))
 
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)

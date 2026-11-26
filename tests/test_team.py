@@ -386,7 +386,7 @@ class FollowPlanTest(Base):
 
     def test_follow_steer_limits(self):
         for text, kv, why in (('[任务指令] N 预算加到 50', {}, '预算'), ('[任务指令] N 放开验收测试', {}, '验收'), ('[任务指令] N 再测', {'checkpoint': True}, '检查点'),
-                              ('[任务指令] N 再测', {'title': '发 stable'}, '正式发布'), ('[任务指令] N 合并好了，推 stable', {'lead': True}, '发版'), ('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步', {'lead': True}, '发版'), ('[任务指令] N 再测', {'plan': ''}, '方案任务'), ('[任务指令] N 再测', {'project': 'other'}, '方案任务'),
+                              ('[任务指令] N 再测', {'title': '发 stable'}, '正式发布'), ('[任务指令] N 合并好了，推 stable', {'lead': True}, '发版'), ('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步', {'lead': True}, '发版'), ('[任务指令] N 合并好了\n发版: 照 docs/releasing.md 走完\n原因: 下一步', {'lead': True}, '发版'), ('[任务指令] N 再测', {'plan': ''}, '方案任务'), ('[任务指令] N 再测', {'project': 'other'}, '方案任务'),
                               ('[任务指令] N 再测', {'origin': {'channel': 'feishu', 'chat_id': 'oc_g', 'chat_type': 'group', 'message_id': 'm'}}, '方案任务')):
             with self.subTest(text + why):
                 self.setUp(); t, errs = self.follow(text, **kv)
@@ -397,6 +397,18 @@ class FollowPlanTest(Base):
         self.assertEqual(errs, []); self.assertIn(t['status'], ('approved', 'running'))
         self.setUp(); t, errs = self.follow('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步')   # 老方案的任务照老规矩（3.19.6）
         self.assertEqual(errs, []); self.assertIn(t['status'], ('approved', 'running'))
+        self.setUp(); t, errs = self.follow('[任务指令] N 补 2.0.0 的发版说明，先不要打 v2.0.0 标签和发 Release\n原因: 下一步', lead=True)   # 只提到发版的照转（3.19.7）
+        self.assertEqual(errs, []); self.assertIn(t['status'], ('approved', 'running'))
+
+    def test_release_asks(self):
+        """认发版的指令：有“发版:”那一行的、明说发版动作的认；只提到发版说明、打标签功能、正式环境，或者说先不要发的不认（3.19.7）。"""
+        yes = ('发版: 只发 beta', '  发版：照 docs/releasing.md 走完', '合并以后打 v2.2.0 标签、发 Release', '合并好了，推 stable', '没问题就发 beta', '发到 stable',
+               'gh release create v3.21.0', 'git push origin v3.21.0', '打标签 v3.21.0', '建 Release', '推到生产', 'npm publish', '评审过了不用改，发 beta')
+        no = ('补 3.21.0 的发版说明', '版本号写 3.18.0（本次发版号）', '起草 3.18.0 的 Release 说明', '评审必修 1：标签文字溢出', '正式静帧到了',
+              '正式环境的用户不受影响', '等 3.18.0 发版以后再改', '客户打标签写成功那条', '只起草：不打标签、不发 Release', '不合并，不打 tag',
+              '先不要打 v3.21.0 标签和发 Release', '还没发 beta', '开发版插件怎么装', 'CHANGELOG 写错了 v3.2.0 标签的 app/bridge.py', '对照标签 v3.2.0 的代码')
+        self.assertEqual([x for x in yes if not self.b.team.asks_release(x)], [])
+        self.assertEqual([x for x in no if self.b.team.asks_release(x)], [])
 
     def test_follow_steer_idempotent(self):
         self.follow('[任务指令] N 再测'); t, errs = self.follow('[任务指令] N 再测')
