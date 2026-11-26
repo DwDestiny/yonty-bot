@@ -108,7 +108,12 @@ def vouch_plan(project, name, body=None):
 def vouched(project, name): return ((load().get("vouched") or {}).get(project) or {}).get(name) or []
 
 LIVE_RELEASE = re.compile(r"stable|正式|生产|production|prod\b|上线", re.I)
-RELEASE_ASK = re.compile(r"发版|发布|发\s*beta|上线|标签|\btags?\b|release|publish|stable|正式|生产|production|prod\b", re.I)   # 主控转回来那一轮不转的发版指令（3.19.5）
+RELEASE_ASK = re.compile(r"发版|发布|发\s*beta|上线|标签|\btags?\b|release|publish|stable|正式|生产|production|prod\b", re.I)   # 主人没说过话的一轮不转的发版指令（3.19.5）
+
+def release_held(x, body):
+    """主人没说过话的一轮（主控办完事转回来的、任务回报、提问、告警）：给一个负责人的版本的负责人转发版的指令，不转，要主人点头（3.19.6）。
+    只管负责人：老方案的任务照老规矩；任务标题带正式发布的另由 LIVE_RELEASE 管。"""
+    return bool(x.get("lead")) and bool(RELEASE_ASK.search(body or ""))
 
 def follow_gate(project, d):
     """项目经理接着派（主控办完事转回来的，主人没亲口说话）：只派登记时带主人身份的方案里列明的任务。返回不放行的原因，空串放行。"""

@@ -386,14 +386,16 @@ class FollowPlanTest(Base):
 
     def test_follow_steer_limits(self):
         for text, kv, why in (('[任务指令] N 预算加到 50', {}, '预算'), ('[任务指令] N 放开验收测试', {}, '验收'), ('[任务指令] N 再测', {'checkpoint': True}, '检查点'),
-                              ('[任务指令] N 再测', {'title': '发 stable'}, '正式发布'), ('[任务指令] N 合并好了，推 stable', {}, '发版'), ('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步', {}, '发版'), ('[任务指令] N 再测', {'plan': ''}, '方案任务'), ('[任务指令] N 再测', {'project': 'other'}, '方案任务'),
+                              ('[任务指令] N 再测', {'title': '发 stable'}, '正式发布'), ('[任务指令] N 合并好了，推 stable', {'lead': True}, '发版'), ('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步', {'lead': True}, '发版'), ('[任务指令] N 再测', {'plan': ''}, '方案任务'), ('[任务指令] N 再测', {'project': 'other'}, '方案任务'),
                               ('[任务指令] N 再测', {'origin': {'channel': 'feishu', 'chat_id': 'oc_g', 'chat_type': 'group', 'message_id': 'm'}}, '方案任务')):
             with self.subTest(text + why):
                 self.setUp(); t, errs = self.follow(text, **kv)
                 self.assertTrue(errs and why in errs[0], errs); self.assertEqual(t['status'], 'done')
         self.setUp(); self.follow(''); self.t.update(self.jid, status='approved'); self.t.update(self.jid, status='running'); t, errs = self.follow('[任务指令] N 再测', status='waiting'); self.assertIn('等答复', errs[0])
         self.setUp(); self.follow(''); self.b.team.set_held('proj', True); t, errs = self.follow('[任务指令] N 再测'); self.assertIn('停工', errs[0])
-        self.setUp(); t, errs = self.follow('[任务指令] N 合并好了，补一条回归测试\n原因: 下一步')   # 主人没说话的这一轮，发版的指令不转（3.19.5），别的照转
+        self.setUp(); t, errs = self.follow('[任务指令] N 合并好了，补一条回归测试\n原因: 下一步', lead=True)   # 主人没说话的这一轮，负责人的发版指令不转（3.19.5），别的照转
+        self.assertEqual(errs, []); self.assertIn(t['status'], ('approved', 'running'))
+        self.setUp(); t, errs = self.follow('[任务指令] N 合并好了，照发版规矩打 v2.0.0 标签、发 Release\n原因: 下一步')   # 老方案的任务照老规矩（3.19.6）
         self.assertEqual(errs, []); self.assertIn(t['status'], ('approved', 'running'))
 
     def test_follow_steer_idempotent(self):
