@@ -181,7 +181,7 @@ def pick_model(role, verify, ex, model="", effort="", forced=False, craft=""):
 def craft_of(v):
     """派活里“画面:”写的：要看质感的是什么画面。没写、写了不是、照抄了模板的返回空串。"""
     v = re.sub(r"\s+", " ", v or "").strip()[:80]
-    return "" if not v or v.startswith(("<", "不", "否", "无", "没", "-", "—")) or "要看质感" in v else v
+    return "" if not v or v.startswith(("<", "不", "否", "无", "没", "-", "—", "什么画面")) or "要看质感" in v else v
 
 def sibling_drop(t, model):
     """验证没过、换了人的会话不再拿来分叉。"""

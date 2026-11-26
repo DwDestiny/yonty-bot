@@ -46,7 +46,7 @@ class Lead(TT.Base):
 
     def test_one_lead_and_two_kinds_registered(self):
         lead, scan, film = self.go()
-        p = self.plan()
+        p = self.plan(); self.assertNotIn('老规矩', self.b.team.board(self.t, 'proj'))
         self.assertEqual((p['lead'], p['extra']), ('文档', {'公开前检查': '检查：要跟写文档的人分开看', '片子': '独立：换一整套工具，放别的机器渲染'}))
         self.assertEqual((lead.get('lead'), scan['extra'][:2], film['extra'][:2]), (True, '检查', '独立'))
         self.assertEqual((lead['thing'], scan['thing'], film['thing']), ('推广', '推广·公开前检查', '推广·片子'))   # 负责人的活是这个版本这件事
@@ -59,7 +59,8 @@ class Lead(TT.Base):
         cases = (("- 甲 | src/a |\n- 乙 | src/b |\n- 评审 | | 甲\n", '2 个负责人任务'),
                  ("- 甲 | src/a |\n- 收口 | | 甲\n", '不派收口'),
                  ("- 甲 | src/a | | 检查：要分开看\n", '没有负责人任务'),
-                 ("- 甲 | src/a |\n- 乙 | src/b | | 调研：先读十个项目\n", '第四栏写的是“调研'))
+                 ("- 甲 | src/a |\n- 乙 | src/b | | 调研：先读十个项目\n", '第四栏写的是“调研'),
+                 ("- 评审流程改造 | src/a |\n- 评审 | | 评审流程改造\n", '标题带“评审”的都当成评审了：评审流程改造'))
         for body, why in cases:
             with self.subTest(why):
                 r = self.pm(f"[方案] 改\n版本: 2.1\n任务:\n{body}[/方案]\n", '[不回]')
@@ -137,6 +138,7 @@ class Lead(TT.Base):
         self.layers([], ['过\n' + rv(self.e.repo, deps='主', plan='修')]); self.e.tick(); self.flush()
         r = self.by('评审'); self.t.update(lead['id'], _force=True, finished=time.time() - 10); self.e.tick()
         self.assertEqual(self.t.load(r['id'])['status'], 'running')   # 负责人收过了，评审开工
+        self.assertEqual(self.pm("[方案] 下一版\n版本: 2.3\n任务:\n- 乙 | src/b |\n- 评审 | | 乙\n[/方案]\n"), '')   # 评审开工，下一个版本先登记上
         self.t.update(r['id'], status='done'); self.t.event(r['id'], 'done', '结论：PASS\n必修 1：空输入会崩')
         n = self.t.ref(lead)
         self.layers([], [f'[任务指令] {n} 修必修 1：空输入\n原因: 评审必修\n[/任务指令]\n[方案] 修\n任务:\n- 评审复核 | | 主\n[/方案]\n' + rv(self.e.repo, title='评审复核', deps='主', plan='修')])
@@ -144,8 +146,12 @@ class Lead(TT.Base):
         self.assertEqual([t['title'] for t in self.new()].count('主'), 1)   # 同一个负责人接着改，不新开
         self.assertIn(self.t.load(lead['id'])['status'], ('approved', 'running'))
         with open(os.path.join(self.t.tdir(lead['id']), 'inbox.jsonl')) as f: self.assertIn('修必修 1', f.read())
-        r2 = self.by('评审复核'); self.assertEqual(r2['thing'], '修·评审')   # 复核轮跟第一轮共用一份档案
-        self.assertIn(n, self.b.team.waits(self.t, self.t.load(r2['id']), self.b.TEAM))
+        r2 = self.by('评审复核'); self.assertEqual(r2['thing'], '修·评审')   # 复核轮跟第一轮共用一份档案；下一版开着也能给这个版本补一轮评审
+        self.t.update(r['id'], _force=True, finished=time.time())   # 第一轮评审刚做完、还没收：复核轮也不等它
+        self.assertFalse(self.t.accepted(self.t.load(r['id'])))
+        self.assertIn(n, self.b.team.waits(self.t, self.t.load(r2['id']), self.b.TEAM))   # 等负责人改完
+        self.ok(self.t.load(lead['id']))
+        self.assertEqual(self.b.team.waits(self.t, self.t.load(r2['id']), self.b.TEAM), '')   # 负责人收过了就开，不等第一轮评审
 
     def test_old_plan_keeps_old_rules(self):
         """升级前登记的老方案（没有 lead）照老规矩：往里补开发任务、派收口都行，一个任务一件事。"""
@@ -154,6 +160,7 @@ class Lead(TT.Base):
         self.assertEqual(self.pm("[方案] 旧\n任务:\n- 丙 | src/c |\n[/方案]\n" + block(self.e.repo, '甲', 'src/a', plan='旧') + block(self.e.repo, '收口', deps='甲', closing=True, plan='旧')), '')
         p = T.plan_of('proj', '旧'); self.assertNotIn('lead', p); self.assertEqual(p['items'], ['甲', '乙', '收口', '评审', '丙'])
         self.assertTrue(self.by('收口')['closing']); self.assertEqual(self.by('甲')['thing'], '旧·甲'); self.assertTrue(self.t.part(self.by('甲')))
+        self.assertIn('老规矩的方案（3.19 升级前登记的', self.b.team.board(self.t, 'proj'))   # 项目经理照看板认老方案，跟服务认的一样
 
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
@@ -172,8 +179,9 @@ class Craft(TT.Base):
 
     def test_visual_line_parsed(self):
         cf = self.t.craft_of
-        tpl = '什么画面（界面、图、动效、视频这类要看质感的活才写这一行；只改文字、逻辑的不写）'
-        self.assertEqual([cf(x) for x in ('', '不用', '否', '无', tpl, ' 首屏主视觉 ')], ['', '', '', '', '', '首屏主视觉'])
+        with open(A.APP / 'roles' / '项目经理.md', encoding='utf-8') as f: tpl = next(l for l in f if l.startswith('画面:')).split(':', 1)[1]   # 照抄模板那一行不算写了
+        old = '什么画面（界面、图、动效、视频这类要看质感的活才写这一行；只改文字、逻辑的不写）'   # 3.19 草稿里的模板，照抄的也不算
+        self.assertEqual([cf(x) for x in ('', '不用', '否', '无', tpl, old, ' 首屏主视觉 ')], ['', '', '', '', '', '', '首屏主视觉'])
 
     def test_dispatch_with_visual_line(self):
         b = block(self.e.repo, '主', 'src', plan='图').replace('角色: 开发\n', '角色: 开发\n画面: 首屏主视觉和动效\n')

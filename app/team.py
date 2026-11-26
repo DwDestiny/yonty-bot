@@ -197,7 +197,10 @@ def save_plan(project, name, body, tk=None, c=None):
             return (f"这个版本的负责人是“{lead}”{lt}：新需求点交给它，已经派出去的用 [任务指令] {lt or '短名#N'} 补（正文加一行 原因: 需求变），还没派的写进它的任务书。"
                     f"“{'、'.join(heads)[:120]}”要是检查或互不相干的块，第四栏写“检查：理由”或“独立：理由”再发")
         if not lead:
-            if not heads: return f"方案“{name}”没有负责人任务：任务单里写一个不带第四栏的任务，这个版本由它从头做到尾。{ONE_LEAD}"
+            if not heads:
+                rv = [i for i in items if is_review(i)]
+                return (f"方案“{name}”没有负责人任务：任务单里写一个不带第四栏的任务，这个版本由它从头做到尾"
+                        + (f"（标题带“评审”的都当成评审了：{'、'.join(rv)[:80]}；负责人的标题别带这两个字）" if rv else "") + f"。{ONE_LEAD}")
             if len(heads) > 1: return f"方案“{name}”有 {len(heads)} 个负责人任务（{'、'.join(heads)[:120]}）。{ONE_LEAD}"
             lead = heads[0]
         n = len([i for i in items if not is_review(i)])
@@ -432,4 +435,6 @@ def board(tk, project=None, limit=1800):
             out.append(f"· {tk.ref(t)} {tk.LABEL.get(t['status'], t['status'])} {t['title'][:30]}" + (f"（{why}）" if why else ""))
         for n, items in rest.items():
             if items: out.append(f"· 方案“{n}”还没派：{'、'.join(items)[:120]}")
+        old = [n for n, x in ((st.get("plans") or {}).get(p) or {}).items() if "lead" not in x and x.get("version") != ADHOC and not x.get("dropped") and plan_open(tk, p, n)]
+        if old: out.append(f"· 老规矩的方案（3.19 升级前登记的，照原来的办法收完，不用改成一个负责人）：{'、'.join(old)[:120]}")
     return "\n".join(out)[:limit]
