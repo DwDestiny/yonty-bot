@@ -203,6 +203,14 @@ class Lead(TT.Base):
         self.assertEqual(self.by('评审复核')['plan'], '修')
         self.assertIn('问项目经理用哪个版本号', self.t.plan_note(lead))
 
+    def test_release_goes_back_to_the_lead(self):
+        """一个负责人的版本没有单列的发版任务：另登同版本的发版方案，回执指向负责人，不再说写进任务单；单列进任务单也不收（3.19.4）。"""
+        lead, _, _ = self.go(); n = self.t.ref(lead)
+        r = self.pm("[方案] 推广发版\n版本: 2.0\n任务:\n- 发版 | |\n[/方案]\n", '[不回]')
+        self.assertIn(f'[任务指令] {n}', r); self.assertNotIn('写进它的任务单', r); self.assertEqual(self.plan('推广发版'), {})
+        r = self.pm("[方案] 推广\n任务:\n- 发版 | | 评审\n[/方案]\n", '[不回]')
+        self.assertIn(n, r); self.assertNotIn('发版', self.plan()['items'])
+
     def test_lead_is_sized_like_a_full_build(self):
         sp = importlib.util.spec_from_file_location('r_lead', A.APP / 'resources.py'); r = importlib.util.module_from_spec(sp); sp.loader.exec_module(r)
         c, hist = {'build_roles': ['开发'], 'default_build_gb': 4, 'default_light_gb': 1}, [{'id': 1, 'repo': 'x', 'role': '开发', 'mem_peak': 7 * r.GB}]
