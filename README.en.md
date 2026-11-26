@@ -90,17 +90,15 @@ Prepare an always-on machine (a Linux server is recommended), Claude Code and `l
 <details>
 <summary><b>Prerequisites</b>: machine, command-line tools, Feishu app, Node.js versions, optional parts</summary>
 
-| What | Notes |
-|---|---|
-| An always-on machine | A Linux server with systemd is recommended. To keep running after you log out, run `sudo loginctl enable-linger`. A Mac can work, but some features are missing, and it misses messages while the lid is closed |
-| Claude Code | Install and sign in as described in the [official guide](https://code.claude.com/docs/en/setup). The bot uses its account and quota. npm package 2.1.332 needs Node 22 or later |
-| `lark-cli` | The npm package [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli), needs Node 16 or later. Install it and sign in |
-| A Feishu custom app | Turn on the bot capability, add permissions, subscribe to events and publish a version. A person has to do all four in the console. See [docs/setup.md](docs/setup.md). It uses a long connection, so no public callback URL is needed |
-| Node.js | The three npm packages differ: `lark-cli` needs 16 or later, `wecom-cli` 18 or later, the Claude Code npm package 22 or later. If you install all three, use 22 or newer |
-| Python 3.9 or later, git | |
-| `gh` (optional) | Needed to open draft pull requests on GitHub |
-| bwrap (optional) | Needed for scheduled tasks with a limited read scope, and for ZCode tasks |
-| WeCom (optional) | `wecom-cli` 1.3.4 needs Node 18 or later. You scan a QR code to create a smart bot. One bot can have only one long connection. See [docs/wecom.md](docs/wecom.md) |
+- **An always-on machine:** A Linux server with systemd is recommended. To keep running after you log out, run `sudo loginctl enable-linger`. A Mac can work, but some features are missing, and it misses messages while the lid is closed.
+- **Claude Code:** Install and sign in as described in the [official guide](https://code.claude.com/docs/en/setup). The bot uses its account and quota. npm package 2.1.332 needs Node 22 or later.
+- **`lark-cli`:** The npm package [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli), needs Node 16 or later. Install it and sign in.
+- **A Feishu custom app:** Turn on the bot capability, add permissions, subscribe to events and publish a version. A person has to do all four in the console. See [docs/setup.md](docs/setup.md). It uses a long connection, so no public callback URL is needed.
+- **Node.js:** The three npm packages differ. `lark-cli` needs 16 or later, `wecom-cli` 18 or later, and the Claude Code npm package 22 or later. If you install all three, use 22 or newer.
+- **Python 3.9 or later, git**
+- **`gh` (optional):** Needed to open draft pull requests on GitHub.
+- **bwrap (optional):** Needed for scheduled tasks with a limited read scope, and for ZCode tasks.
+- **WeCom (optional):** `wecom-cli` 1.3.4 needs Node 18 or later. You scan a QR code to create a smart bot. One bot can have only one long connection. See [docs/wecom.md](docs/wecom.md).
 
 </details>
 
@@ -233,10 +231,8 @@ How jobs move and report back:
 <details>
 <summary><b>What the decision API sends, where it goes, and how to turn it off</b></summary>
 
-| Setting | What is sent |
-|---|---|
-| `points.ambient` (listen mode) | The names of the bot and the owner. For each message: the time (hour and minute), sender name, user ID and text, at most 400 characters per message. The first 3,000 characters of the listen section in the rules file. At most 20,000 characters per batch |
-| `points.task` (task dispatch; not in the template, add it yourself) | The task title and the full task brief, at most 20,000 characters. Sent only by the `jev` backend, and only for development jobs where the service picks the model. For a task a teammate gave, it is sent before you approve |
+- **`points.ambient` (listen mode):** The names of the bot and the owner. For each message: the time (hour and minute), sender name, user ID and text, at most 400 characters per message. The first 3,000 characters of the listen section in the rules file. At most 20,000 characters per batch.
+- **`points.task` (task dispatch; not in the template, add it yourself):** The task title and the full task brief, at most 20,000 characters. Sent only by the `jev` backend, and only for development jobs where the service picks the model. For a task a teammate gave, it is sent before you approve.
 
 - Secrets in message text and task briefs are replaced by pattern. Phone numbers, email addresses and IPs are sent as they are.
 - The `jev` backend sends to an external API, and this is the default. `openai` sends to the address you set. With `haiku`, listen-mode content is sent to Anthropic by the local `claude`. `rules` decides locally only.
@@ -274,20 +270,18 @@ This covers only projects whose README was read on 2026-11-25. A feature missing
 
 Most docs are in Chinese.
 
-| To do this | Read |
-|---|---|
-| Set it up step by step, run the acceptance checklist, operate it | [docs/guide.md](docs/guide.md) |
-| Install by hand, from zero to the first reply | [docs/quickstart.md](docs/quickstart.md) |
-| Set up the Feishu console | [docs/setup.md](docs/setup.md) |
-| Connect WeCom | [docs/wecom.md](docs/wecom.md) |
-| Learn how to ask, assign, approve and check progress, with a command table | [docs/usage.md](docs/usage.md) |
-| Understand background tasks, IDs, approval and the verify re-run | [docs/tasks.md](docs/tasks.md) |
-| Create scheduled tasks and set permission scopes | [docs/schedules.md](docs/schedules.md) |
-| Check identity, private content and permission boundaries | [docs/boundary.md](docs/boundary.md) |
-| Look up every setting | [docs/config.md](docs/config.md) |
-| Read the architecture and roadmap | [docs/architecture.md](docs/architecture.md) |
-| See how caching saves tokens and how to check it | [docs/cache.md](docs/cache.md) |
-| Look up a problem by symptom | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| Browse the index of all docs | [docs/README.md](docs/README.md) |
+- Set it up step by step, run the acceptance checklist, operate it: [docs/guide.md](docs/guide.md)
+- Install by hand, from zero to the first reply: [docs/quickstart.md](docs/quickstart.md)
+- Set up the Feishu console: [docs/setup.md](docs/setup.md)
+- Connect WeCom: [docs/wecom.md](docs/wecom.md)
+- Learn how to ask, assign, approve and check progress, with a command table: [docs/usage.md](docs/usage.md)
+- Understand background tasks, IDs, approval and the verify re-run: [docs/tasks.md](docs/tasks.md)
+- Create scheduled tasks and set permission scopes: [docs/schedules.md](docs/schedules.md)
+- Check identity, private content and permission boundaries: [docs/boundary.md](docs/boundary.md)
+- Look up every setting: [docs/config.md](docs/config.md)
+- Read the architecture and roadmap: [docs/architecture.md](docs/architecture.md)
+- See how caching saves tokens and how to check it: [docs/cache.md](docs/cache.md)
+- Look up a problem by symptom: [docs/troubleshooting.md](docs/troubleshooting.md)
+- Browse the index of all docs: [docs/README.md](docs/README.md)
 
 For contributing, see [CONTRIBUTING.md](CONTRIBUTING.md). For security problems, see [SECURITY.md](SECURITY.md). For changes between versions, see [CHANGELOG.md](CHANGELOG.md). License: [MIT](LICENSE).

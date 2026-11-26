@@ -88,17 +88,15 @@
 <details>
 <summary><b>前置清单</b>：机器、命令行工具、飞书应用、Node.js 版本、可选组件</summary>
 
-| 准备什么 | 说明 |
-|---|---|
-| 一台常开的机器 | 推荐有 systemd 的 Linux 服务器。退出登录后还要跑，需执行 `sudo loginctl enable-linger`。Mac 可以试，部分功能没有，合上盖子收不到消息 |
-| Claude Code | 照[官方说明](https://code.claude.com/docs/en/setup)装好并登录。机器人用它的账号和额度。npm 包 2.1.332 要求 Node 22 以上 |
-| `lark-cli` | npm 包 [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli)，要 Node 16 以上。装好并登录 |
-| 飞书自建应用 | 开机器人能力、加权限、订阅事件、发布版本，四项都要人在后台做，见 [docs/setup.md](docs/setup.md)。用长连接，不需要公网回调地址 |
-| Node.js | 三个 npm 包要求不同：`lark-cli` 16 以上，`wecom-cli` 18 以上，Claude Code 的 npm 包 22 以上。都装就直接用 22 或更新的 |
-| Python 3.9 以上、git | |
-| `gh`（可选） | 在 GitHub 上建草稿合并请求要用 |
-| bwrap（可选） | 限定了读取范围的定时任务、ZCode 任务要用 |
-| 企业微信（可选） | `wecom-cli` 1.3.4 要 Node 18 以上。扫码建智能机器人，同一个机器人只能有一条长连接，见 [docs/wecom.md](docs/wecom.md) |
+- **一台常开的机器**：推荐有 systemd 的 Linux 服务器。退出登录后还要跑，需执行 `sudo loginctl enable-linger`。Mac 可以试，部分功能没有，合上盖子收不到消息。
+- **Claude Code**：照[官方说明](https://code.claude.com/docs/en/setup)装好并登录。机器人用它的账号和额度。npm 包 2.1.332 要求 Node 22 以上。
+- **`lark-cli`**：npm 包 [`@larksuite/cli`](https://www.npmjs.com/package/@larksuite/cli)，要 Node 16 以上。装好并登录。
+- **飞书自建应用**：开机器人能力、加权限、订阅事件、发布版本，四项都要人在后台做，见 [docs/setup.md](docs/setup.md)。用长连接，不需要公网回调地址。
+- **Node.js**：三个 npm 包要求不同，`lark-cli` 16 以上，`wecom-cli` 18 以上，Claude Code 的 npm 包 22 以上。都装就直接用 22 或更新的。
+- **Python 3.9 以上、git**
+- **`gh`（可选）**：在 GitHub 上建草稿合并请求要用。
+- **bwrap（可选）**：限定了读取范围的定时任务、ZCode 任务要用。
+- **企业微信（可选）**：`wecom-cli` 1.3.4 要 Node 18 以上。扫码建智能机器人，同一个机器人只能有一条长连接，见 [docs/wecom.md](docs/wecom.md)。
 
 </details>
 
@@ -231,10 +229,8 @@
 <details>
 <summary><b>判断接口打开后发什么、发到哪里、怎么关</b></summary>
 
-| 配置 | 发什么 |
-|---|---|
-| `points.ambient`（旁听） | 机器人和主人的名字。每条消息的时分、发送人名字、用户 ID 和文字，单条最多 400 字。规则文件里旁听那一节的前 3000 字。整批最多 2 万字 |
-| `points.task`（派活，模板里没有，要自己加） | 任务标题和完整任务书，最多 2 万字。只有 `jev` 后端会发，只对服务自动定模型的开发活。同事派的，你批准之前就会发 |
+- **`points.ambient`（旁听）**：机器人和主人的名字。每条消息的时分、发送人名字、用户 ID 和文字，单条最多 400 字。规则文件里旁听那一节的前 3000 字。整批最多 2 万字。
+- **`points.task`（派活，模板里没有，要自己加）**：任务标题和完整任务书，最多 2 万字。只有 `jev` 后端会发，只对服务自动定模型的开发活。同事派的，你批准之前就会发。
 
 - 消息文字和任务书里的密钥按格式替换。手机号、邮箱、IP 原样发。
 - 后端选 `jev` 发给外部接口，这是默认值。选 `openai` 发给你填的地址，选 `haiku` 时旁听内容由本机 `claude` 发给 Anthropic，选 `rules` 只在本地判断。
@@ -270,20 +266,18 @@ Yonty Bot 是独立项目，与 Anthropic 无关。它是驱动本机官方命�
 
 ## 文档
 
-| 想做什么 | 看这篇 |
-|---|---|
-| 照着搭一个，逐条验收，日常运维 | [docs/guide.md](docs/guide.md) |
-| 手动安装，从零到第一条回复 | [docs/quickstart.md](docs/quickstart.md) |
-| 配飞书后台 | [docs/setup.md](docs/setup.md) |
-| 接企业微信 | [docs/wecom.md](docs/wecom.md) |
-| 学怎么问、派活、批准、看进度，查命令表 | [docs/usage.md](docs/usage.md) |
-| 了解后台任务、编号、审批、复跑验证 | [docs/tasks.md](docs/tasks.md) |
-| 建定时任务，设权限范围 | [docs/schedules.md](docs/schedules.md) |
-| 查身份、私密内容、权限边界 | [docs/boundary.md](docs/boundary.md) |
-| 查全部配置项 | [docs/config.md](docs/config.md) |
-| 看架构和路线 | [docs/architecture.md](docs/architecture.md) |
-| 看缓存怎么省 token、怎么验证 | [docs/cache.md](docs/cache.md) |
-| 按现象查问题 | [docs/troubleshooting.md](docs/troubleshooting.md) |
-| 看全部文档的索引 | [docs/README.md](docs/README.md) |
+- 照着搭一个，逐条验收，日常运维：[docs/guide.md](docs/guide.md)
+- 手动安装，从零到第一条回复：[docs/quickstart.md](docs/quickstart.md)
+- 配飞书后台：[docs/setup.md](docs/setup.md)
+- 接企业微信：[docs/wecom.md](docs/wecom.md)
+- 学怎么问、派活、批准、看进度，查命令表：[docs/usage.md](docs/usage.md)
+- 了解后台任务、编号、审批、复跑验证：[docs/tasks.md](docs/tasks.md)
+- 建定时任务，设权限范围：[docs/schedules.md](docs/schedules.md)
+- 查身份、私密内容、权限边界：[docs/boundary.md](docs/boundary.md)
+- 查全部配置项：[docs/config.md](docs/config.md)
+- 看架构和路线：[docs/architecture.md](docs/architecture.md)
+- 看缓存怎么省 token、怎么验证：[docs/cache.md](docs/cache.md)
+- 按现象查问题：[docs/troubleshooting.md](docs/troubleshooting.md)
+- 看全部文档的索引：[docs/README.md](docs/README.md)
 
 贡献见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题见 [SECURITY.md](SECURITY.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。许可：[MIT](LICENSE)。
