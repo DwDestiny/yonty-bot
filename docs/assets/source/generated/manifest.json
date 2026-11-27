@@ -1,0 +1,208 @@
+{
+  "note": "ref 是生成时用的参考图，指那张图转 WebP、裁切之前的 PNG 原图。gate.en 的参考图是挪过弯钩之后的 gate.zh。",
+  "images": [
+    {
+      "file": "hero/hero.zh.webp",
+      "sha256": "40beea8a4c36e2c0d4f1f33d787685dfb6bffd3713a72e67f29c6d00e4fd5936",
+      "bytes": 101634,
+      "pixels": [
+        1536,
+        820
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "gen",
+      "requested_size": "1536x1024",
+      "ref": null,
+      "prompt": "prompts/hero.zh.txt",
+      "date": "2026-11-26",
+      "after": [
+        "裁掉上下空白：1536×1024 裁成 1536×820",
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "hero/hero.en.webp",
+      "sha256": "2b170cda6417862a65a73b4cab6868f15b429a571de1ececba388dcac3f069ff",
+      "bytes": 92222,
+      "pixels": [
+        1536,
+        820
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "edit",
+      "requested_size": "1536x1024",
+      "ref": "hero/hero.zh.webp",
+      "prompt": "prompts/hero.en.txt",
+      "date": "2026-11-26",
+      "after": [
+        "裁掉上下空白：1536×1024 裁成 1536×820",
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/flow.zh.webp",
+      "sha256": "b0a6897223ca3b6e9615eaa887e87139baf1f7afa68f3de9800f6d560f4577d2",
+      "bytes": 163090,
+      "pixels": [
+        1024,
+        1536
+      ],
+      "model": "gpt-image-2.5",
+      "mode": "gen",
+      "requested_size": "1024x1536",
+      "ref": null,
+      "prompt": "prompts/flow.zh.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/flow.en.webp",
+      "sha256": "aca810807f6923638e5d217307a864e595411ee58f9f28acbd4559c84574fc62",
+      "bytes": 162048,
+      "pixels": [
+        1024,
+        1535
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "edit",
+      "requested_size": "1024x1536",
+      "ref": "diagrams/flow.zh.webp",
+      "prompt": "prompts/flow.en.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/layers.zh.webp",
+      "sha256": "e5ada66b2efc5ed9b6926353694c0901197dea7e13803dba16002810fdb023bb",
+      "bytes": 164170,
+      "pixels": [
+        1024,
+        1536
+      ],
+      "model": "gpt-image-2.5",
+      "mode": "gen",
+      "requested_size": "1024x1536",
+      "ref": null,
+      "prompt": "prompts/layers.zh.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/layers.en.webp",
+      "sha256": "ca2d1015310c0c894317a6192368f22933308ee3a6af4cc9806f53208207fd53",
+      "bytes": 159540,
+      "pixels": [
+        1024,
+        1535
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "edit",
+      "requested_size": "1024x1536",
+      "ref": "diagrams/layers.zh.webp",
+      "prompt": "prompts/layers.en.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/gate.zh.webp",
+      "sha256": "8ee59b638a7cad34c503bc87965f3717ab1ec74bfae526a73efba37f576e7591",
+      "bytes": 179302,
+      "pixels": [
+        1024,
+        1536
+      ],
+      "model": "gpt-image-2.5",
+      "mode": "gen",
+      "requested_size": "1024x1536",
+      "ref": null,
+      "prompt": "prompts/gate.zh.txt",
+      "date": "2026-11-26",
+      "after": [
+        "红虚线的弯钩原本连在“还是没过”上，挪到“没过”右侧，擦掉下面那段虚线",
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/gate.en.webp",
+      "sha256": "a68e1789ee027c4de4068cc916ab83089c4d263c495d7a7b2b9dc8ede9ff6d5a",
+      "bytes": 166152,
+      "pixels": [
+        1024,
+        1535
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "edit",
+      "requested_size": "1024x1536",
+      "ref": "diagrams/gate.zh.webp",
+      "prompt": "prompts/gate.en.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/boundary.zh.webp",
+      "sha256": "2f59cf2d70b4315f7f002142b6f88129e8186f068a021d7cb5acfcd6d510723b",
+      "bytes": 212586,
+      "pixels": [
+        1024,
+        1536
+      ],
+      "model": "gpt-image-2.5",
+      "mode": "gen",
+      "requested_size": "1024x1536",
+      "ref": null,
+      "prompt": "prompts/boundary.zh.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "diagrams/boundary.en.webp",
+      "sha256": "95e426520fe4c02cf78087583fe26f39fcc1e2886abfdd1d13236fb38b1417da",
+      "bytes": 190226,
+      "pixels": [
+        1024,
+        1535
+      ],
+      "model": "gpt-image-2.6",
+      "mode": "edit",
+      "requested_size": "1024x1536",
+      "ref": "diagrams/boundary.zh.webp",
+      "prompt": "prompts/boundary.en.txt",
+      "date": "2026-11-26",
+      "after": [
+        "转成 WebP，质量 90"
+      ]
+    },
+    {
+      "file": "hero/social-card.jpg",
+      "sha256": "91f2147ee0c47800e80588f0515f52e2611223540fe358ce77a6cc30e4dcfdda",
+      "bytes": 114372,
+      "pixels": [
+        1280,
+        640
+      ],
+      "model": null,
+      "mode": "derived",
+      "requested_size": null,
+      "ref": "hero/hero.en.webp",
+      "prompt": null,
+      "date": "2026-11-26",
+      "after": [
+        "英文主视觉的原图裁成 2:1（1536×768），缩到 1280×640",
+        "右上角加“Yonty Bot”，字体 Noto Sans CJK SC Bold",
+        "存成 JPEG，质量 88"
+      ]
+    }
+  ]
+}

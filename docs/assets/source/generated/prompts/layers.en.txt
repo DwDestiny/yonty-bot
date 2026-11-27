@@ -1,0 +1,12 @@
+Keep exactly the same infographic as the reference image: same layout, cards, icons, arrows, colors, lighting and style. Replace all Chinese text with this English text, in the same places, same hierarchy:
+Title: "Who does what".
+Card 1: "You and your teammates" / "In a group or a direct message".
+Arrows between card 1 and card 2: down "request", up "result".
+Card 2: "Coordinator · one per chat" / "Answers questions, makes few-minute edits" / "Remembers decisions, hands big jobs on".
+Arrows: down "handover", up "done / problem".
+Card 3: "Project manager · per project and chat" / "Plans each version, assigns one lead" / "Reviews; writes no code".
+Arrows: down "task", up "report / question".
+Dashed frame title: "Background tasks · each on its own branch". Small cards: "Lead" / "Does the whole version" / "Opens its own PR"; "Checks" / "Scans, installs" / "Kept separate"; "Review" / "Reads diffs" / "Only comments".
+Red text: "Red dashes: approvals, spending and direction come straight to you".
+Base slab: "The service is ordinary code, not a model" / "It handles identity, queueing, checks and stops".
+Spell every word exactly as written, for example "ordinary" and "own". No period at the end of any line. No Chinese text left anywhere. All text exactly as quoted. No other text, no logos, no watermark.

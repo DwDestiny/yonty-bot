@@ -1,0 +1,13 @@
+A tall infographic card, 1024x1536. Premium editorial infographic style. Warm cream paper background (#f4efe6) with very subtle paper grain. Charcoal text (#1c1a17). Soft matte 3D clay icons with rounded edges, made only of charcoal, cream and warm white (no yellow, no blue, no purple, no orange). Gentle studio light from the top left, soft contact shadows. Brick red (#d6382b) appears only where the prompt says red; sage green (#5f8f6b) only where it says green. No decorative marks or sparkles. Bold modern sans-serif typography, generous spacing, clear hierarchy, crisp text.
+Title at top, large bold, with a thin charcoal rule under it: "派活流程：从一句话到合并请求".
+Below, a vertical timeline on the left: a thick charcoal line linking clay number badges. Each row has the number badge, a small 3D clay icon, a bold title and one smaller grey line:
+Row 1, badge "1", icon a speech bubble with an at sign: "聊天里说一件事" / "你或者同事，在飞书、企业微信里说".
+Row 2, badge "2", icon a round desk console with a headset: "主控接话" / "小事当场回答；大活聊清楚，转给项目经理".
+Row 3, badge "3", icon a clipboard with a plan: "项目经理定版本" / "读代码、出方案，一个版本派一个负责人".
+Row 4, red badge "4", icon a red rubber stamp, title in red: "同事派的，等你批" / "你自己派的直接排队".
+Row 5, badge "5", icon a small workbench with a laptop and a branching line: "负责人在后台从头做到尾" / "调研、写、自测，在自己的分支上建草稿合并请求".
+Row 6, no number badge: a red bar across the timeline and a red barrier-gate icon, title in red: "服务复跑验证命令" / "没过就在后台退回给任务改，不往群里发". A dashed red curved arrow goes from this row back up to row 5.
+Row 7, badge "6", icon a magnifying glass over a sheet of paper: "评审" / "只读看改动；要改的退回同一个负责人".
+Row 8, badge "7", icon a green flag with a check mark: "PASS 交回，合并由你决定" / "项目经理验收，主控告诉你结果和要你定的事".
+Footer, small centered grey text on two lines: "同事的活，主控也能直接派成单个任务：同样等你批，" / "由那个任务自己建草稿合并请求，再复跑验证。"
+All text exactly as quoted, in Simplified Chinese except "PASS". No other text, no logos, no watermark.
