@@ -142,9 +142,13 @@ def _lark_post(args, text):
     if getattr(r, "returncode", 0) != 0:   # markdown 失败时退回纯文本
         args = ["--text" if a == "--markdown" else a for a in args]
         r = lark(args, stdin=text)
-        if getattr(r, "returncode", 0) != 0: return False
-    try: return json.loads(r.stdout)["data"]["message_id"]
-    except Exception: return None
+    where = next((args[i + 1] for i, a in enumerate(args[:-1]) if a in ("--message-id", "--chat-id", "--user-id")), "?")
+    if getattr(r, "returncode", 0) != 0:   # 发没发出去要在日志里一眼看到（2026-11-28：两次“没回”只能翻会话记录才分清）
+        log.warning("send to %s failed (%d chars): %s", where, len(text), ((r.stdout or "") + (r.stderr or ""))[-300:]); return False
+    try: mid = json.loads(r.stdout)["data"]["message_id"]
+    except Exception: mid = None
+    log.info("sent to %s -> %s (%d chars)", where, mid or "?", len(text))
+    return mid
 
 def session_key(ev):
     if ev.get("channel") == "wecom":   # 企微没有话题：私聊一人一个会话，群一个群一个会话
@@ -385,7 +389,7 @@ def stream_claude(cmd, prompt, env, on_extra=None):
     threading.Thread(target=lambda: err.extend(p.stderr), daemon=True).start()
     try: p.stdin.write(prompt); p.stdin.close()
     except OSError: pass
-    deadline, st = time.time() + CLAUDE_TIMEOUT, {"held": None, "last": None, "bg": 0}
+    deadline, st = time.time() + CLAUDE_TIMEOUT, {"held": None, "last": None, "bg": 0, "said": "", "hooked": []}
     tail = []
     def flush():   # 留着的那句发出去
         h, st["held"] = st["held"], None
@@ -411,16 +415,47 @@ def stream_claude(cmd, prompt, env, on_extra=None):
             elif o.get("type") == "system" and o.get("subtype") == "background_tasks_changed":
                 st["bg"] = len(o.get("tasks") or [])
             elif o.get("type") == "result":
-                flush(); st["held"] = st["last"] = o
+                flush(); st["held"] = st["last"] = with_hooked(o, st["hooked"]); st["said"], st["hooked"] = "", []
                 if st["bg"]: flush()          # 后台还有活：这句先发，不等后台跑完
-            elif st["held"] is not None and o.get("type") == "assistant":
-                flush()                        # 又开了一轮：上一个结果不是最后一个
+            elif hook_stop(o):                 # Stop 钩子拦下了收尾：拦下前写的那段就是它要说的话，不能被后面的收尾盖掉
+                if st["said"].strip(): st["hooked"].append(st["said"])
+                st["said"] = ""
+            elif o.get("type") == "assistant":
+                said = said_text(o)
+                if said: st["said"] = said
+                if st["held"] is not None: flush()   # 又开了一轮：上一个结果不是最后一个
         rc = p.wait()
     finally:
         ungrant(p.pid)
         with lock: inflight -= 1
     h = st["held"]
     return st["last"], (h.get("result") or "") if h else "", rc, "".join(tail) + "".join(err)[-1500:]
+
+def said_text(o):
+    """一条 assistant 消息里写给人的文字。"""
+    c = (o.get("message") or {}).get("content")
+    return "\n".join(x.get("text") or "" for x in c if isinstance(x, dict) and x.get("type") == "text").strip() if isinstance(c, list) else ""
+
+def hook_stop(o):
+    """流里 Stop 钩子拦下收尾的那条：Claude Code 合成的 user 消息，正文以 Stop hook feedback 开头（2.x 实测）。"""
+    if o.get("type") != "user" or not o.get("isSynthetic"): return False
+    c = (o.get("message") or {}).get("content")
+    first = c[0] if isinstance(c, list) and c else {}
+    return isinstance(first, dict) and first.get("type") == "text" and (first.get("text") or "").startswith("Stop hook feedback")
+
+def _flat(s):
+    return re.sub(r"\s+", "", s or "")
+
+def with_hooked(o, hooked):
+    """这一轮的结果并上被钩子拦下前写的话（2026-11-27：答案写完被 wiki 提醒拦下，收尾成了 [不回]，答案没发出去）。
+    后面的收尾里已经重说了的不重复；收尾是 [不回] 或空的，就只发拦下前那段。"""
+    if not hooked or o.get("is_error"): return o
+    final = (o.get("result") or "").strip()
+    keep = [h for h in hooked if _flat(h) not in _flat(final)]
+    if not keep: return o
+    log.info("result carries %d message(s) written before a stop hook", len(keep))
+    tail = [] if not final or team.SILENT.match(final) else [final]
+    return dict(o, result="\n\n".join(keep + tail))
 
 def prime(sid):
     """新会话先发固定开场白：会话开头的上下文（CLAUDE.md、skill 清单等）跟着固定内容进缓存，下一个新会话直接命中。"""
