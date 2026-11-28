@@ -135,6 +135,7 @@ class Inst:
         test.addCleanup(self.restore)
         self.env.update({k: v for k, v in patch.items()})
         self.sent, self.enq, self.streams, self.launched, self.n_out, self.out_ids = [], [], [], [], 0, {}
+        self.old_style = False
         self.respond = lambda prompt, env, cmd: '收到'
         self.start()
 
@@ -166,8 +167,9 @@ class Inst:
 
         def stream(cmd, prompt, env, on_extra=None):
             self.streams.append({'cmd': list(cmd), 'prompt': prompt, 'env': {k: v for k, v in env.items() if k.startswith('FCB')}})
-            text = self.respond(prompt, env, cmd)
+            text = self.do_marks(self.respond(prompt, env, cmd), env)
             return {'result': text, 'session_id': 's-' + uuid.uuid4().hex[:6], 'usage': {}, 'total_cost_usd': 0}, text, 0, ''
+        self.real_stream = b.stream_claude   # 端到端测试要用真的读流
         b.stream_claude = stream
 
         def launch(tid):
@@ -178,6 +180,17 @@ class Inst:
         self.real_launch = None
 
     # ---- 辅助 ----
+    def do_marks(self, text, env):
+        """假模型按 3.21 的规矩办事：回复里从第一个标记行起的部分改用 tasks.py do 交，回复只留前面给人的话。
+        old_style=True 时照旧写在回复里（测老会话的退回）。"""
+        box = self.b.BOXES.get(env.get('FCB_BOX'))
+        if self.old_style or not box or not text: return text
+        lines = text.split('\n'); code = self.b.team.fenced(lines)
+        i = next((i for i, l in enumerate(lines) if i not in code and self.b.reply_marks(l)), None)
+        if i is None: return text
+        box['blocks'].append('\n'.join(lines[i:]).strip())
+        return '\n'.join(lines[:i]).strip()
+
     def ev(self, text, sender=OWNER, chat='oc_p', chat_type='p2p', channel='feishu'):
         return {'channel': channel, 'sender_id': sender, 'sender_type': 'user', 'chat_id': chat, 'chat_type': chat_type,
                 'content': text, 'message_id': 'om_' + uuid.uuid4().hex[:8], 'create_time': str(int(time.time() * 1000)),

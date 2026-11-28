@@ -125,9 +125,9 @@ class FilesTest(unittest.TestCase):
 
 class RulesTemplateTest(unittest.TestCase):
     def test_base_rules_teach_controller_markers(self):
-        """15.1、10.2：守则 base.md 加主控的写法 [转交] [转给] [翻篇] [定时]、放行、依赖。"""
+        """15.1、10.2：守则 base.md 加主控的写法 [转交] [定时]、放行、依赖。[转给]、[翻篇] 从没实现过，3.21 删了。"""
         base = read(APP / 'rules' / 'base.md')
-        for w in ('[转交]', '[转给]', '[翻篇]', '[定时]', '放行', '依赖'):
+        for w in ('[转交]', '[定时]', '放行', '依赖', 'tasks.py do'):
             self.assertIn(w, base, f'守则缺 {w}')
 
     def test_rules_do_not_carry_task_side_protocol(self):
@@ -264,7 +264,7 @@ class ScaffoldProductsTest(unittest.TestCase):
         """10.2：生成的 rules.md 里有主控的新写法，没有任务侧协议。"""
         rules = read(self.inst / 'rules.md')
         self.assertNotIn('{{', rules)
-        for w in ('[转交]', '[转给]', '[定时]'):
+        for w in ('[转交]', '[定时]', 'tasks.py do'):
             self.assertIn(w, rules)
         self.assertNotIn('[下次]', rules)
 

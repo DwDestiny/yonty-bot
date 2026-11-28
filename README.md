@@ -1,6 +1,6 @@
 # Yonty Bot
 
-> 3.19.10 · 2026-11-26 · MIT · 中文 | [English](README.en.md)
+> 3.21.0 · 2026-11-28 · MIT · 中文 | [English](README.en.md)
 
 **在飞书、企业微信群里给 Claude Code 派活。** 一件事交给一个负责人，在后台的独立分支上做完。服务复跑你定的验证命令，过了才报 PASS。
 

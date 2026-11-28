@@ -3,7 +3,7 @@
 
 Input:  同目录 config.json；飞书：lark-cli event consume im.message.receive_v1 --as bot 的 NDJSON 事件流；
         企微：wecom_gateway.mjs（官方 SDK 长连接）的 NDJSON 事件流
-Output: 用机器人身份回复原消息；会话映射 state/sessions.json；日志 logs/bridge.log
+Output: 用机器人身份回复原消息；会话映射 state/sessions.json；这一轮用 tasks.py do 交来的标记块 state/turn_marks/；日志 logs/bridge.log
 Pos:    实例目录里唯一的服务进程，由 systemd 用户服务或 launchd 常驻
 结构:   每个渠道一个收消息线程（各自断线重连，互不影响）-> dispatch（统一的事件格式）-> 按会话排队 -> run_claude
         -> 按 ev["channel"] 调对应渠道的回复函数。所有渠道共用同一套 Claude 参数、守则和开场白，缓存前缀跨渠道共享；
@@ -296,6 +296,118 @@ def ungrant(pid):
 
 tasks.ON_LAUNCH = lambda pid, tid: grant(pid, {"task": tid})
 
+# ---------- tasks.py do：办事的标记块不写进回复，交给服务（3.21） ----------
+# 回复只写给人的话，原样发出；块在这一轮收尾时拼到回复后面，交给原来的管线执行（闸门、退回重写、去重都不变），
+# 回复就不会再被块吞掉（2026-11-28：[转交] 把后面给主人的话当成了备注）。
+# 只收主代理自己发起的调用：流里先看到它的 Bash tool_use（parent_tool_use_id 为空、命令里有 tasks.py do），套接字才收一次。
+# 子代理、后台进程、任务进程交不进来。收下的块按这一轮的 idem 落盘，额度用完、重启后重跑同一轮时还在。
+BOXES, BOX_LOCK = {}, threading.Lock()
+BOX_DIR = os.path.join(STATE, "turn_marks")
+BOX_WAIT = 5.0
+DO_CMD = re.compile(r"(^|[\s/;&|(])tasks\.py\s+do\b")
+NOT_MINE = re.compile(r"^\s*\[不是我的\]", re.M)   # 项目经理退回这条消息：照旧写在回复第一行，服务按开头认
+BOX_TTL, BOX_SWEPT = 86400, [0.0]
+
+def _box_file(idem):
+    return os.path.join(BOX_DIR, hashlib.sha1(idem.encode()).hexdigest()[:20] + ".json") if idem else None
+
+def box_open(key, idem):
+    """开这一轮的收件格。同一个 idem 重跑时带上上次收下、还没执行的块。"""
+    box_sweep()
+    tok, f = uuid.uuid4().hex, _box_file(idem)
+    old = load(f, {}).get("blocks") or [] if f else []
+    with BOX_LOCK: BOXES[tok] = {"key": key, "idem": idem, "blocks": list(old), "expect": 0}
+    return tok
+
+def box_sweep(now=None):
+    """落盘一天还没执行的块（超时、投递重送放弃的那一轮）：删掉，记一条决策日志。一小时最多扫一次。"""
+    now = now or time.time()
+    if now - BOX_SWEPT[0] < 3600: return
+    BOX_SWEPT[0] = now
+    try: names = os.listdir(BOX_DIR)
+    except FileNotFoundError: return
+    for n in names:
+        p = os.path.join(BOX_DIR, n)
+        try:
+            if now - os.path.getmtime(p) < BOX_TTL: continue
+            d = load(p, {}); os.unlink(p)
+            tasks.decide("标记块过期", session=d.get("key", ""), why=f"交了一天没执行，丢掉 {len(d.get('blocks') or [])} 块", text="；".join(d.get("blocks") or [])[:300])
+        except OSError: pass
+
+def box_expect(tok, o):
+    """流里主代理的一条 assistant 消息：数一数里面有几个 tasks.py do 的 Bash 调用。"""
+    if not tok or o.get("parent_tool_use_id"): return
+    c = (o.get("message") or {}).get("content")
+    n = sum(1 for x in c if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("name") == "Bash"
+            and DO_CMD.search(str((x.get("input") or {}).get("command") or ""))) if isinstance(c, list) else 0
+    if n:
+        with BOX_LOCK:
+            if tok in BOXES: BOXES[tok]["expect"] += n
+
+def box_take(tok):
+    """收尾：取出这一轮收下的块，删掉落盘的那份。"""
+    with BOX_LOCK: b = BOXES.pop(tok, None)
+    if not b: return []
+    f = _box_file(b["idem"])
+    if f:
+        try: os.unlink(f)
+        except FileNotFoundError: pass
+    return b["blocks"]
+
+def box_of(pid):
+    """来访进程属于哪一轮：沿父进程找 bridge 起的那个 claude 的登记。"""
+    for a in [pid] + tasks._ancestors(pid):
+        with GRANTS_LOCK: g = GRANTS.get(a)
+        st = tasks._stat(a) if g else []
+        if g and len(st) > 19 and st[19] == g[0]: return g[1].get("box")
+    return None
+
+def box_put(pid, text):
+    """套接字收到 tasks.py do 的输入。返回 (成没成, 给模型看的话)。"""
+    tok = box_of(pid) if pid else None
+    if not tok: return False, "认不出是哪一轮：tasks.py do 只在聊天、项目经理、投递、任务回报这几种会话里用。"
+    text = (text or "").strip()
+    if not text: return False, "输入是空的：把标记块从标准输入交进来（tasks.py do <<'EOF' … EOF）。"
+    if SVC_LINE.search(text): return False, "[服务命令] 不走这里，照旧单独一行写在回复里。"
+    if NOT_MINE.search(text): return False, "[不是我的] 不走这里，照旧写在回复第一行。"
+    with BOX_LOCK: amb = (BOXES.get(tok) or {}).get("key", "").startswith("amb:")
+    if amb: return False, "旁听这一轮不办事，只决定插不插话。"
+    if not any(team.END.match(l) for l in text.split("\n")): return False, "输入里没有标记块（[转交]、[派活]、[任务指令] 这些）。给人的话直接写在回复里。"
+    for _ in range(max(1, int(BOX_WAIT * 10))):   # 流里的 tool_use 比命令真跑起来早一点（实测约 0.7 秒）；读流的线程可能还没读到，等一会儿
+        with BOX_LOCK:
+            b = BOXES.get(tok)
+            if not b: return False, "这一轮已经收尾了，没收下。"
+            if b["expect"] > 0:
+                b["expect"] -= 1
+                if text in b["blocks"]: return True, "这几块已经收下过了，不再收一遍。"   # 同一轮重跑时又交了一次
+                b["blocks"].append(text)
+                f, data = _box_file(b["idem"]), {"key": b["key"], "blocks": list(b["blocks"])}
+                break
+        time.sleep(0.1)
+    else: return False, "没收下：只收主会话自己用 Bash 跑的 tasks.py do，子代理、后台命令交不进来。"
+    if f: os.makedirs(BOX_DIR, exist_ok=True); save(f, data)
+    return True, "收下了。这一轮你写完回复后服务执行；没办成会退回给你，那时再用 tasks.py do 交改好的块。回复里不要再写这些块，也不要先说已经办成。"
+
+def with_blocks(text, blocks):
+    """回复拼上收下的块：有话时话在前、块在后，块吞不到话；没话（空或 [不回]）时块在前、[不回] 收尾。"""
+    if not blocks: return text
+    body = "\n\n".join(blocks)
+    if text is None or not text.strip() or team.SILENT.match(text.strip()): return body + "\n[不回]"
+    if text.strip().startswith("[不回]"): return body + "\n" + text.strip()   # [不回] 开头又写了几句：照静默拼
+    return text.rstrip() + "\n\n" + body
+
+def reply_marks(text):
+    """回复里还写着的标记行（代码块里的不算，[不回]、收尾行不算）：老会话照旧把标记写进回复时用。"""
+    lines = (text or "").split("\n")
+    code = team.fenced(lines)
+    out = []
+    for i, l in enumerate(lines):
+        if i in code or team.SILENT.match(l) or NOT_MINE.match(l) or re.match(r"^\s*\[/", l): continue
+        m = team.END.match(l) or re.match(r"^\s*\[(投递[^\]]*|定时|派活)\]", l)
+        if m: out.append(l.strip()[:40])
+    return out
+
+
 def ident_of(pid):
     """来访进程是谁：本实例的任务单元按 MainPID 加 InvocationID 认；否则沿父进程在登记表里找。都没有返回 None，不看环境变量。
     只用来署名、找收件箱，不带主人身份：命令行来的请求谁都可能想办法混进来，主人权限只给 IM 消息和服务自己从 runner 输出里解析的。"""
@@ -326,7 +438,7 @@ def use_handover(me, to):
     """主控这一轮能 [转交]，却用命令行给同一个项目经理留言：留言轮派不了活、不能给任务下指令，流程会断在那里。不收，让它改写。"""
     p = FOLLOW_NOW.get(me.get("key")) if me.get("type") == "ctrl" else None
     if not p or not to.strip().startswith("项目经理") or (to.split()[1:] and to.split()[1] != p): return ""
-    return f"没送。命令行留言叫起来的那一轮，{p} 的项目经理派不了活、也不能给任务下指令。把这段话写进你的回复：单独一行 [转交] {p}，下一行起写内容。"
+    return f"没送。命令行留言叫起来的那一轮，{p} 的项目经理派不了活、也不能给任务下指令。把这段话用 tasks.py do 交：第一行 [转交] {p}，下一行起写内容。"
 
 def ident_serve(conn):
     try:
@@ -339,6 +451,9 @@ def ident_serve(conn):
         req = json.loads(buf.decode() or "{}")
         me = ident_of(pid) if pid else None
         if req.get("op") == "whoami": out = {"sender": me}
+        elif req.get("op") == "do":
+            ok, msg = box_put(pid, str(req.get("text") or ""))
+            out = {"ok": msg} if ok else {"err": msg}
         elif req.get("op") == "send":
             if not me: out = {"err": "认不出调用方：命令行只在任务或聊天会话里用，环境变量不算数。"}
             else:
@@ -379,11 +494,12 @@ def stream_claude(cmd, prompt, env, on_extra=None):
     一轮里每出一个结果：后面还有后台任务没跑完，就马上交给 on_extra 发出去，不等这一轮结束；
     否则先留着，后面又有动静再发，到结束都没有就作为返回值（已经发过的不再返回）。超时杀掉进程，抛 TimeoutExpired。"""
     global inflight
+    env = dict(env); box = env.pop("FCB_BOX", None)   # 这一轮的收件格（tasks.py do），不传给子进程
     p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          cwd=WORKDIR, env=env)
     # 命令行（tasks.py send/act）问 bridge 认出是哪个会话（不带主人身份）：登记只在本进程内存里，环境变量、文件都不算数
     grant(p.pid, {"key": env.get("FCB_SESSION_KEY", ""), "hop": int(env.get("FCB_HOP") or 0),
-                              "layer": env.get("FCB_LAYER", ""), "project": env.get("FCB_PROJECT", "")})
+                              "layer": env.get("FCB_LAYER", ""), "project": env.get("FCB_PROJECT", ""), "box": box})
     q, err = queue.Queue(), []
     threading.Thread(target=lambda: [q.put(l) for l in p.stdout] + [q.put(None)], daemon=True).start()
     threading.Thread(target=lambda: err.extend(p.stderr), daemon=True).start()
@@ -421,7 +537,8 @@ def stream_claude(cmd, prompt, env, on_extra=None):
                 if st["said"].strip(): st["hooked"].append(st["said"])
                 st["said"] = ""
             elif o.get("type") == "assistant":
-                said = said_text(o)
+                said = "" if o.get("parent_tool_use_id") else said_text(o)   # 子代理的话不算主控说的
+                box_expect(box, o)
                 if said: st["said"] = said
                 if st["held"] is not None: flush()   # 又开了一轮：上一个结果不是最后一个
         rc = p.wait()
@@ -451,7 +568,7 @@ def with_hooked(o, hooked):
     后面的收尾里已经重说了的不重复；收尾是 [不回] 或空的，就只发拦下前那段。"""
     if not hooked or o.get("is_error"): return o
     final = (o.get("result") or "").strip()
-    keep = [h for h in hooked if _flat(h) not in _flat(final)]
+    keep = [h for h in hooked if not team.SILENT.match(h) and _flat(h) not in _flat(final)]
     if not keep: return o
     log.info("result carries %d message(s) written before a stop hook", len(keep))
     tail = [] if not final or team.SILENT.match(final) else [final]
@@ -537,7 +654,31 @@ def service_marks(text):
     """(去掉 [服务命令] 行的文字, [命令])。"""
     return SVC_LINE.sub("", text or "").strip() if SVC_LINE.search(text or "") else text, SVC_LINE.findall(text or "")
 
+MARKS_NUDGE = ("[服务回执] 这一条还没发出去：回复里写了标记行（{}）。标记块不再写进回复，用 Bash 交给服务："
+               "cd " + ROOT + " && python3 tasks.py do <<'EOF'（下一行起照原格式写块，最后一行写 EOF）。回复只写给人的话，会原样发出。"
+               "前面已经用 tasks.py do 交过的不要再交。重写整条回复。")
+
 def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0, idem=None):
+    """跑一轮，返回回复；这一轮用 tasks.py do 交来的标记块拼在回复后面，调用方照原来的管线执行。"""
+    tok = None if key.startswith("amb:") else box_open(key, idem)   # 旁听只决定插不插话，不办事
+    try:
+        text = _run_claude(key, s, prompt, owner, private, chat_id, quiet, on_extra, layer, hop, idem, tok)
+        bad = reply_marks(text) if text and not key.startswith("amb:") else []
+        if bad:   # 老会话照旧把标记写进回复：退回一次改用命令；还写，就照老路执行，不丢
+            tasks.decide("回执退回", session=key, why="回复里写了标记行：" + "、".join(bad)[:200])
+            try: again = run_claude_once(key, s, MARKS_NUDGE.format("、".join(bad[:3])), owner, private, chat_id, True, None, layer, hop, box=tok)
+            except QuotaOut: raise
+            except Exception: log.exception("marks nudge failed"); again = None   # 退回那一轮没成：照老路执行原来的回复
+            if again is not None: text = again
+    except BaseException:
+        with BOX_LOCK: BOXES.pop(tok, None)   # 落盘的留着：同一轮重跑时带上
+        raise
+    if text is None:
+        with BOX_LOCK: BOXES.pop(tok, None)
+        return None
+    return with_blocks(text, box_take(tok))
+
+def _run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0, idem=None, box=None):
     """跑一轮聊天会话，返回最后一个结果。这一轮中途的结果（起了后台任务时）交给 on_extra。
     回复里的 [服务命令] 只在主人私聊那一轮生效：服务执行，结果接着喂给同一个会话（最多两次），几段回复合在一起返回。
     idem：这一轮的幂等键（消息、投递、任务回报），同一轮重跑时 [服务命令] act 不执行第二次。"""
@@ -545,7 +686,7 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
     def extra(x):
         x, c = service_marks(x); svc.extend(c)
         if out and x.strip(): out(x)
-    text = run_claude_once(key, s, prompt, owner, private, chat_id, quiet, extra if on_extra else None, layer, hop)
+    text = run_claude_once(key, s, prompt, owner, private, chat_id, quiet, extra if on_extra else None, layer, hop, box=box)
     parts = []
     for i in range(3):
         head, c = service_marks(text); svc.extend(c)
@@ -560,7 +701,7 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
         parts.append(head)
         try:
             text = run_claude_once(key, s, f"[服务命令结果]\n{res}\n\n（接着回。前面写过的话已经留着，会跟这一段拼在一起发出去，别重复。）",
-                                   owner, private, chat_id, True, extra if on_extra else None, layer, hop)
+                                   owner, private, chat_id, True, extra if on_extra else None, layer, hop, box=box)
         except QuotaOut: text = None
         except Exception as e:
             log.exception("service command follow-up failed"); text = None
@@ -569,7 +710,7 @@ def run_claude(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=No
         if text is None: return "\n\n".join(x for x in parts + [res] if (x or "").strip())   # 接着跑没成：结果原样给人，不丢
         service_told(used)
 
-def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0):
+def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, layer=None, hop=0, box=None):
     if any(x[2] for x in tasks.quota_over()): raise QuotaOut()
     with lock: sid, started = s["id"], s["started"]
     if not started and PRIME_ON:
@@ -584,6 +725,7 @@ def run_claude_once(key, s, prompt, owner, private, chat_id, quiet=False, on_ext
     env["FCB_HOP"] = str(hop or 0)  # 这一轮是被第几跳的投递叫起来的：人发的消息是 0，tasks.py send 在它上面加一
     if layer: env.update(FCB_LAYER="pm", FCB_PROJECT=layer)   # 项目经理：参数和聊天会话逐项相同，只按环境变量由钩子拦写文件
     if CHAT_MAX_TURNS: cmd += ["--max-turns", str(CHAT_MAX_TURNS)]
+    if box: env["FCB_BOX"] = box
     out, text, rc, tail = stream_claude(cmd, prompt, env, on_extra)
     log.info("claude %s rc=%s %.0fs", key, rc, time.time() - t0)
     if STOPPING.is_set() and (not out or rc):   # 服务在停，Claude 被一起停了：不当成失败、不丢会话，重启后接着做
@@ -761,7 +903,7 @@ def with_retry(ev, key, result, redo, pm=None, follow=True):
         if i < 2:
             try: again = redo("[服务回执] 你上一条回复没发出去。\n没成的：\n" + "\n".join("- " + x for x in errs)
                               + ("\n已经办成的（不要再写）：\n" + "\n".join("- " + x for x in done) if done else "")
-                              + "\n改好没成的标记块，重写整条回复；[任务指令]、[停]、[继续]、[定时] 还没执行，要的照写。没法办就照实说没办成。")
+                              + "\n没成的块改好后用 tasks.py do 重新交，再重写整条回复；[任务指令]、[停]、[继续]、[定时] 还没执行，要的也重新交。没法办就照实说没办成。")
             except Exception: log.exception("receipt redo failed")
         if again is None:
             result = (result + "\n\n" + "\n".join(f"（{x}。）" for x in errs)).strip(); break
@@ -2162,17 +2304,17 @@ def _delivery_turn(ev):
     hop = max(r.get("hop") or 0 for r in batch)
     go_on = None if pm else follow_src(batch, t)
     fol = bool(pm and all(r.get("follow") and tasks.dl.follows(r) and r["from"].get("type") == "ctrl" and r["to"].get("project") == pm and follow_ok(r.get("src_im")) for r in batch))
-    if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活、给已有任务追加要求：回复里单独一行 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
+    if go_on: tip = f"\n（办完要 {fr['project']} 的项目经理接着派方案里的活、给已有任务追加要求：用 tasks.py do 交 [转交] {fr['project']}，下一行起写办成的结果；tasks.py send 给它的只是留言，它派不了活）"
     else: tip = ""
     prompt = (pm_head(pm, key, s) if pm else "") + "\n\n".join(
         f"[投递 来自 {r['from'].get('label', r['from'].get('ref'))} · {r['kind']}{' · 要回复' if r.get('need') else ''}]\n{r['text']}"
         for r in batch) + (f"\n（你的回复会发到 {tasks.ref(t)} 派活的那个聊天；完成、失败要对派活人汇报）" if t and rec["kind"] in ("完成", "问题") else "") \
-        + (f"\n（要给 {fr.get('ref')} 下指令就在回复里写 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
+        + (f"\n（要给 {fr.get('ref')} 下指令就用 tasks.py do 交 [任务指令] {fr.get('ref')} 内容；tasks.py send 发给任务的只算留言。不用回就只输出 [不回]）"
            if fr.get("task") else f"\n（你的回复会发给{fr.get('label')}；还要问主人就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）"
-           if im else f"\n（你的回复会发给{OWNER_NAME}，用你自己的话说清楚；要项目经理接着办就写 [转交] {fr.get('project')}；没有要说的只输出 [不回]）"
+           if im else f"\n（你的回复会发给{OWNER_NAME}，用你自己的话说清楚；要项目经理接着办就用 tasks.py do 交 [转交] {fr.get('project')}；没有要说的只输出 [不回]）"
            if rec.get("src_im") and not pm else f"\n（要回它就用 tasks.py send --to {reply_target(fr)} …；不用回就只输出 [不回]）") + tip
     if fol:
-        prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务；也可以用 [任务指令] 让这些任务补做，不加预算、不改验收。新任务、改预算、正式发布要{OWNER_NAME}点头：写 [投递 主控 问题]。）"
+        prompt += f"\n（这一轮可以接着派活，只限{OWNER_NAME}交代过的方案里列明的任务；也可以用 tasks.py do 交 [任务指令] 让这些任务补做，不加预算、不改验收。新任务、改预算、正式发布要{OWNER_NAME}点头：用 tasks.py do 交 [投递 主控 问题]。）"
     if go_on: FOLLOW_NOW[key] = fr["project"]
     try:
         with sem: result = run_claude(key, s, prompt, o_owner, o_priv, chat_id, quiet=True, layer=pm, hop=hop, idem=f"dl{rec['id']}-{int(rec['ts'])}")
@@ -2283,7 +2425,7 @@ def stray_handover(result, redo):
         tasks.decide("回执退回", why=f"这一轮的 [转交] {names} 没人执行")
         again = None
         if not i:
-            try: again = redo(f"[服务回执] 你上一条回复没发出去：这一轮不能 [转交]（{names}）。重写整条回复，不写 [转交]，不要说已经转了；要项目经理接着办，请{OWNER_NAME}说一声“继续”。")
+            try: again = redo(f"[服务回执] 你上一条回复没发出去：这一轮不能 [转交]（{names}）。重写整条回复，不交 [转交]，不要说已经转了；要项目经理接着办，请{OWNER_NAME}说一声“继续”。")
             except Exception: log.exception("receipt redo failed")
         if again is None: return f"{rest}\n\n（转交 {names} 没成，流程停在这里。要接着就说“继续”。）".strip()
         result = again
@@ -2306,9 +2448,9 @@ def unrunnable(pm, key, hop, result, redo, idem, ev=None):
         again = None
         if i < 2:
             try: again = redo(f"[服务回执] 你上一条回复没发出去。没成的：{'；'.join(bad)}。" + (f"已经办成的（不要再写）：{'；'.join(done)}。" if done else "")
-                              + f"\n这一轮只能派{OWNER_NAME}交代过的方案里列明的任务、给{OWNER_NAME}派过的方案任务追加指令。重写整条回复：改好没成的，改不了就去掉，写 [投递 主控 问题] 请{OWNER_NAME}点头，不要说已经派了。" if ev else
+                              + f"\n这一轮只能派{OWNER_NAME}交代过的方案里列明的任务、给{OWNER_NAME}派过的方案任务追加指令。重写整条回复：没成的改好后用 tasks.py do 重新交，改不了就不交，用 tasks.py do 交 [投递 主控 问题] 请{OWNER_NAME}点头，不要说已经派了。" if ev else
                               f"[服务回执] 你上一条回复没生效，一条都没发出去，也没登记。\n{'、'.join(bad)} 在这一轮执行不了：这一轮是留言叫起来的，不带派活人的身份。\n"
-                              f"重写整条回复，不写这些标记，也不要说已经派了。要接着派活，写 [投递 主控 问题]，说清要派哪几条，请主控告诉{OWNER_NAME}；{OWNER_NAME}说继续，主控会 [转交] 给你，那一轮再派。[方案]、[看板]、[交接] 照写。")
+                              f"重写整条回复，不交这些标记，也不要说已经派了。要接着派活，用 tasks.py do 交 [投递 主控 问题]，说清要派哪几条，请主控告诉{OWNER_NAME}；{OWNER_NAME}说继续，主控会 [转交] 给你，那一轮再派。[方案]、[看板]、[交接] 照样用 tasks.py do 交。")
             except Exception: log.exception("receipt redo failed")
         if again is None: break
         result = again
@@ -2963,7 +3105,7 @@ def relay_prompt(t, e, briefed=False, tail="--- 按守则“任务回报”一�
     state = {"done": "完成", "question": "有提问，等回复", "failed": "失败", "lost": "中断（后台进程没了）",
              "overdue": "超时，还在跑，等你处置", "overdue2": "超时，还在跑，项目经理没处置，等你处置", "blocked": "排队，上游没成", "nudge": "要你处理"}[e["kind"]]
     if e["kind"] in OVERDUE:
-        tail = ("--- 先查再定：看输出、看进程在不在动、跟上次比慢在哪，别凭感觉。然后单独一行写一个标记：\n"
+        tail = ("--- 先查再定：看输出、看进程在不在动、跟上次比慢在哪，别凭感觉。然后用 tasks.py do 交一个标记：\n"
                 f"[处置] {tasks.ref(t)} 继续等 30（还在正常跑，给多少分钟）\n[处置] {tasks.ref(t)} 重跑（卡死、环境问题，停掉重来）\n[处置] {tasks.ref(t)} 按失败收 理由\n"
                 f"命令本身不对就写 [改验证] {tasks.ref(t)} 新命令，下一行 理由：…；整个任务不该做了写 [取消任务] {tasks.ref(t)} 原因。\n不写标记它就一直跑，没人管会升级给主控 ---")
     elif e["kind"] == "blocked":
@@ -3043,8 +3185,8 @@ def task_relay(ev):
         relaying.discard((n, idx))
 
 PM_RELAY_TAIL = ("--- 你是这个项目的项目经理，这条回报先到你这里。能自己收尾的先办（[任务指令] 回答提问或让它接着干；做完了又叫它接着干的，正文加一行“原因: X”，X 从 " + "、".join(retro.CAUSES) + " 里选，复盘用；"
-                 "补建合并请求、修补动作）。然后二选一：要让主控知道，单独一行 [投递 主控 完成]（提问你定不了就 [投递 主控 问题]），"
-                 "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把后面的任务写进这个版本的 [方案]（重发同名的），主控办完转回来时只能派登记过的；不用上交，单独一行 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
+                 "补建合并请求、修补动作）。然后二选一：要让主控知道，用 tasks.py do 交 [投递 主控 完成]（提问你定不了就 [投递 主控 问题]），"
+                 "下一行起写结论行和合并请求链接；要主控先合并、部署才能往下走的，这一轮就把后面的任务写进这个版本的 [方案]（重发同名的），主控办完转回来时只能派登记过的；不用上交，用 tasks.py do 交 [处理掉] 理由。两样都没写，服务替你投一条完成给主控。"
                  "其余文字只进运行记录，不发给任何人 ---")
 ABSORB_RE = re.compile(r"^\s*\[处理掉\]\s*(.*)$", re.M)
 MR_RE = re.compile(r"https?://\S+?/(?:pull|merge_requests|change)s?/\d+")
@@ -3070,7 +3212,7 @@ def pm_relay(ev):
                 prompt = pm_head(pm, key, s) + relay_prompt(t, e, n in (s.get("briefed") or []), PM_RELAY_TAIL)
                 if STRICT: prompt = with_board(s, prompt, pm, owner)
                 result = run_claude(key, s, prompt, owner, owner and t["origin"]["chat_type"] == "p2p", t["origin"]["chat_id"],
-                                    quiet=True, layer=pm, hop=hop)
+                                    quiet=True, layer=pm, hop=hop, idem=f"pm{n}e{idx}")
         except QuotaOut: return
         except Exception:
             log.exception("task #%s pm relay failed", n)
