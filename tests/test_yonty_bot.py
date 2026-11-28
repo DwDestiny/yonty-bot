@@ -832,6 +832,39 @@ class TaskTest(unittest.TestCase):
             self.assertEqual(got, ['中途'])
         finally: self.b.CLAUDE_TIMEOUT = old
 
+    def hook_turn(self, final, after=None):
+        """一轮：写完答案想收尾，被 Stop 钩子拦下，接着干活，再收尾（2026-11-27 问公司地址那一轮的形状）。"""
+        say = lambda x: {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': x}]}}
+        hook = {'type': 'user', 'isSynthetic': True, 'message': {'content': [{'type': 'text', 'text': 'Stop hook feedback:\n派 wiki-writer 落库'}]}}
+        tool = {'type': 'assistant', 'message': {'content': [{'type': 'tool_use', 'name': 'Agent', 'input': {}}]}}
+        res = lambda x: {'type': 'result', 'subtype': 'success', 'result': x, 'session_id': 's', 'usage': {}}
+        ev = [{'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '正在查。'}]}}, tool, say('地址是人民路 1 号。'), hook, tool, say(final), res(final)]
+        return ev + (after or [])
+
+    def test_stop_hook_does_not_swallow_answer(self):
+        got = []
+        _, text, _, _ = self.b.stream_claude(self.fake_stream(self.hook_turn('[不回]')), 'p', dict(os.environ), got.append)
+        self.assertEqual((got, text), ([], '地址是人民路 1 号。'))         # 收尾是 [不回]：发拦下前那段
+        _, text, _, _ = self.b.stream_claude(self.fake_stream(self.hook_turn('地址是人民路 1 号。\n已记录')), 'p', dict(os.environ), None)
+        self.assertEqual(text, '地址是人民路 1 号。\n已记录')               # 收尾里重说了：不发两遍
+        _, text, _, _ = self.b.stream_claude(self.fake_stream(self.hook_turn('已记进 wiki。')), 'p', dict(os.environ), None)
+        self.assertEqual(text, '地址是人民路 1 号。\n\n已记进 wiki。')       # 收尾说了别的：两段都发，答案在前
+        wake = [{'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': '[不回]'}]}},
+                {'type': 'result', 'subtype': 'success', 'result': '[不回]', 'session_id': 's', 'usage': {}}]
+        got = []   # 子代理交回又叫醒一次、又是 [不回]：答案已经交出去，不丢
+        _, text, _, _ = self.b.stream_claude(self.fake_stream(self.hook_turn('[不回]', wake)), 'p', dict(os.environ), got.append)
+        self.assertEqual((got, text), (['地址是人民路 1 号。'], '[不回]'))
+
+    def test_stop_hook_answer_reaches_chat(self):
+        fake = self.fake_stream(self.hook_turn('[不回]'))
+        ob, op = self.b.base_cmd, self.b.prime
+        self.b.base_cmd = lambda stream=False: list(fake)
+        self.b.prime = lambda sid: subprocess.CompletedProcess([], 0, '', '')
+        self.sent.clear()
+        try: self.b.handle(self.ev('那家公司的登记地址是哪', chat='oc_hook', chat_type='p2p'))
+        finally: self.b.base_cmd, self.b.prime = ob, op
+        self.assertEqual([s[1] for s in self.sent if s[0] != 'lark'], ['地址是人民路 1 号。'])
+
     def test_chat_extra_results_are_replied(self):
         def fake(key, s, prompt, owner, private, chat_id, quiet=False, on_extra=None, **k):
             on_extra('等 CI 中，先报一声'); return '好了'

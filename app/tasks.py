@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """长任务：派活、审批状态、后台运行、进度事件。
 
-Input:  同目录 config.json；bridge.py 调用本模块的函数；python3 tasks.py run <id>（后台单元的入口）
+Input:  同目录 config.json；bridge.py 调用本模块的函数；python3 tasks.py run <id>（后台单元的入口）；
+        聊天会话用的命令行：send、act、do（标记块从标准输入交给 bridge，3.21）、inbox、res
 Output: state/tasks/<id>/ 下的 task.json（任务状态）、events.jsonl（要发回聊天的事件）、inbox.jsonl（追加指令）、
         stream.log（Claude 原始输出）；任务工作树 <tasks.root>/<服务名>/<id>，分支 bot/<短名>-<N>-<月日>
         <id> 是内部句柄（目录名、单元名、FCB_TASK_ID）；对人一律显示“短名#N”：每个项目（仓库）各自从 1 编，见 ref()
@@ -2700,13 +2701,18 @@ def cli(cmd, argv):
         print(res.line(res.snapshot(ROOT), run_, q, ql))
     elif cmd == "act":
         _mod("actions").cli(_me(), argv)
+    elif cmd == "do":   # 办事的标记块从标准输入交给服务，这一轮收尾时执行（3.21）
+        r = ask_bridge({"op": "do", "text": sys.stdin.read()})
+        if r is None: sys.exit("服务没在跑，没收下。")
+        if r.get("err"): sys.exit(r["err"])
+        print(r.get("ok", ""))
 
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "run":
         run(int(sys.argv[2]))
     elif len(sys.argv) >= 2 and sys.argv[1] == "mr":
         print(create_mr(sys.argv[2:]))
-    elif len(sys.argv) >= 2 and sys.argv[1] in ("inbox", "send", "res", "act"):
+    elif len(sys.argv) >= 2 and sys.argv[1] in ("inbox", "send", "res", "act", "do"):
         cli(sys.argv[1], sys.argv[2:])
     elif len(sys.argv) in (2, 3) and sys.argv[1] == "diag":
         diag(sys.argv[2] if len(sys.argv) == 3 else "")
